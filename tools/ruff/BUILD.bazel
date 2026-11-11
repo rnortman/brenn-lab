@@ -1,0 +1,44 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+config_setting(
+    name = "linux_x86_64",
+    constraint_values = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
+)
+
+config_setting(
+    name = "linux_aarch64",
+    constraint_values = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:linux",
+    ],
+)
+
+# The ruff binary for the platform this runs on. The test, the fixer and the
+# format hook all run on the host, so the target platform is the host here.
+alias(
+    name = "ruff",
+    actual = select(
+        {
+            ":linux_aarch64": "@ruff_aarch64_linux//:ruff",
+            ":linux_x86_64": "@ruff_x86_64_linux//:ruff",
+        },
+        no_match_error = """no pinned ruff release archive for this platform.
+Only linux x86_64 and linux aarch64 are pinned; add an http_archive for the
+platform in MODULE.bazel and a branch to this select().""",
+    ),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["ruff_check.sh"])
+
+# `bazel run //tools/ruff:fix`: ruff check --fix, then ruff format, over the
+# whole working tree.
+sh_binary(
+    name = "fix",
+    srcs = ["ruff_fix.sh"],
+    args = ["$(rootpath :ruff)"],
+    data = [":ruff"],
+)

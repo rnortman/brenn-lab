@@ -1,0 +1,57 @@
+# Bazel flags for this repo. bzlmod only; there is no WORKSPACE file.
+
+# --- Correctness posture ---
+build --spawn_strategy=sandboxed
+# The one exception: a test tagged no-sandbox runs locally. //:buildifier_test
+# and //:ruff_test are those tests; each walks the whole workspace, which no
+# sandbox can show it.
+test --strategy=TestRunner=sandboxed,local
+build --incompatible_strict_action_env
+# No network for build and test actions. A target that genuinely needs the
+# network is tagged `requires-network`; the one such target is the lock
+# action behind `bazel run //:requirements.update`.
+build --sandbox_default_allow_network=false
+common --incompatible_disallow_empty_glob
+test --test_output=errors
+test --test_summary=terse
+# Local default refreshes the module lockfile; CI overrides with
+# --lockfile_mode=error so resolution drift is a red build there.
+common --lockfile_mode=update
+
+# --- Caching ---
+# `common`, so a `common --disk_cache` in .bazelrc.user replaces it.
+common --disk_cache=~/.cache/brenn-lab-bazel-disk
+common --experimental_disk_cache_gc_max_size=10G
+common --experimental_disk_cache_gc_max_age=30d
+
+# --- Python launcher ---
+# The default launcher starts with `#!/usr/bin/env python3`, so it needs a
+# host Python just to start the hermetic one. `script` is a bash stub that
+# execs the hermetic interpreter directly.
+common --@rules_python//python/config_settings:bootstrap_impl=script
+
+# --- No host C/C++ toolchain probe ---
+# py_binary and py_test resolve the C++ toolchain type optionally; without
+# this, rules_cc's autodetection probes the host compiler to set up a
+# repository nothing uses.
+common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+
+# --- Lint ---
+# The type-checking lane, as an aspect over whatever targets are asked for.
+# Behind a config so an inner-loop build does not pay for it; `make check`
+# turns it on.
+build:lint --aspects=//tools/mypy:aspects.bzl%mypy_aspect
+build:lint --output_groups=+mypy
+
+# --- Test lanes ---
+# Tests that need a device attached (`hardware`) or that play sound or move a
+# robot (`audible`) never run in an ordinary `bazel test`, whoever types it.
+# `make hardware-test` and `make audible-test` replace this filter.
+test --test_tag_filters=-hardware,-audible
+
+# Per-developer flags, gitignored. Imported last, so a line there overrides a
+# line here for the same command; a `common` line there does not override a
+# `build` or `test` line here, because Bazel applies every `common` line before
+# any `build` line. The home rc (~/.bazelrc) is read after this whole file,
+# under the same rule.
+try-import %workspace%/.bazelrc.user

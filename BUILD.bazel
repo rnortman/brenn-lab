@@ -1,0 +1,67 @@
+load("@buildifier_prebuilt//:rules.bzl", "buildifier", "buildifier_test")
+load("@rules_python//python/uv:lock.bzl", "lock")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+exports_files([
+    "MODULE.bazel",
+    "mypy.ini",
+    "ruff.toml",
+])
+
+# BUILD-file formatting and lint. The test scans the whole workspace rather
+# than a `srcs` list because a glob in the root package cannot see files in
+# other packages; `no_sandbox` is what buildifier_prebuilt requires for that,
+# and the wrapper tags the test no-cache so it always reruns.
+BUILDIFIER_EXCLUDES = [
+    "./.git/*",
+    "./bazel-*/*",
+]
+
+buildifier(
+    name = "buildifier",
+    exclude_patterns = BUILDIFIER_EXCLUDES,
+    lint_mode = "fix",
+    mode = "fix",
+)
+
+buildifier_test(
+    name = "buildifier_test",
+    size = "small",
+    exclude_patterns = BUILDIFIER_EXCLUDES,
+    lint_mode = "warn",
+    mode = "diff",
+    no_sandbox = True,
+    workspace = "//:MODULE.bazel",
+)
+
+# `bazel run //:requirements.update` rewrites requirements_lock.txt from
+# requirements.in, with the pinned uv and the hermetic interpreter. The lock
+# action carries `requires-network` and `manual` itself, so it is the one
+# action that reaches the network and `bazel test //...` never runs it.
+lock(
+    name = "requirements",
+    srcs = ["requirements.in"],
+    out = "requirements_lock.txt",
+    args = ["--universal"],
+)
+
+# Python format and lint over every Python file in the working tree, including
+# files no target owns. Unsandboxed for the same reason as //:buildifier_test.
+sh_test(
+    name = "ruff_test",
+    size = "small",
+    srcs = ["//tools/ruff:ruff_check.sh"],
+    args = [
+        "$(rootpath //tools/ruff)",
+        "$(rootpath //:MODULE.bazel)",
+    ],
+    data = [
+        "//:MODULE.bazel",
+        "//tools/ruff",
+    ],
+    tags = [
+        "external",
+        "no-cache",
+        "no-sandbox",
+    ],
+)

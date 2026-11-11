@@ -1,0 +1,7 @@
+# The one ruff configuration, for //:ruff_test, //tools/ruff:fix and the
+# format hook alike. target-version moves with PYTHON_VERSION in MODULE.bazel.
+target-version = "py314"
+line-length = 100
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]

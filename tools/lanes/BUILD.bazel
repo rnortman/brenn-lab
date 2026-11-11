@@ -1,0 +1,26 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# One canary per lane. Each carries its lane's tag, so the default filter in
+# .bazelrc keeps it out of every ordinary `bazel test`; and `external`, so a
+# lane result is never served from cache.
+sh_test(
+    name = "hardware_lane_canary",
+    size = "small",
+    srcs = ["lane_canary.sh"],
+    args = ["hardware"],
+    tags = [
+        "external",
+        "hardware",
+    ],
+)
+
+sh_test(
+    name = "audible_lane_canary",
+    size = "small",
+    srcs = ["lane_canary.sh"],
+    args = ["audible"],
+    tags = [
+        "audible",
+        "external",
+    ],
+)

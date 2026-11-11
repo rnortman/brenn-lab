@@ -1,0 +1,20 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("//tools/pytest:defs.bzl", "py_pytest_test")
+
+py_library(
+    name = "placeholder",
+    srcs = [
+        "__init__.py",
+        "placeholder.py",
+    ],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+    deps = ["@pypi_lab//numpy"],
+)
+
+py_pytest_test(
+    name = "placeholder_test",
+    size = "small",
+    srcs = ["placeholder_test.py"],
+    deps = [":placeholder"],
+)

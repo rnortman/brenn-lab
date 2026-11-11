@@ -1,0 +1,21 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# Holds the Python version pins that live in more than one file equal.
+sh_test(
+    name = "pins_test",
+    size = "small",
+    srcs = ["pins_test.sh"],
+    data = [
+        "//:MODULE.bazel",
+        "//:mypy.ini",
+        "//:ruff.toml",
+        "//tools/mypy:BUILD.bazel",
+    ],
+    env = {
+        "MODULE_BAZEL": "$(rlocationpath //:MODULE.bazel)",
+        "MYPY_BUILD": "$(rlocationpath //tools/mypy:BUILD.bazel)",
+        "MYPY_INI": "$(rlocationpath //:mypy.ini)",
+        "RUFF_TOML": "$(rlocationpath //:ruff.toml)",
+    },
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)

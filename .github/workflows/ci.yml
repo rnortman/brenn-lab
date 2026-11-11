@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The job only reads the tree. Pinned here so a permissive repo-level default
+# cannot silently hand a write-capable token to cached actions or anything
+# `make check` executes.
+permissions:
+  contents: read
+
+jobs:
+  # Named for its role rather than its contents: the required-status-check rule
+  # on the branch embeds this string, so renaming it later silently makes that
+  # rule vacuous.
+  # TODO(owner-bootstrap-steps): the ruleset requiring this check is configured
+  # when the repository is first pushed.
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    # A cold cache fetches the Python, Rust and LLVM toolchains and compiles
+    # the two gate tools' dependency closures once.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # No Python or Rust toolchain step and no scanner install: everything
+      # this job builds, tests, lints, type-checks and scans goes through Bazel,
+      # which fetches its own pinned interpreter, packages, toolchains,
+      # brenn-scrub and gitleaks by checksum. bazelisk is preinstalled on the
+      # runner image and reads .bazelversion, so the Bazel here is the one the
+      # tree pins rather than the image's.
+
+      # The two caches answer different questions and invalidate on different
+      # things. The repository cache holds fetched archives, Bazel's repo
+      # contents cache under its contents/ directory (every external
+      # repository fully extracted, the LLVM toolchain alone many gigabytes),
+      # and bazelisk's download of the Bazel that .bazelversion names, so both
+      # cache keys hash every file that pins one: MODULE.bazel, its lock,
+      # .bazelversion, requirements_lock.txt and the two gate tools'
+      # Cargo.lock files. A new pin file joins the list here, once. The disk
+      # cache holds action outputs, which change with every commit, so it is
+      # restored from the nearest earlier run and written back fresh.
+      #
+      # Both restore by prefix when the exact key misses. Entries in either
+      # cache are named by their own hash, so a stale entry is either still
+      # wanted or never looked up. Dead entries accumulate and nothing here
+      # removes them: the disk-cache and repo-contents-cache GC acts only
+      # after the Bazel server has sat idle for minutes, which never happens
+      # in this job. If the shared actions-cache budget starts thrashing, bump
+      # the key prefixes to start clean.
+      # TODO(efficiency-ci-disk-cache-grows-without-bound): bound the saved
+      # disk cache in the workflow itself.
+      # TODO(efficiency-ci-repo-cache-carries-extracted-toolchains-unbounded):
+      # bound the saved repository cache, extracted repositories included.
+      - name: Hash the pin files
+        id: pins
+        run: echo "hash=${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelversion', 'requirements_lock.txt', 'tools/scrub/Cargo.lock', 'tools/allthechanges/Cargo.lock') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Bazel repository cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/bazel-repo
+            ~/.cache/bazelisk
+          key: bazel-repo-${{ steps.pins.outputs.hash }}
+          restore-keys: |
+            bazel-repo-
+
+      - name: Cache Bazel disk cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/bazel-disk
+          key: bazel-disk-${{ steps.pins.outputs.hash }}-${{ github.sha }}
+          restore-keys: |
+            bazel-disk-${{ steps.pins.outputs.hash }}-
+            bazel-disk-
+
+      # Written rather than tracked, because these are facts about this runner,
+      # not about the project. The file is the per-developer override the
+      # tracked .bazelrc already try-imports, so the gate command itself is
+      # unchanged from the one a developer runs.
+      #
+      # --lockfile_mode=error is the one behavioural difference from a local run,
+      # and it is deliberate: locally the lockfile refreshes, here a resolution
+      # that does not match the committed lock is a red build.
+      - name: Configure Bazel for CI
+        run: |
+          cat >> .bazelrc.user <<EOF
+          common --repository_cache=$HOME/.cache/bazel-repo
+          common --disk_cache=$HOME/.cache/bazel-disk
+          common --lockfile_mode=error
+          common --show_timestamps
+          common --color=no
+          common --curses=no
+          test --keep_going
+          EOF
+
+      # The make check a developer runs. No step of it is skipped here: nothing
+      # is installed on the runner, so no tool can be missing.
+      - run: make check

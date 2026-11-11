@@ -1,0 +1,33 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+load("//tools/pytest:defs.bzl", "py_pytest_test")
+
+py_library(
+    name = "format_hook",
+    srcs = ["format_hook.py"],
+    imports = ["."],
+    deps = ["@rules_python//python/runfiles"],
+)
+
+# `bazel run //tools/format:hook` with a Claude Code PostToolUse JSON on stdin:
+# formats the one file it names with the pinned ruff or buildifier, the same
+# binaries the gate checks with.
+py_binary(
+    name = "hook",
+    data = [
+        "//tools/ruff",
+        "@buildifier_prebuilt//:buildifier",
+    ],
+    env = {
+        "BUILDIFIER_BIN": "$(rlocationpath @buildifier_prebuilt//:buildifier)",
+        "RUFF_BIN": "$(rlocationpath //tools/ruff)",
+    },
+    main_module = "format_hook",
+    deps = [":format_hook"],
+)
+
+py_pytest_test(
+    name = "format_hook_test",
+    size = "small",
+    srcs = ["format_hook_test.py"],
+    deps = [":format_hook"],
+)

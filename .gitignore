@@ -1,0 +1,82 @@
+# Globs here are deliberately wide. An uncovered artifact is one `git add .` away
+# from becoming tracked content that has to be scrubbed back out again.
+
+# Bazel's convenience symlinks, any output base or cache placed inside the tree,
+# and per-developer flag files. MODULE.bazel.lock and requirements_lock.txt are
+# tracked; these are not.
+bazel-*
+.bazel-*
+/.bazelrc.user
+
+# Python bytecode, virtual environments and tool caches. Bazel is the build;
+# a stray interpreter or editor integration still produces these.
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Capture and run artifacts. Recordings never enter the repository; a
+# synthetic fixture is re-included by its own named `!` line.
+# Audio.
+*.wav
+*.flac
+*.ogg
+*.opus
+*.mp3
+*.m4a
+*.aac
+*.pcm
+*.raw
+*.w64
+*.caf
+# Arrays and containers a run may write.
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.parquet
+*.mcap
+*.pcap
+# Logs and streams.
+*.log
+*.jsonl
+logs/
+# Run and capture directories. These and `logs/` match at any depth, so a
+# source package must not take one of these names: git, ruff and the tree scan
+# would all skip it while the local Bazel build still sees it.
+# TODO(correctness-gitignore-run-dirs-hide-source-packages): anchor these to
+# where runs are written once that is decided.
+runs/
+captures/
+recordings/
+framelogs/
+segments/
+
+# Per-machine tool configuration that names local paths.
+*.local.toml
+.local/
+
+# Personal Claude Code settings (settings.json is shared).
+.claude/settings.local.json
+
+# Local secret-scanner rule overrides. Never content in this repo.
+.gitleaks.local.toml
+
+# Per-checkout agent context (CLAUDE.md and AGENTS.md are shared).
+CLAUDE.local.md
+
+# Editor and OS noise.
+*.swp
+*~
+.vscode/
+.idea/
+.DS_Store
+
+# allthechanges reads every entry in the fragment directories whose name does
+# not start with a dot, so git sees every such entry too: a fragment the globs
+# above would hide (a `bazel-…` slug) is committed, and a stray file shows in
+# `git status` instead of being gathered unseen.
+!/changelog.d/[!.]*
+!/todo.d/[!.]*

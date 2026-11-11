@@ -1,0 +1,18 @@
+load("@rules_mypy//mypy:mypy.bzl", "mypy_cli")
+
+# //tools/pins:pins_test reads this file's python_version.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//tools/pins:__pkg__"],
+)
+
+# rules_mypy's runner on the repo's own interpreter, with mypy from the repo's
+# lock rather than rules_mypy's pinned copy. Tagged no-mypy so the aspect does
+# not type-check rules_mypy's own runner script. python_version moves with
+# PYTHON_VERSION in MODULE.bazel.
+mypy_cli(
+    name = "mypy_cli",
+    mypy_requirement = "@pypi_lab//mypy",
+    python_version = "3.14",
+    tags = ["no-mypy"],
+)
