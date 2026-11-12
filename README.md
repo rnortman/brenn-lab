@@ -9,6 +9,8 @@ It is built for many devices on many machines. No experiment assumes one
 microphone, one speaker, one sample rate or one host, and a device's stream
 need not be audio: pose, fault and status streams are data too.
 
+<!-- TODO(cross-machine-control-waits-on-bus-blob-transfer): control of devices on other machines starts from the owner's answer to this entry. -->
+
 ## Status
 
 Scaffolding only. The repository has its build, its gates and a placeholder
