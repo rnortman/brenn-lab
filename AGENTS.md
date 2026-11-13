@@ -26,6 +26,12 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
   Bazel dependency. If a tool is genuinely impractical to bring in through
   Bazel, pick a different tool, and if that is not possible either, surface it
   as a decision rather than adding a host dependency.
+- One host library is loaded at run time, and the build ships none: ALSA's
+  runtime, `libasound.so.2`. The pinned recorder loads it, and so does the
+  runner's own interpreter when it hosts a playback role, through
+  `brenn_lab/playback/alsa.py` and nowhere else. Nothing in `make check`
+  loads it (see Test lanes; the owner's question is
+  `lanes-load-host-alsa-runtime`).
 - The one place the build reads this tree's git state is the workspace status
   command, `tools/buildinfo/status.sh`, which `.bazelrc` names; it stamps the
   runner with the commit and cleanliness of the tree it was built from. The
@@ -120,7 +126,12 @@ A lane is a Bazel tag. Two lanes exist, and neither runs under `make check`:
   time, so this lane needs no permission to run.
 - `audible`: a test that plays sound or moves a robot, a robot's speaker and
   motors included. A test is in one lane: an audible test is tagged `audible`
-  only, even when it also needs a device.
+  only, even when it also needs a device. A test that hands a frame to a
+  real output device is `audible`, whatever the samples: a mute nobody has
+  verified is not silence. A dry run of a playback role opens its output
+  without writing to it. Nobody has yet listened to such an open, so a dry
+  run of a playback role on a real output is made only inside an agreed
+  window (`output-open-not-listened-to`).
 
 Every lane test also carries `external`, so a result that depends on a device
 is never served from cache.
@@ -134,11 +145,22 @@ is never served from cache.
   `tools/lanes/` pass only inside their lane and fail the default check if the
   filter ever stops excluding them.
 - A lane test that records runs the pinned recorder, which loads the host's
-  ALSA runtime library (`libasound.so.2`). That library is a prerequisite of
-  the lanes and of running the pinned recorder, and of nothing in
-  `make check`. The capture role's lane test,
+  ALSA runtime library (`libasound.so.2`). A lane test that plays, or drives
+  the playback role's ALSA code without playing, loads it in its own process
+  through `brenn_lab/playback/alsa.py`. That library is a prerequisite of
+  the lanes, of running the pinned recorder and of a playback role, and of
+  nothing in `make check`. The capture role's lane test,
   `//brenn_lab:capture_flex_hardware_test`, needs a reSpeaker Flex XVF3800 on
-  its six-channel USB image; without it the lane fails.
+  its six-channel USB image; without it the lane fails. The playback role's
+  lane test, `//brenn_lab:playback_flex_audible_test`, needs that Flex with a
+  speaker on its output and with no firmware on the board's XIAO ESP32 module
+  that configures the XVF3800. With such firmware on the module the board has
+  taken every frame written to it and played nothing.
+- The Flex's PCMs have one opener per lane. In each lane one test target
+  opens a PCM of the Flex: `capture_flex_hardware_test` in `hardware`,
+  `playback_flex_audible_test` in `audible`. Another test that opens one is
+  added to that target, or both are tagged `exclusive`. The two lanes never
+  run in one `bazel test`.
 - Hardware-in-the-loop tests assert the expected behaviour and are allowed to
   fail. They are not throwaway probes. An unexpected hardware reading goes to
   the maintainer before any test is changed to pass.

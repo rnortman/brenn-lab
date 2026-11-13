@@ -7,10 +7,11 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Place:
-    """A hosted role's directories in its run: what it records, and the output
-    of the programs it calls; and a way to add a line to the runner's log.
+    """A hosted role's directories in its run: its data, under its kind's
+    section, and the output of the programs it calls; and a way to add a line
+    to the runner's log.
     """
 
-    captures: Path
+    data: Path
     logs: Path
     note: Callable[[str], None]

@@ -71,7 +71,6 @@ hardware-test:
 # Anything audible needs the maintainer's agreement on when. WINDOW is a speed
 # bump, not an enforcement: it keeps the lane off tab completion and puts the
 # rule on screen at the moment it matters.
-# TODO(first-audible-run-needs-a-window)
 .PHONY: audible-test
 audible-test:
 	@if [[ "$(origin WINDOW)" != "command line" || -z "$(WINDOW)" ]]; then \

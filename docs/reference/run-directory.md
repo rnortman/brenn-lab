@@ -17,7 +17,7 @@ start a run is in `experiments.md`.
   lab/<file name>      the lab configuration as read, byte for byte
   notes/<file name>    the caller's free-form notes, if any were given
   captures/<role>/<NNNN>.framelog
-  sources/<role>/…     reserved
+  sources/<role>/<NNNN>.wav
   streams/<role>/…     reserved
   logs/runner.log
   logs/<role>/recorder-<NNNN>.stdout.jsonl
@@ -33,6 +33,14 @@ start a run is in `experiments.md`.
   `pod-capture`, wrote: a frame log in brenn-pod's format, read with brenn-pod's
   `frame-log` tool. A start that failed after the recorder created its file can
   leave a file here that the manifest and results name nowhere.
+- `sources/<role>/<NNNN>.wav` is the **kept copy** of a playback role's play
+  `<NNNN>`, numbered from `0001` like captures: a WAV holding exactly the
+  frames the role handed the device, in order. The role plays from this file,
+  so it is what was sent. It is written and synced before the play starts,
+  and only once the play has passed its limits: a play refused for its
+  source, the cap or quiet hours leaves nothing. A play that fails after
+  that, at the open or at the controls, leaves a copy the manifest and
+  results name nowhere, and its number is used.
 - `logs/<role>/recorder-<NNNN>.stdout.jsonl` is the recorder's stdout as it
   printed it, one JSON event line per line. `…stderr.log` is its stderr. Both
   are copied as they arrive. A device probe (the dry run's `check`) leaves no
@@ -55,11 +63,10 @@ the file.
 
 ### Reserved names
 
-`sources/` (exact copies of what was sent to each output, per playback role)
-and `streams/` (other recorded streams such as pose, status and faults, per
-role) are **reserved**. Their names and meanings are fixed by layout 1, and no
-code in this version creates them. The manifest's and the results' keys
-`sources` and `streams` are reserved the same way.
+`streams/` (other recorded streams such as pose, status and faults, per role)
+is **reserved**. Its name and meaning are fixed by layout 1, and no code in
+this version creates it. The manifest's and the results' key `streams` is
+reserved the same way.
 
 ### The version rule
 
@@ -143,7 +150,7 @@ this repository's build pins is such a build: it reports `source` `declared`,
 ## `manifest.json`
 
 Written when the run directory is created, and rewritten whole (to a
-temporary file, then a rename) each time a capture starts.
+temporary file, then a rename) each time a capture or a play starts.
 
 ```json
 {"layout": 1,
@@ -164,6 +171,7 @@ temporary file, then a rename) each time a capture starts.
    "kind": "capture", "machine": "bench",
    "configured": {…roles.mic.device…},
    "stated_by_configuration": {…roles.mic.stated…},
+   "sample_clock": null,
    "captures": [{…a capture entry…}]}}}
 ```
 
@@ -193,8 +201,17 @@ temporary file, then a rename) each time a capture starts.
   - `stated_by_configuration`: the configuration's free-form `stated` table,
     what a person says about the device. It is a statement, never a reading.
     `null` when the configuration states nothing.
-  - `captures`: one entry per capture whose start the recorder reported, in
-    order; empty until one starts.
+  - `sample_clock`: the configuration's `roles.<r>.sample_clock`, or `null`.
+    Two roles with the same name here are stated to sample on one clock; a
+    statement, never a reading.
+  - One key more, the role's kind's section, holding its entries: for a
+    capture role, `captures`, one entry per capture whose start the recorder
+    reported, in order; for a playback role, `sources`, one entry per play
+    started, in order. Each is empty until one starts. A role has its own
+    kind's key and no other kind's.
+- Nothing is added to `repositories` by a play: no other repository's code
+  plays. The host's ALSA library is named with its version in every source
+  entry.
 
 ### A capture entry
 
@@ -238,6 +255,47 @@ later appears here too.
   layout equal to the one it sent, and `granted.channels` equal to its
   length; a capture where they differ fails with `recorder_contract`.
 - `start`: the recorder's reading at the start of the capture.
+
+### A source entry
+
+```json
+{"play": 1,
+ "source": {"name": "clip.wav", "sha256": "…", "frames": 312000, "rate_hz": 16000,
+            "channels": 2, "sample_format": "s16_le", "peak_mb": -602},
+ "output": {"kind": "alsa", "library": {"name": "libasound.so.2", "version": "1.2.13"}},
+ "device": {…as in a capture entry…},
+ "granted": {"rate_hz": 16000, "channels": 2, "sample_format": "s16_le",
+             "period_frames": 320, "buffer_frames": 8000},
+ "controls": [{"element": "PCM", "index": 1, "part": "level",
+               "channels": [{"channel": "Front Left", "volume_mb": -1800, "switch": true}, …]}, …],
+ "found": [{…the same shape, as found…}],
+ "level_mb": -1800, "cap_mb": -1800,
+ "local_time": "2026-11-13T14:38:31-05:00",
+ "first": {"frames_handed": 1600, "delay_frames": 1600, "at": {…clock reading…}},
+ "file": {…pointer…}}
+```
+
+The entry is the role's `playback.started` result with its `copy` replaced by
+`file`, the pointer to the kept copy. `experiments.md`, *The playback kind*,
+says what each field means.
+
+- `source` is the file the script named, as the role read it. `peak_mb` is
+  its largest sample magnitude relative to full scale, rounded up, `null` for
+  silence.
+- `level_mb` is the level at which a full-scale sample is played: the level
+  control's volume plus the held controls', from the values read back. It is
+  what the cap bounds. **The play's own peak level** is
+  `level_mb + source.peak_mb`, relative to the loudest the device's output can
+  be driven; no field carries it.
+- `controls` are the controls as the role set and read them back, on every
+  channel; `found` is how they stood before the role moved them, which is
+  what the role restores.
+- `output.library` is the host's ALSA library, which the build does not pin,
+  with the version it reported.
+- `first` is a **mark**: the frames handed so far, the device's own delay
+  reading then, and the role's clock reading directly after. Frame
+  `frames_handed − delay_frames` of the kept copy is, by the device's
+  account, at its output at `at`.
 
 ### The harness's revision
 
@@ -297,6 +355,8 @@ them is such a write left unfinished, and is not part of the record.
    "gaps": [], "late": [],
    "loss_free": true, "failure": null,
    "end": {…clock reading…}}],
+ "played": {"plays_started": 0, "plays_completed": 0, "frames_handed": 0},
+ "sources": [],
  "roles": {"mic": {"kind": "capture", "commands": 3, "failures": []}},
  "usability": {"assessed": false, "reason": "this harness version makes no usability assessment"}}
 ```
@@ -318,8 +378,8 @@ them is such a write left unfinished, and is not part of the record.
     - anything else that left the script's `run`: `where` `script`, `reason`
       `script_error`, `detail` `"<ExceptionType>: <message>"`, `role` `null`;
       the traceback is in `logs/runner.log`;
-    - `release` finding a capture still running: `where` `runner`, `reason`
-      `left_running`, with the role.
+    - `release` finding a capture or a play still running: `where`
+      `runner`, `reason` `left_running`, with the role.
 
   A run that did not complete always names a failure.
 - `started`, `ended`: the runner's readings when the run started and when the
@@ -348,6 +408,31 @@ them is such a write left unfinished, and is not part of the record.
   - `failure`: `null`, or the role's failure as it crossed the seam,
     `{reason, detail, data}`. It is not a seven-key problem.
   - `end`: the recorder's reading at the stop; `null` for a failed capture.
+- `played` answers "did this run play anything": `plays_started` counts the
+  plays whose start was reported, `plays_completed` those of them that ended
+  `completed`, and `frames_handed` sums every play's frames handed to its
+  device. A run with no playback role has all three 0.
+- `sources`: one record per play whose start was reported, by role and
+  number. A play refused at its start has no record.
+  - `file`: the pointer to the kept copy. `source`: `{name, sha256}` of the
+    file the script named.
+  - `ended`: `completed` (the source was handed over whole and the device
+    played its buffer out), `stopped` or `failed`.
+  - `stopped_by`: `script`, or `runner` when the runner cut the play at
+    `release`; `null` otherwise.
+  - `frames`: the kept copy's frames. `frames_handed`: how many of them were
+    handed to the device. `unplayed_frames`: the device's delay read just
+    before a cut, the handed frames that were discarded; 0 for a completed
+    play, `null` when it could not be read.
+  - `underruns`: every underrun, `{at_frame, at, detail}`. Sound was
+    interrupted at `at_frame` for an unknown length.
+  - `as_sent`: true only when the play ended `completed` with no underrun:
+    the device took every frame of the copy as given.
+  - `first`, `last`: the marks after the first and the last write. `end`: the
+    role's reading once the stream was closed.
+  - `restored`: whether the role put every control back as found
+    (`experiments.md`, *The cap*, says what false means).
+  - `failure`: `null`, or the role's failure as it crossed the seam.
 - `roles.<r>`:
   - `commands`: every command the role was sent, the runner's `release`
     included: the number of that role's command lines in the journal.
@@ -379,6 +464,24 @@ described in `experiments.md`, *Failure reasons*.
 | `not_configured`, `kind_mismatch` | empty |
 | `script_error`, `left_running`, `interrupted` | empty |
 
+A playback role's reasons carry their own data. Where a name is also one of
+the capture kind's, this table holds for a playback role's failure:
+
+| Reason | `data` |
+|---|---|
+| `no_card`, `ambiguous_card` | `selector`, the configured `card`; `cards`, each `{index, name, long_name}`; for `ambiguous_card`, `matched`, the matching cards' indices. Empty when the cards could not be enumerated |
+| `no_control`, `unheld_control` | `{controls}`, each `{element, index}` |
+| `volume_range` | `control`, the control as `'<element>' index <n>`; `min_mb` and `max_mb` when it has a volume |
+| `over_cap` | `{level_control_mb, held_mb, level_mb, cap_mb}`: the level control's volume, the held controls' sum, their total, and the cap |
+| `quiet_hours` | `{start, end, local_time, seconds}`: the span, the local time judged by, and the seconds of play judged (0 for a check between chunks) |
+| `open` | `{pcm}`, the device opened |
+| `params` | `{rate_hz, channels, sample_format}`: what was granted when the grant differed, what was asked when the device refused it |
+| `controls` | `{controls}`: every control as read back, in `playback.started`'s shape |
+| `controls_moved` | `{control}`, the control that moved; empty when the controls could not be read |
+| `source_changed` | `{sha256}`: the hash the source had when it was judged |
+| `unknown_command` | `{command}` |
+| `source_outside`, `source_missing`, `source_format`, `alsa_missing`, `mixer`, `stream_died`, `role_io`, `role_error`, `already_playing`, `not_playing` | empty |
+
 After `write_stalled` the frame log's completeness was not established;
 brenn-pod's `frame-log` tool is the reader that can say more.
 
@@ -390,3 +493,31 @@ end of a run. If the runner itself is killed outright (SIGKILL, a power
 loss), the recorder keeps recording and keeps the device, and the next start
 on that device fails with `open`. Find its pid in `logs/runner.log` and send
 it SIGTERM. It then stops cleanly and finishes its frame log.
+
+## The same device played and recorded
+
+`sample_clock` states that two roles sample on one clock; nothing checks it.
+For a playback role and a capture role on one device that state the same
+`sample_clock`, the run records:
+
+- for each play, the kept copy, the frames handed to the device, every
+  underrun with its frame, and two marks, `first` and `last`, each tying a
+  frame count to the machine's monotonic clock and to the device's delay
+  reading;
+- for each capture, the recorder's start reading, taken directly after its
+  stream was triggered, and in the frame log a clock reading per read.
+
+From those the offset between a frame of the kept copy and a frame of the
+capture is known to within milliseconds, not frames: the two streams are
+started independently, and nothing the device or ALSA reports ties a frame of
+one to a frame of the other. On a device that samples both on one clock the
+offset is constant across a play with no underrun; correlation finds it once.
+
+Not measured by this harness: the offset to the frame by any means but
+correlation; the latency from the capture's trigger to its frame 0; whether
+the device's delay reading is accurate. The playback role's audible-lane test
+asserts that the clock tie lies within 150 ms of the offset correlation
+finds, which holds the delay reading, the capture's start latency and the
+clock readings together and separates none of them. An exact tie needs the
+device's own copy of what it played inside the capture, and the reSpeaker
+Flex's six-channel image carries none (`own-device-playback-sample-relationship`).

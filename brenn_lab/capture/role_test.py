@@ -90,7 +90,7 @@ class Bench:
         place = None
         if hosted:
             place = Place(
-                captures=self.run / "captures" / ROLE,
+                data=self.run / "captures" / ROLE,
                 logs=self.run / "logs" / ROLE,
                 note=self.notes.append if note is None else note,
             )

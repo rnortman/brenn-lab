@@ -13,21 +13,28 @@ need not be audio: pose, fault and status streams are data too.
 
 ## Status
 
-The run spine and one device role. A script declares the roles it uses and
-sends them commands; a lab configuration says which machines and devices there
-are. The runner dry-runs a script against a lab, probing every device it needs
-without recording anything, and runs it, writing a run directory with a
-manifest, a journal of every command, reply and event, and results. The one
-role kind is capture, which records a device through brenn-pod's recorder,
-`pod-capture`: the one this repository's build pins, or one installed where
-the lab configuration says. The build also pins brenn-pod's reader,
-`frame-log`. The capture role has hardware-lane tests that record from an
-attached reSpeaker Flex through the pinned recorder. There is no
-playback, alignment or run-validity checking yet, and roles on other machines
-cannot be reached.
+The run spine and two device role kinds. A script declares the roles it uses
+and sends them commands; a lab configuration says which machines and devices
+there are. The runner dry-runs a script against a lab, probing every device it
+needs without recording anything, and runs it, writing a run directory with a
+manifest, a journal of every command, reply and event, and results.
+
+- **Capture** records a device through brenn-pod's recorder, `pod-capture`:
+  the one this repository's build pins, or one installed where the lab
+  configuration says. The build also pins brenn-pod's reader, `frame-log`.
+  Its hardware-lane tests record from an attached reSpeaker Flex through the
+  pinned recorder.
+- **Playback** plays WAV files through an ALSA card, keeps an exact copy of
+  every play in the run, and holds the card under a volume cap and quiet
+  hours that only the lab configuration sets. A lab configuration may state
+  that two roles sample on one device clock. Its audible-lane test plays
+  through an attached reSpeaker Flex while the capture role records it.
+
+There is no alignment or run-validity checking yet, no output other than an
+ALSA card, and roles on other machines cannot be reached.
 
 - `docs/reference/experiments.md`: the lab configuration, writing a script,
-  the capture role, the dry run and the run.
+  the capture and playback roles, the dry run and the run.
 - `docs/reference/run-directory.md`: what a run leaves behind, file by file
   and key by key.
 

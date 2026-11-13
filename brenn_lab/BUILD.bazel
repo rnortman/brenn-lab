@@ -8,8 +8,10 @@ py_library(
     name = "brenn_lab",
     srcs = [
         "__init__.py",
+        "account.py",
         "buildinfo.py",
         "capture/__init__.py",
+        "capture/account.py",
         "capture/device.py",
         "capture/messages.py",
         "capture/pod_capture.py",
@@ -19,10 +21,20 @@ py_library(
         "labconfig.py",
         "pinned.py",
         "place.py",
+        "playback/__init__.py",
+        "playback/account.py",
+        "playback/alsa.py",
+        "playback/device.py",
+        "playback/limits.py",
+        "playback/messages.py",
+        "playback/output.py",
+        "playback/role.py",
+        "playback/source.py",
         "roles.py",
         "rundir.py",
         "runner.py",
         "script.py",
+        "sound.py",
     ],
     imports = [".."],
     visibility = ["//visibility:public"],
@@ -98,6 +110,34 @@ py_pytest_test(
 )
 
 py_pytest_test(
+    name = "runner_kinds_test",
+    size = "small",
+    srcs = ["runner_kinds_test.py"],
+    deps = [":brenn_lab"],
+)
+
+# The runner with a playback role on the in-process output, beside a capture
+# role on the stand-in recorder.
+py_pytest_test(
+    name = "runner_playback_test",
+    size = "small",
+    srcs = ["runner_playback_test.py"],
+    data = [
+        "//brenn_lab/testing:stand_in",
+        "//examples:play_and_record.py",
+    ],
+    env = {
+        "EXAMPLE": "$(rootpath //examples:play_and_record.py)",
+        "STAND_IN": "$(rootpath //brenn_lab/testing:stand_in)",
+    },
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:fake_output",
+        "//brenn_lab/testing:lab_driver",
+    ],
+)
+
+py_pytest_test(
     name = "capture_role_test",
     size = "small",
     srcs = ["capture/role_test.py"],
@@ -117,8 +157,9 @@ py_pytest_test(
 # default check runs the recorder.
 # TODO(lanes-load-host-alsa-runtime)
 # The Flex has one opener and Bazel runs test targets in parallel, so this is
-# the only target that opens the Flex: another test that opens it is added to
-# this target, or that target and this one are both tagged `exclusive`.
+# the only target in its lane that opens a PCM of the Flex: another test in the
+# lane that opens one is added to this target, or that target and this one are
+# both tagged `exclusive`.
 py_pytest_test(
     name = "capture_flex_hardware_test",
     size = "small",
@@ -145,6 +186,56 @@ py_pytest_test(
     ],
 )
 
+# The audible lane: the playback role on an attached reSpeaker Flex XVF3800
+# with a speaker on its output, while the capture role records it, through the
+# runner as a program and the pinned recorder and reader. It plays sound, so
+# it runs only inside a window the maintainer agreed. The runner's playback
+# role and the recorder load the host's ALSA runtime library.
+# TODO(lanes-load-host-alsa-runtime)
+# The Flex has one opener and Bazel runs test targets in parallel, so this is
+# the only target in its lane that opens a PCM of the Flex: another test in the
+# lane that opens one is added to this target, or that target and this one are
+# both tagged `exclusive`.
+py_pytest_test(
+    name = "playback_flex_audible_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = ["playback/flex_audible_test.py"],
+    data = [
+        ":lab",
+        "//tools/brenn_pod:frame-log",
+    ],
+    env = {
+        "FRAME_LOG": "$(rootpath //tools/brenn_pod:frame-log)",
+        "LAB": "$(rootpath :lab)",
+    },
+    tags = [
+        "audible",
+        "external",
+    ],
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:lab_driver",
+        "//brenn_lab/testing:signals",
+    ],
+)
+
+# The hardware lane: the playback role's ALSA module on the host's ALSA
+# runtime library, which nothing in the default check loads. Silent: its
+# stream runs on ALSA's `null` PCM, and on the attached reSpeaker Flex it
+# reads the card and its mixer and opens no PCM.
+# TODO(lanes-load-host-alsa-runtime)
+py_pytest_test(
+    name = "playback_alsa_hardware_test",
+    size = "small",
+    srcs = ["playback/alsa_hardware_test.py"],
+    tags = [
+        "external",
+        "hardware",
+    ],
+    deps = [":brenn_lab"],
+)
+
 py_pytest_test(
     name = "transcripts_test",
     size = "small",
@@ -152,6 +243,51 @@ py_pytest_test(
     deps = [
         ":brenn_lab",
         "//brenn_lab/testing:transcript_files",
+    ],
+)
+
+py_pytest_test(
+    name = "playback_messages_test",
+    size = "small",
+    srcs = ["playback/messages_test.py"],
+    deps = [":brenn_lab"],
+)
+
+py_pytest_test(
+    name = "playback_alsa_test",
+    size = "small",
+    srcs = ["playback/alsa_test.py"],
+    deps = [":brenn_lab"],
+)
+
+py_pytest_test(
+    name = "playback_device_test",
+    size = "small",
+    srcs = ["playback/device_test.py"],
+    deps = [":brenn_lab"],
+)
+
+py_pytest_test(
+    name = "playback_limits_test",
+    size = "small",
+    srcs = ["playback/limits_test.py"],
+    deps = [":brenn_lab"],
+)
+
+py_pytest_test(
+    name = "playback_source_test",
+    size = "small",
+    srcs = ["playback/source_test.py"],
+    deps = [":brenn_lab"],
+)
+
+py_pytest_test(
+    name = "playback_role_test",
+    size = "small",
+    srcs = ["playback/role_test.py"],
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:fake_output",
     ],
 )
 

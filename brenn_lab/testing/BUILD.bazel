@@ -1,4 +1,5 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+load("//tools/pytest:defs.bzl", "py_pytest_test")
 
 # The stand-in recorder, the transcripts it replays, and the helpers tests
 # read them with. Test-only: nothing that ships depends on this package.
@@ -51,6 +52,31 @@ py_library(
     data = [":transcripts"],
     visibility = ["//brenn_lab:__subpackages__"],
     deps = ["//brenn_lab"],
+)
+
+py_library(
+    name = "fake_output",
+    testonly = True,
+    srcs = ["fake_output.py"],
+    visibility = ["//brenn_lab:__subpackages__"],
+    deps = ["//brenn_lab"],
+)
+
+py_library(
+    name = "signals",
+    testonly = True,
+    srcs = ["signals.py"],
+    visibility = ["//brenn_lab:__subpackages__"],
+)
+
+py_pytest_test(
+    name = "signals_test",
+    size = "small",
+    srcs = ["signals_test.py"],
+    deps = [
+        ":signals",
+        "//brenn_lab",
+    ],
 )
 
 py_library(

@@ -147,9 +147,9 @@ class CaptureRole:
             raise RuntimeError(f"role {self._name!r} has no place to write a capture")
         self._count += 1
         n = self._count
-        self._place.captures.mkdir(parents=True, exist_ok=True)
+        self._place.data.mkdir(parents=True, exist_ok=True)
         self._place.logs.mkdir(parents=True, exist_ok=True)
-        out = self._place.captures / f"{n:04d}.framelog"
+        out = self._place.data / f"{n:04d}.framelog"
         running = pod_capture.start(
             self._spec(out, self._place.logs, n), n, self._report, self._place.note
         )

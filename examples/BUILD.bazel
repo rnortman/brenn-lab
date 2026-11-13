@@ -3,7 +3,10 @@ load("@rules_python//python:defs.bzl", "py_library")
 # Example experiment scripts. Built as a library so that ruff and mypy check
 # them; the runner is given a script's path, not a target.
 
-EXAMPLES = ["ten_seconds.py"]
+EXAMPLES = [
+    "play_and_record.py",
+    "ten_seconds.py",
+]
 
 exports_files(
     EXAMPLES,

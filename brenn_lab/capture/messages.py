@@ -8,15 +8,8 @@ event or key.
 from dataclasses import dataclass
 from typing import Literal
 
-from brenn_lab.data import ClockReading, Failure, Request, command, event, result
-
-
-@dataclass(frozen=True)
-class Location:
-    """Where a capture was written: an absolute path on the named machine."""
-
-    machine: str
-    path: str
+from brenn_lab.data import ClockReading, Failure, Location, Request, command, event, result
+from brenn_lab.sound import CardIdentity, Granted
 
 
 @dataclass(frozen=True)
@@ -37,29 +30,6 @@ class Recorder:
     program: str
     repository: str
     build: Build
-
-
-@dataclass(frozen=True)
-class CardIdentity:
-    """The card as ALSA and USB name it. Not the device's firmware or routing."""
-
-    selector: str
-    card_index: int
-    card_name: str
-    card_long_name: str
-    pcm: str
-    usb_id: str | None
-
-
-@dataclass(frozen=True)
-class Granted:
-    """What the device granted, read back from the open stream."""
-
-    rate_hz: int
-    channels: int
-    sample_format: str
-    period_frames: int
-    buffer_frames: int
 
 
 @dataclass(frozen=True)

@@ -18,13 +18,17 @@ from brenn_lab.data import (
     Failure,
     JsonObject,
     JsonValue,
+    Location,
     Release,
     Reply,
     decode,
     dumps,
     encode,
+    failure_of,
     loads,
 )
+from brenn_lab.data import event as register_event
+from brenn_lab.sound import CardIdentity, Granted
 
 AT = ClockReading(
     machine="bench",
@@ -33,7 +37,7 @@ AT = ClockReading(
 )
 BUILD = m.Build(commit="0" * 40, dirty=None, source="declared")
 RECORDER = m.Recorder(program="pod-capture", repository="brenn-pod", build=BUILD)
-CARD = m.CardIdentity(
+CARD = CardIdentity(
     selector="Flex",
     card_index=2,
     card_name="reSpeaker Flex",
@@ -41,7 +45,7 @@ CARD = m.CardIdentity(
     pcm="hw:2,0",
     usb_id=None,
 )
-GRANTED = m.Granted(
+GRANTED = Granted(
     rate_hz=16000, channels=2, sample_format="s16_le", period_frames=320, buffer_frames=5120
 )
 STOPPED = m.Stopped(capture=1, frames=159680, gaps_reported=0, end=AT)
@@ -52,7 +56,7 @@ RESULT_BODIES: list[object] = [
     m.Started(
         capture=1,
         capture_id="ab" * 16,
-        location=m.Location(machine="bench", path="/runs/r/captures/mic/0001.framelog"),
+        location=Location(machine="bench", path="/runs/r/captures/mic/0001.framelog"),
         recorder=RECORDER,
         device=CARD,
         granted=GRANTED,
@@ -214,3 +218,20 @@ def test_unregistered_bodies_are_refused() -> None:
         Reply(role="mic", command="capture.start", dry=False, outcome=Stray())
     with pytest.raises(TypeError):
         Reply(role="mic", command="capture.record", dry=False, outcome=STOPPED)
+
+
+def test_a_failure_event_carries_its_failure_in_failure() -> None:
+    failed = m.Failed(capture=1, failure=FAILURE, stopped=None)
+    assert failure_of(failed) is FAILURE
+    assert failure_of(m.Late(capture=1, at_frame=0, backlog_frames=320, at=AT)) is None
+
+
+@pytest.mark.parametrize("annotation", [str, Failure | None, JsonObject])
+def test_an_event_whose_failure_is_not_a_failure_is_refused(annotation: object) -> None:
+    @dataclasses.dataclass(frozen=True)
+    class Odd:
+        failure: annotation  # type: ignore[valid-type]
+
+    with pytest.raises(TypeError, match="failure"):
+        register_event("test.odd_failure")(Odd)
+    assert "test.odd_failure" not in EVENTS

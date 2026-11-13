@@ -7,7 +7,8 @@
 <run>/script/<file>       the script, the lab configuration and the notes,
 <run>/lab/<file>          byte for byte as they were read
 <run>/notes/<file>
-<run>/captures/<role>/    what each capture role recorded
+<run>/<section>/<role>/   each role's data, under its kind's section
+                          (`captures/<role>/`: what a capture role recorded)
 <run>/logs/runner.log     the runner's own log
 <run>/logs/<role>/        the output of the programs each role calls
 """
@@ -47,8 +48,9 @@ class RunDir:
         (self.path / section / name).write_bytes(data)
         return f"{section}/{name}"
 
-    def captures(self, role: str) -> Path:
-        return self.path / "captures" / role
+    def data(self, section: str, role: str) -> Path:
+        """Where `role` writes its data, in its kind's section."""
+        return self.path / section / role
 
     def logs(self, role: str) -> Path:
         return self.path / "logs" / role

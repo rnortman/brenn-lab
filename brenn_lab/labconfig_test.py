@@ -65,9 +65,32 @@ def test_a_good_configuration() -> None:
                     "image": "six-channel USB audio image",
                     "position": {"room": "lab", "metres": 1.5},
                 },
+                sample_clock=None,
             )
         },
     )
+
+
+def test_a_sample_clock_is_stated_by_name() -> None:
+    text = GOOD.replace('machine = "bench"\n', 'machine = "bench"\nsample_clock = "flex"\n')
+    result = parse(text.encode())
+    assert isinstance(result, LabConfig)
+    assert result.roles["mic"].sample_clock == "flex"
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ('"Flex"', "bad_value"),
+        ('""', "bad_value"),
+        ('"a' + "b" * 32 + '"', "bad_value"),
+        ("1", "wrong_type"),
+        ("true", "wrong_type"),
+    ],
+)
+def test_a_malformed_sample_clock(value: str, reason: str) -> None:
+    text = GOOD.replace('machine = "bench"\n', f'machine = "bench"\nsample_clock = {value}\n')
+    assert _reasons(text) == {("roles.mic.sample_clock", reason)}
 
 
 def test_stated_is_optional() -> None:
@@ -130,7 +153,7 @@ def test_a_problem_in_a_machine_does_not_hide_the_roles_on_it() -> None:
 @pytest.mark.parametrize(
     ("change", "expected"),
     [
-        (('kind = "capture"', 'kind = "playback"'), {("roles.mic.kind", "unknown_kind")}),
+        (('kind = "capture"', 'kind = "motion"'), {("roles.mic.kind", "unknown_kind")}),
         (('kind = "capture"', "kind = 1"), {("roles.mic.kind", "wrong_type")}),
         (('kind = "capture"', ""), {("roles.mic.kind", "missing_key")}),
         (('machine = "bench"', 'machine = "attic"'), {("roles.mic.machine", "unknown_machine")}),

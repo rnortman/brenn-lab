@@ -56,15 +56,23 @@ position = "desk, 1 m from the door"
 - `roles.<r>`: a role, the name a script uses for one device. A role name
   matches `[a-z][a-z0-9_]*` and is at most 32 bytes: it names a directory in
   the run and is the recorded stream's source name.
-  - `kind`: the role's kind. This version has one, `capture`.
+  - `kind`: the role's kind, `capture` or `playback`.
   - `machine`: a machine in `machines`. A role whose kind needs a program its
-    machine does not name is `missing_program`.
+    machine does not name is `missing_program`. The playback kind needs none.
   - `device`: the kind's parameters. For `capture`: `card`, a non-empty
     string that selects the card; `rate_hz`, a positive integer; `sample_format`,
     a string; `layout`, a non-empty list of distinct non-empty channel names.
+    For `playback`: see *The playback kind*, *Configuration*.
   - `stated`: optional and free-form. It is copied into the manifest as the
     configuration's statement, never as a reading. A date, a time or a
     non-finite number in it is `wrong_type`: it has no JSON form.
+  - `sample_clock`: optional, a role of any kind. A name of the same form as
+    a role name (`bad_value` otherwise). **Two roles that state the same name
+    are stated to sample on one clock.** It is a person's statement about the
+    hardware: nothing infers it and nothing checks it, and a role that states
+    none shares a clock with nothing. Two streams on one card usually share a
+    clock and need not; two cards on one word clock share one that no
+    enumeration shows. The manifest records it as `roles.<r>.sample_clock`.
 - **The configuration does not repeat the recorder's limits.** A rate, a
   format or a channel name the recorder's command line refuses is refused by
   the recorder, which exits before it opens anything. The capture role reports
@@ -161,15 +169,21 @@ records it:
   - `check`: is the device there, and does it grant what the configuration
     asks. It never plays or moves, and it is the same dry or not.
   - `release`: the session is over; stop whatever is still running and say
-    what that was. Only the runner sends it.
+    what that was. Only the runner sends it. Each kind answers with its own
+    result, and the kind says from that result what was still running
+    (`capture 2`, `play 1`): the run's and the dry run's `left_running`.
+- **An event that reports a failure carries it in a field named `failure`**,
+  of the failure's form. A kind cannot register an event whose `failure`
+  field is anything else. That is where the runner, and anything else that
+  reads a role's events, finds a failure in an event of any kind.
 
 The registered names:
 
 | | Names |
 |---|---|
-| Commands | `check`, `release`, `capture.start`, `capture.stop` |
-| Results | `capture.started`, `capture.stopped`, `capture.checked`, `capture.released` |
-| Events | `capture.gap`, `capture.late`, `capture.failed` |
+| Commands | `check`, `release`, `capture.start`, `capture.stop`, `playback.play`, `playback.stop` |
+| Results | `capture.started`, `capture.stopped`, `capture.checked`, `capture.released`, `playback.started`, `playback.stopped`, `playback.checked`, `playback.released` |
+| Events | `capture.gap`, `capture.late`, `capture.failed`, `playback.ended`, `playback.underrun`, `playback.failed` |
 
 ## The capture kind
 
@@ -301,6 +315,329 @@ otherwise.
 A recorder newer than the harness that prints an event the harness does not
 know ends the capture with `recorder_contract`.
 
+## The playback kind
+
+A playback role plays WAV files through one output device, keeps an exact
+copy of what it handed the device, and holds that device under a volume cap
+and quiet hours that only its configuration sets. In this version its one
+output kind is `alsa`: an ALSA card opened directly, written by the runner's
+own interpreter. Every level is an integer number of **millibels** (mB),
+hundredths of a decibel, the unit ALSA reports volumes in.
+
+### Configuration
+
+```toml
+[roles.speaker]
+kind = "playback"
+machine = "bench"
+sample_clock = "flex"
+
+[roles.speaker.device]
+output = "alsa"
+card = "Flex XVF3800 L16K6Ch"
+source_dir = "/data/lab/sources"
+cap_mb = -2400
+quiet_hours = [["22:00", "07:00"]]
+
+[roles.speaker.device.level]     # the volume control a play's `volume_mb` sets
+element = "PCM"
+index = 1
+
+[[roles.speaker.device.held]]    # every other playback control of the card
+element = "PCM"
+index = 0
+volume_mb = 0
+```
+
+- `output`: `"alsa"`; any other value is `bad_value`.
+- `card`: non-empty. Matched case-insensitively as a substring of each card's
+  name or long name; exactly one card must match. That is the rule the
+  capture kind's recorder applies. The device is `hw:<index>,0`.
+- `source_dir`: an absolute path on the role's machine. A play names its
+  source relative to it, so a script names no machine's file system.
+- `cap_mb`: the cap (see *The cap*). Required: a playback role without one is
+  `missing_key`.
+- `quiet_hours`: a list of `["HH:MM", "HH:MM"]` spans of local civil time on
+  the role's machine. A span whose end is not after its start wraps midnight;
+  a start equal to its end is `bad_value`. Required: `[]` states that there
+  are none.
+- `level`: the simple mixer element, `element` and `index`, whose volume a
+  play sets. Required.
+- `held`: every other simple element of the card that has a playback volume
+  or a playback switch, each with the `volume_mb` the role holds it at
+  (omitted for an element with a switch and no volume). May be empty or
+  absent. A control named twice across `level` and `held` is `bad_value`.
+- A control is stated with one volume whatever its channel count. The role
+  applies it to every playback channel the element has.
+- **The cap and quiet hours have no other source.** No command, script,
+  environment variable or command-line flag supplies, raises or suspends
+  them.
+
+### Commands and results
+
+- `playback.play {source, volume_mb}` → `playback.started`. `source` is a
+  path relative to `source_dir`; `volume_mb` is the level control's setting
+  for this play. The reply comes once the first frames have been handed to
+  the device; the play goes on on a thread of the role's, and the script is
+  not blocked for the length of the source.
+  - `play`: the role's play number in the run, from 1; 0 in a dry reply.
+  - `source`: `{name, sha256, frames, rate_hz, channels, sample_format,
+    peak_mb}`: the file as named, the hash of its bytes, what it holds, and
+    its largest sample magnitude relative to full scale, rounded up; `peak_mb`
+    is `null` for a source of silence.
+  - `copy`: the `Location` of the kept copy; `null` in a dry reply.
+  - `output`: `{kind, library: {name, version}}`: `"alsa"`, and the host's
+    ALSA library with the version it reports.
+  - `device`, `granted`: the card, and what the open stream granted, in the
+    capture kind's shapes.
+  - `controls`: every control the role holds, read back after setting:
+    `{element, index, part, channels}`, `part` `level` or `held`, and one
+    `{channel, volume_mb, switch}` per playback channel, `channel` being
+    ALSA's name for it, `volume_mb` or `switch` `null` where the element has
+    none. `found`: the same, as the controls stood before the role moved
+    them. In a dry reply both are the controls as found.
+  - `level_mb`: the level of a full-scale sample (see *The cap*), from the
+    values read back; in a dry reply, from the asked `volume_mb` and the held
+    controls' configured values. `cap_mb`: the cap.
+  - `local_time`: the machine's local civil time, ISO 8601 with its UTC
+    offset, at which quiet hours were last judged before the open.
+  - `first`: the mark after the first write; `null` in a dry reply.
+- `playback.stop` → `playback.stopped`: cuts the running play. Frames still in
+  the device's buffer are discarded, the stream is closed and the controls are
+  restored. `play`, `frames_handed`, `unplayed_frames` (the device's delay
+  read just before the cut, `null` when it could not be read), `underruns` (a
+  count), `last` (the mark after the last write; `null` in a dry reply), `end`
+  (a clock reading once the stream is closed), `restored` (whether every
+  control was put back as found). `not_playing` when nothing is playing, a
+  play that already ended included.
+- `check` → `playback.checked`: `output`, `device`, `controls` (each with its
+  `range`, `{min_mb, max_mb}` or `null`, and its channels as found), `cap_mb`,
+  `quiet_hours`, `local_time`, `quiet_now`. It resolves the card and reads the
+  mixer. It sets nothing and opens no stream. It is refused with
+  `already_playing` while a play runs.
+- `release` → `playback.released`: `stopped`, a `playback.stopped` when a play
+  was running, else `null`. A play cut by `release` is `left_running`.
+
+A **mark** is `{frames_handed, delay_frames, at}`: the frames handed so far,
+the device's delay read then (`null` if the read failed), and the role's clock
+reading taken directly after. By the device's own account, frame
+`frames_handed − delay_frames` of the copy is at its output at `at`.
+
+There is no command that waits for a play to end. A script passes the time
+with `lab.wait`, which a signal interrupts at once:
+
+```python
+played = speaker.send(playback.Play(source="clip.wav", volume_mb=-3000))
+lab.wait(played.source.frames / played.source.rate_hz + 1.0)
+```
+
+That is `examples/play_and_record.py`, which records on another role while it
+plays. A script that waits too short a time has its play cut at `release`,
+and the run fails with `left_running`.
+
+### Events
+
+- `playback.ended`: the source was handed over whole and the device played
+  its buffer out. The fields of `playback.stopped`, `unplayed_frames` 0.
+- `playback.underrun`: `{play, at_frame, at, detail}`. The device ran dry
+  before frame `at_frame` of the copy was handed; the stream was recovered
+  and the play goes on. Sound was interrupted there for an unknown length.
+- `playback.failed`: `{play, failure, …the fields of playback.stopped…}`. The
+  play ended and nobody asked: the stream died, a held control moved, quiet
+  hours began, the recoveries ran out, or the role's own code failed.
+
+### How the role plays
+
+For `playback.play`, in order. Any refusal is a failure reply, and nothing has
+been played:
+
+1. **Source.** Resolve `source` under `source_dir` and read it as a WAV of
+   16- or 32-bit integer PCM (`s16_le`, `s32_le`). One pass gives the hash,
+   the frame count and the peak.
+2. **Limits.** Resolve the card and read its mixer: it must have every
+   control the configuration names and no playback volume or switch it does
+   not name. `volume_mb` must lie in the level control's range. The level is
+   computed from `volume_mb` and the held controls' configured values and
+   held against the cap (`over_cap`). Quiet hours are judged over the whole
+   length of the source. Nothing has been written, set or opened.
+3. **Kept copy.** `sources/<role>/<NNNN>.wav` in the run: a WAV holding
+   exactly the frames the role will hand the device, written and synced
+   before anything plays. Writing it hashes the source again; a source that
+   is no longer the file step 1 judged is `source_changed`. The role plays
+   **from the copy** and transforms nothing, so the copy is what was sent.
+   Writing and syncing the copy takes time, so quiet hours are then judged
+   again; a play refused then leaves no copy and uses no number.
+4. **Open.** Open the stream and demand the source's rate, channel count and
+   format exactly, with resampling off. A period of 20 ms and a buffer of
+   500 ms are asked for at the nearest the device has, and recorded as
+   granted. A busy device is `open`; nothing is freed.
+5. **Controls.** Read every channel of every control (this is `found`), then
+   move them to the play's values: the level control to `volume_mb` and each
+   held control to its configured value on every playback channel, rounded
+   down to the control's step, every switch on (see *Moving the controls*).
+   Every channel is read back: one that reads higher than asked, or a switch
+   that reads off, is `controls`. One that reads lower is the control's step,
+   and is accepted and recorded.
+6. **Write.** Hand the first chunk over, take the first mark, reply. The
+   thread then hands the copy over in chunks of 100 ms. Before each chunk it
+   reads every channel of every control it holds and judges quiet hours.
+   After the last it lets the device play its buffer out, closes the stream,
+   restores the controls and reports `playback.ended`.
+
+- An **underrun** is recovered and reported as `playback.underrun`. Eight
+  consecutive recoveries without a successful write end the play with
+  `stream_died`. Any other write error ends the play with `stream_died` and
+  is not recovered: a recovery from a suspended stream can discard the
+  device's buffer, and the play's record would not show it.
+- **A stop, a release, a moved control or the start of quiet hours** is
+  noticed between chunks, and the device's buffer is discarded, not played
+  out. The sound ends **within about a quarter of a second** of the cause.
+  That bound is a property of the write loop, held by the default check
+  against an in-process output; it has been measured on no device.
+- One play runs at a time per role: `already_playing` while one does. Two
+  playback roles on two devices play at once. Two on one card: the second
+  play fails with `open` while the first runs.
+- The role keeps no stream open between plays.
+
+### The cap
+
+**The level of a play** is the level control's volume plus the sum of the
+held controls' volumes: the level at which a full-scale sample is played,
+relative to the loudest the device's output can be driven. **The cap is the
+highest level the role will set the device's controls to.** A play whose
+level exceeds `cap_mb` is refused with `over_cap`, before anything is set,
+written or opened.
+
+- The source does not enter. A low peak, or silence, earns no volume on the
+  hardware. The loudest the play itself reaches is `level_mb +
+  source.peak_mb`, which a reader computes from the source entry.
+- **Every channel, and the loudest counts.** The role sets and reads every
+  playback channel of every control it holds. A control's volume in the
+  level is the highest of its channels', and a switch is on only when every
+  channel's is.
+- The cap is in units the role controls and no others. What sound pressure a
+  level makes depends on the amplifier and speaker behind the output; the
+  maintainer sets each device's cap by ear.
+- The role scales no samples. A script chooses how loud by `volume_mb` and by
+  the source; the role refuses a `volume_mb` that puts the controls above the
+  cap and never lowers anything to fit.
+- **The controls are the role's while it plays.** Any channel of any control
+  found different from what the role set, higher or lower, or any switch
+  found off, ends the play with `controls_moved`. Another program, a desktop
+  sound server for one, can therefore raise the device's volume for up to
+  about a quarter of a second before the play is cut.
+- A held control stated below its maximum is relied on for the cap exactly
+  as the level control is.
+
+#### Moving the controls
+
+Whenever the role moves the controls, to what a play asks or back to what was
+found, **it lowers before it raises**:
+
+1. **Read** every channel of every control it holds. If the read fails, the
+   move writes nothing and has failed.
+2. **Lower.** Every channel whose volume is above its target is set down to
+   it, and every switch that is on with a target of off is turned off. Each
+   lowering is attempted, a failed one not stopping the rest.
+3. **Raise**, only if the read and every lowering succeeded: every channel to
+   its target, every switch to its target. Each write is attempted.
+
+A switch going off is a lowering and one going on is a raise. Of the role's
+own writes, on a mixer that takes each write as written, rounded down, or
+refuses it and changes nothing: **after every write the role makes,
+successful or refused, from its first of a play to its last, either the level
+is at or under the cap or no channel is above where the role found it.**
+
+- The restoration puts back what was found, a setting above the cap
+  included: the device's state before the role touched it is its owner's.
+- **`restored` false** means the restoration failed (the device went away,
+  its first read failed, or a mixer write was refused) and was not tried
+  again. If the read failed, nothing was written, and the controls are where
+  the play set them, at or under the cap. If a lowering was refused, nothing
+  was raised: every channel is at or under what the play set. If a raise was
+  refused, no channel is above where it was found. The device may then be
+  quieter than it was found on some channel, and after a refused lowering a
+  channel may stand above where it was found, at what the play set. That is a
+  change to the machine's sound state the role could not undo.
+- **The runner killed outright mid-play**: the stream closes with the
+  process and the sound stops. The controls stay where the role put them,
+  their level at or under the cap whatever the source, and possibly lower
+  than found. A kill that falls while the role is moving the controls leaves
+  the device as its last write left it: at or under the cap, or no louder on
+  any channel than the role found it. The kept copy stays; there is no
+  `results.json`.
+
+### Quiet hours
+
+Judged on the local civil time of the role's machine, as its clock and its
+zone setting (`/etc/localtime`, UTC when absent) give it. A play is refused
+with `quiet_hours` if any instant from now to now plus the source's length
+falls in a quiet span, so a source that would run into quiet hours never
+starts. That is judged with the limits and again just before the open, once
+the kept copy is written. Before each chunk the thread judges again, against a stalled or
+stepped clock, and ends the play with `quiet_hours` if the time has come. The
+reply and `check` carry the local time the role judged by, so a machine with a
+wrong zone shows in the dry run's report; the role cannot know its zone is
+wrong.
+
+### The dry run of a playback role
+
+`check` resolves the card and reads the mixer, and opens nothing. A dry
+`playback.play` does steps 1, 2 and 4 of *How the role plays* and ends at the
+first refusal: it **opens the output without writing a frame**, reads the
+grant and closes it. It writes no copy and sets no control. Quiet hours are
+judged at the moment of the dry run, with the limits and again just before
+the open, and inside them a dry play is refused before the open, so a dry run made then does not show the grant. The role
+opens its output at no time inside the device's quiet hours, dry or not.
+
+Nobody has yet listened to that open on a real output, so **a dry run of a
+playback role on a real output is made only inside an agreed window**, as
+`AGENTS.md` says (`output-open-not-listened-to`).
+
+A dry `playback.stop` checks only that a dry play preceded it. A dry role
+reports no event.
+
+### Failure reasons
+
+| Reason | Meaning |
+|---|---|
+| `source_outside` | `source` is empty, absolute, not a file name, or resolves, links included, outside `source_dir` |
+| `source_missing` | `source` is not a readable file |
+| `source_format` | not a WAV of 16- or 32-bit integer PCM, or its data is not whole frames or not what its header declares |
+| `source_changed` | the source changed between the role's two reads of it; nothing played |
+| `alsa_missing` | the host's `libasound.so.2` could not be loaded |
+| `no_card`, `ambiguous_card` | no card, or more than one, matches `card` |
+| `no_control` | the card lacks a control the configuration names |
+| `unheld_control` | the card has a playback volume or switch the configuration does not name; the cap cannot be held over it |
+| `volume_range` | `volume_mb` is outside the level control's range, the level control has no volume, or a held control's stated volume does not fit it (out of range, stated for a control with no volume, or missing for one with a volume) |
+| `over_cap` | the play's level is above the cap |
+| `quiet_hours` | the play would fall in a quiet span, or one began during it |
+| `open` | the device could not be opened, for one because something else holds it |
+| `params` | the device did not grant the source's rate, channel count and format exactly |
+| `mixer` | a mixer call failed: the mixer could not be opened or loaded, a read or write was refused, or a volume has no dB scale (such a control cannot be held to a cap in millibels) |
+| `controls` | a control read back above what was set, or with a switch off |
+| `controls_moved` | during a play a held control changed, or could not be read |
+| `stream_died` | the stream failed beyond recovery: a write failed with anything but an underrun, a recovery failed, eight ran without a successful write, a write took no frames, or the buffer could not be played out |
+| `role_io` | the role could not write or read its kept copy, or another file of its own |
+| `role_error` | the play's thread raised; the play ended, the controls were restored, and the exception was raised on |
+| `already_playing` | a play is running |
+| `not_playing` | no play is running, or no dry play preceded a dry stop |
+| `unknown_command` | the command is not one the playback kind has |
+
+What each reason carries in `data` is tabled in `run-directory.md`, *Failure
+data*.
+
+### What the limits cover
+
+The cap and quiet hours hold for everything sent to the role. A script runs
+in the runner's interpreter, the role's own process, so a script that opens a
+sound device itself, by `ctypes` or by starting a player, is not stopped by
+them (`script-shares-the-playback-roles-process`).
+
+The playback role loads the host's ALSA runtime library, `libasound.so.2`,
+the first time it resolves a card, and at no other time. A host without it
+gets `alsa_missing` from `check` and from `playback.play`.
+
 ## Starting the runner
 
 ```
@@ -393,8 +730,11 @@ at the first problem:
    - anything else, `SystemExit` and an exception deriving from
      `BaseException` included, is a problem, `where` `trace`, `reason`
      `script_error`.
-6. Send `release` to every role that passed step 3. A role still capturing is
-   a problem, `left_running`: the script ends without stopping it.
+6. Send `release` to every role that passed step 3. A role whose answer says
+   something was still running, by its kind's reading of it (a capture), is
+   a problem, `left_running`: the script ends without stopping it. A dry
+   play is never left running, since no time passes in a trace: a script
+   that waits too short a time for its play is seen only in the run.
 
 Steps 2 to 6 run only if step 1 found nothing. Step 5 runs whenever the
 script loaded, whatever steps 3 and 4 found. A failure reply whose role and

@@ -21,35 +21,25 @@ from pathlib import Path
 from typing import Any
 
 from brenn_lab import labconfig
+from brenn_lab.account import Account
 from brenn_lab.buildinfo import Revision
-from brenn_lab.capture.messages import (
-    Failed,
-    Gap,
-    Late,
-    Location,
-    Released,
-    Started,
-    Stop,
-    Stopped,
-)
 from brenn_lab.data import (
     COMMANDS,
-    MONOTONIC,
-    REALTIME,
     Check,
-    ClockReading,
-    ClockValue,
     Command,
     Event,
     Failure,
     JsonObject,
     JsonValue,
+    Location,
     Release,
     Reply,
     Request,
     encode,
     encode_object,
     encode_value,
+    failure_of,
+    now,
 )
 from brenn_lab.labconfig import Installed, LabConfig
 from brenn_lab.place import Place
@@ -98,15 +88,6 @@ class Interrupted(BaseException):
     """The runner was told to stop. Not an `Exception`, so a script's
     `except Exception` does not swallow it.
     """
-
-
-def now(machine: str) -> ClockReading:
-    """The runner's clock reading on `machine`, its own."""
-    return ClockReading(
-        machine=machine,
-        monotonic=ClockValue(MONOTONIC, time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000),
-        wall=ClockValue(REALTIME, time.clock_gettime_ns(time.CLOCK_REALTIME) // 1000),
-    )
 
 
 # Loading the inputs.
@@ -372,9 +353,13 @@ def _dry_run(
         outcome = reply.outcome
         if isinstance(outcome, Failure):
             add(reply)
-        elif isinstance(outcome, Released) and outcome.stopped is not None:
+            continue
+        running = KINDS[script.roles[name]].left_running(outcome)
+        if running is not None:
             problems.append(
-                Problem("role", "left_running", "the script ends with a capture running", role=name)
+                Problem(
+                    "role", "left_running", f"the script ends with {running} running", role=name
+                )
             )
 
     return report(report_roles, trace_report)
@@ -392,65 +377,13 @@ def _stopped_at(e: BaseException, path: Path) -> str:
 # The run.
 
 
-@dataclass
-class _Capture:
-    """One capture's record in the results, filled as replies and events arrive."""
-
-    role: str
-    capture: int
-    capture_id: str | None = None
-    file: JsonObject | None = None
-    ended: str | None = None
-    stopped_by: str | None = None
-    frames: int | None = None
-    gaps_reported: int | None = None
-    gaps: list[JsonValue] = field(default_factory=list)
-    late: list[JsonValue] = field(default_factory=list)
-    failure: Failure | None = None
-    end: ClockReading | None = None
-    addressed: bool = False
-
-    def stopped(self, s: Stopped, by: str) -> None:
-        self.ended, self.stopped_by = "stopped", by
-        self.frames, self.gaps_reported, self.end = s.frames, s.gaps_reported, s.end
-
-    def failed(self, failure: Failure) -> None:
-        if self.ended is not None:
-            return
-        self.ended, self.failure = "failed", failure
-
-    def counted(self, s: Stopped) -> None:
-        """The recorder's counts for a capture that stopped with nobody asking."""
-        self.frames, self.gaps_reported = s.frames, s.gaps_reported
-
-    def encode(self) -> JsonObject:
-        loss_free = self.ended == "stopped" and not self.gaps and self.gaps_reported == 0
-        return {
-            "role": self.role,
-            "capture": self.capture,
-            "capture_id": self.capture_id,
-            "file": self.file,
-            "ended": self.ended,
-            "stopped_by": self.stopped_by,
-            "frames": self.frames,
-            "gaps_reported": self.gaps_reported,
-            "gaps": self.gaps,
-            "late": self.late,
-            "loss_free": loss_free,
-            "failure": None if self.failure is None else encode_value(self.failure),
-            "end": None if self.end is None else encode_value(self.end),
-        }
-
-
 class _Ledger:
     """Everything a run has seen, in the order it saw it: the journal, the
-    manifest's device facts, and what the results will say.
+    manifest's device facts, and what the results will say. What a role's
+    replies and events mean for the manifest and the results is its kind's
+    account's to say; the ledger reads only what the seam states for every
+    kind.
     """
-
-    # TODO(quality-runner-knows-the-capture-kind): the ledger reads the capture
-    # kind's results and events (`Started`, `Stopped`, `Released`, `Gap`,
-    # `Late`, `Failed`) to build the manifest's and the results' capture
-    # sections; a second kind would add its own arms here.
 
     def __init__(self, rundir: RunDir, machine: str, manifest: JsonObject, roles: dict[str, str]):
         self._rundir = rundir
@@ -458,9 +391,12 @@ class _Ledger:
         self._manifest = manifest
         self._lock = threading.Lock()
         self._seq = 0
+        self._kinds = dict(roles)
         self.commands = dict.fromkeys(roles, 0)
         self.failures: dict[str, list[JsonValue]] = {r: [] for r in roles}
-        self.captures: dict[tuple[str, int], _Capture] = {}
+        self.accounts: dict[str, Account] = {
+            r: KINDS[kind].account(r, self.pointer) for r, kind in roles.items()
+        }
         self.first: Problem | None = None
 
     def _journal(self, message: Command | Reply | Event, by: str | None) -> None:
@@ -470,13 +406,6 @@ class _Ledger:
             line["by"] = by
         line.update(encode(message))
         self._rundir.journal(line)
-
-    def _capture(self, role: str, n: int) -> _Capture:
-        return self.captures.setdefault((role, n), _Capture(role, n))
-
-    def _open(self, role: str) -> _Capture | None:
-        mine = [c for (r, _), c in sorted(self.captures.items()) if r == role and not c.addressed]
-        return mine[-1] if mine else None
 
     def _fail(self, problem: Problem) -> None:
         if self.first is None:
@@ -500,50 +429,28 @@ class _Ledger:
             outcome = reply.outcome
             if isinstance(outcome, Failure):
                 self._role_failure(reply.role, outcome, "command", reply.command)
-                if COMMANDS[reply.command] in (Stop, Release):
-                    target = self._open(reply.role)
-                    if target is not None:
-                        target.addressed = True
-                        target.failed(outcome)
-            elif isinstance(outcome, Started) and outcome.location is not None:
-                self._started(reply.role, outcome, outcome.location)
-            elif isinstance(outcome, Stopped):
-                self._capture(reply.role, outcome.capture).stopped(outcome, by)
-                self._capture(reply.role, outcome.capture).addressed = True
-            elif isinstance(outcome, Released) and outcome.stopped is not None:
-                stopped = outcome.stopped
-                record = self._capture(reply.role, stopped.capture)
-                record.stopped(stopped, by)
-                record.addressed = True
-                self._fail(
-                    Problem(
-                        "runner",
-                        "left_running",
-                        f"capture {stopped.capture} was running when the script ended",
-                        role=reply.role,
+            elif COMMANDS[reply.command] is Release:
+                running = KINDS[self._kinds[reply.role]].left_running(outcome)
+                if running is not None:
+                    self._fail(
+                        Problem(
+                            "runner",
+                            "left_running",
+                            f"{running} was running when the script ended",
+                            role=reply.role,
+                        )
                     )
-                )
+            if self.accounts[reply.role].reply(reply, by):
+                self._entries_changed(reply.role)
 
     def event(self, event: Event) -> None:
         with self._lock:
             self._journal(event, None)
-            body = event.body
-            if isinstance(body, Gap):
-                gap = encode_value(body)
-                assert isinstance(gap, dict)
-                del gap["capture"]
-                self._capture(event.role, body.capture).gaps.append(gap)
-            elif isinstance(body, Late):
-                late = encode_value(body)
-                assert isinstance(late, dict)
-                del late["capture"]
-                self._capture(event.role, body.capture).late.append(late)
-            elif isinstance(body, Failed):
-                record = self._capture(event.role, body.capture)
-                record.failed(body.failure)
-                if body.stopped is not None:
-                    record.counted(body.stopped)
-                self._role_failure(event.role, body.failure, "event", event.name)
+            failure = failure_of(event.body)
+            if failure is not None:
+                self._role_failure(event.role, failure, "event", event.name)
+            if self.accounts[event.role].event(event):
+                self._entries_changed(event.role)
 
     def script_error(self, e: BaseException) -> bool:
         """Record what left the script's `run`; whether it is the run's first
@@ -554,41 +461,25 @@ class _Ledger:
             self._fail(Problem("script", "script_error", _describe(e)))
             return first
 
-    def _started(self, role: str, started: Started, location: Location) -> None:
-        record = self._capture(role, started.capture)
-        record.capture_id = started.capture_id
-        record.file = self.pointer(location)
-        # The manifest's capture entry is the `Started` result, with the
-        # role's location given as the run's pointer to the file.
-        entry = encode_object(started)
-        del entry["location"]
-        entry["file"] = record.file
+    def _entries_changed(self, role: str) -> None:
+        """Write the manifest with the role's entries and the repositories
+        its account has learned that the manifest names in no entry yet.
+        """
+        account = self.accounts[role]
         roles = self._manifest["roles"]
         assert isinstance(roles, dict)
         section = roles[role]
         assert isinstance(section, dict)
-        captures = section["captures"]
-        assert isinstance(captures, list)
-        captures.append(entry)
-        build = encode_value(started.recorder.build)
-        assert isinstance(build, dict)
+        section[KINDS[self._kinds[role]].section] = list[JsonValue](account.entries())
         repositories = self._manifest["repositories"]
         assert isinstance(repositories, list)
-        repository = started.recorder.repository
-        if not any(
-            isinstance(r, dict)
-            and r["repository"] == repository
-            and all(r[k] == v for k, v in build.items())
-            for r in repositories
-        ):
-            repositories.append(
-                {
-                    "repository": repository,
-                    **build,
-                    "from": f"the recorder's report at the start of capture "
-                    f"{role}/{started.capture:04d}",
-                }
-            )
+        for learned in account.repositories():
+            named = {k: v for k, v in learned.items() if k != "from"}
+            if not any(
+                isinstance(r, dict) and all(r.get(k) == v for k, v in named.items())
+                for r in repositories
+            ):
+                repositories.append(learned)
         self._rundir.write_manifest(self._manifest)
 
     def pointer(self, location: Location) -> JsonObject:
@@ -817,7 +708,8 @@ def _run(
             "machine": role.machine,
             "configured": role.device,
             "stated_by_configuration": role.stated,
-            "captures": [],
+            "sample_clock": role.sample_clock,
+            KINDS[kind].section: [],
         }
     manifest: JsonObject = {
         "layout": LAYOUT,
@@ -841,9 +733,10 @@ def _run(
 
     ledger = _Ledger(rundir, machine, manifest, script.roles)
     hosted: dict[str, Role] = {}
-    for name in script.roles:
+    for name, kind in script.roles.items():
         if name not in unreachable:
-            place = Place(captures=rundir.captures(name), logs=rundir.logs(name), note=rundir.note)
+            data = rundir.data(KINDS[kind].section, name)
+            place = Place(data=data, logs=rundir.logs(name), note=rundir.note)
             hosted[name] = _make_role(config, pinned, name, ledger.event, place)
 
     stop = _Stop()
@@ -899,7 +792,16 @@ def _run(
         outcome = "completed" if returned and failure is None else "failed"
     completed = outcome == "completed"
 
-    captures = [c for _, c in sorted(ledger.captures.items()) if c.capture_id is not None]
+    sections: JsonObject = {}
+    for kind_name, of_kind in KINDS.items():
+        records = [
+            record
+            for name in sorted(script.roles)
+            if script.roles[name] == kind_name
+            for record in ledger.accounts[name].records()
+        ]
+        sections[of_kind.totals_key] = of_kind.totals(records)
+        sections[of_kind.section] = list[JsonValue](records)
     results: JsonObject = {
         "schema": SCHEMA,
         "run_id": run_id,
@@ -908,12 +810,7 @@ def _run(
         "failure": None if failure is None else encode_object(failure),
         "started": encode_value(started),
         "ended": encode_value(now(machine)),
-        "recorded": {
-            "captures_started": len(captures),
-            "captures_stopped": sum(1 for c in captures if c.ended == "stopped"),
-            "frames": sum(c.frames for c in captures if c.frames is not None),
-        },
-        "captures": [c.encode() for c in captures],
+        **sections,
         "roles": {
             name: {
                 "kind": kind,

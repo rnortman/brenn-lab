@@ -25,12 +25,9 @@ from typing import IO
 from brenn_lab.capture.device import CaptureDevice
 from brenn_lab.capture.messages import (
     Build,
-    CardIdentity,
     Failed,
     Gap,
-    Granted,
     Late,
-    Location,
     NotRead,
     Recorder,
     Started,
@@ -44,9 +41,11 @@ from brenn_lab.data import (
     DecodeError,
     Failure,
     JsonValue,
+    Location,
     decode_value,
     encode_value,
 )
+from brenn_lab.sound import CardIdentity, Granted
 
 PROGRAM = "pod-capture"
 REPOSITORY = "brenn-pod"

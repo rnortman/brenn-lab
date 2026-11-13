@@ -19,6 +19,7 @@ SCHEMA = 1
 
 _ROLE_NAME = re.compile(r"[a-z][a-z0-9_]*")
 _ROLE_NAME_MAX_BYTES = 32
+_NAME_RULE = f"matches {_ROLE_NAME.pattern} and is at most {_ROLE_NAME_MAX_BYTES} bytes"
 
 
 @dataclass(frozen=True)
@@ -52,7 +53,10 @@ class Machine:
 class RoleConfig:
     """One role. `device` is the kind's parameters as configured, and
     `parameters` the same as the kind read them; `stated` is what a person
-    states about the device, null when nothing is stated.
+    states about the device, null when nothing is stated. `sample_clock`
+    names the device clock the role samples on: two roles that state the
+    same name are stated to sample on one clock. It is a person's statement,
+    checked by nothing; null states no shared clock.
     """
 
     name: str
@@ -61,6 +65,7 @@ class RoleConfig:
     device: JsonObject
     parameters: object
     stated: JsonObject | None
+    sample_clock: str | None
 
 
 @dataclass(frozen=True)
@@ -162,9 +167,8 @@ def _role(
     if table is None:
         return None
     before = len(table.problems)
-    if not _ROLE_NAME.fullmatch(name) or len(name.encode()) > _ROLE_NAME_MAX_BYTES:
-        rule = f"matches {_ROLE_NAME.pattern} and is at most {_ROLE_NAME_MAX_BYTES} bytes"
-        roles.problem(name, "bad_name", f"a role name {rule}")
+    if not _is_name(name):
+        roles.problem(name, "bad_name", f"a role name {_NAME_RULE}")
 
     kind_name = table.string("kind")
     kind = None
@@ -191,10 +195,18 @@ def _role(
     if device_table is not None and device is not None and kind is not None:
         parameters = kind.read_device(device_table)
     stated = table.json_table("stated", required=False)
+    sample_clock = table.string("sample_clock", required=False)
+    if sample_clock is not None and not _is_name(sample_clock):
+        table.problem("sample_clock", "bad_value", f"a clock's name {_NAME_RULE}")
     table.done()
 
     if len(table.problems) != before:
         return None
     assert kind_name is not None and machine_name is not None
     assert device is not None and parameters is not None
-    return RoleConfig(name, kind_name, machine_name, device, parameters, stated)
+    return RoleConfig(name, kind_name, machine_name, device, parameters, stated, sample_clock)
+
+
+def _is_name(name: str) -> bool:
+    """Whether `name` may name a role or a clock."""
+    return bool(_ROLE_NAME.fullmatch(name)) and len(name.encode()) <= _ROLE_NAME_MAX_BYTES

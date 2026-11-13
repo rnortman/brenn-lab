@@ -18,6 +18,7 @@ JSON forms:
 
 import dataclasses
 import json
+import time
 import types
 import typing
 from collections.abc import Callable, Mapping
@@ -70,8 +71,28 @@ def result[T](name: str) -> Callable[[type[T]], type[T]]:
 
 
 def event[T](name: str) -> Callable[[type[T]], type[T]]:
-    """Register a dataclass as the body of event `name`."""
-    return _registrar(_EVENTS, name)
+    """Register a dataclass as the body of event `name`.
+
+    An event that reports a failure carries it in a field named `failure`, of
+    type `Failure`; a dataclass whose `failure` field has another type is
+    refused.
+    """
+    register = _registrar(_EVENTS, name)
+
+    def checked(cls: type[T]) -> type[T]:
+        if dataclasses.is_dataclass(cls):
+            fields = {f.name for f in dataclasses.fields(cls)}
+            if "failure" in fields and typing.get_type_hints(cls)["failure"] is not Failure:
+                raise TypeError(f"{cls.__name__}.failure is not of type Failure")
+        return register(cls)
+
+    return checked
+
+
+def failure_of(body: object) -> Failure | None:
+    """The failure an event's body reports, if it reports one."""
+    failure = getattr(body, "failure", None)
+    return failure if isinstance(failure, Failure) else None
 
 
 def _name_in(table: Mapping[str, type], body: object, what: str) -> str:
@@ -106,6 +127,15 @@ class ClockReading:
     wall: ClockValue
 
 
+def now(machine: str) -> ClockReading:
+    """This process's clock reading on `machine`, its own."""
+    return ClockReading(
+        machine=machine,
+        monotonic=ClockValue(MONOTONIC, time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000),
+        wall=ClockValue(REALTIME, time.clock_gettime_ns(time.CLOCK_REALTIME) // 1000),
+    )
+
+
 @dataclass(frozen=True)
 class Failure:
     """Why a command failed or a role reports a failure.
@@ -117,6 +147,14 @@ class Failure:
     reason: str
     detail: str
     data: JsonObject = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Location:
+    """Where a role wrote a file: an absolute path on the named machine."""
+
+    machine: str
+    path: str
 
 
 @command("check")

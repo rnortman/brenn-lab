@@ -183,6 +183,7 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
     role = manifest["roles"]["mic"]
     assert role["stated_by_configuration"] == {"position": "on the desk"}
     assert role["configured"]["card"] == "clean"
+    assert role["sample_clock"] is None
     [capture] = role["captures"]
     assert capture["capture"] == 1
     assert capture["capture_id"] == started_line["record_id"]

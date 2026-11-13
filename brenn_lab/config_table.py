@@ -60,15 +60,15 @@ class Table:
         self.wrong_type(name, "a boolean")
         return None
 
-    def string(self, name: str) -> str | None:
-        value = self._take(name, True)
+    def string(self, name: str, required: bool = True) -> str | None:
+        value = self._take(name, required)
         if value is None or isinstance(value, str):
             return value
         self.wrong_type(name, "a string")
         return None
 
-    def integer(self, name: str) -> int | None:
-        value = self._take(name, True)
+    def integer(self, name: str, required: bool = True) -> int | None:
+        value = self._take(name, required)
         if value is None or (isinstance(value, int) and not isinstance(value, bool)):
             return value
         self.wrong_type(name, "an integer")
@@ -90,6 +90,16 @@ class Table:
         if isinstance(value, dict):
             return Table(value, self.key(name), self.problems)
         self.wrong_type(name, "a table")
+        return None
+
+    def tables(self, name: str, required: bool = True) -> list[Table] | None:
+        """A list of tables, an array of tables in TOML, each under `<key>[<i>]`."""
+        value = self._take(name, required)
+        if value is None:
+            return None
+        if isinstance(value, list) and all(isinstance(v, dict) for v in value):
+            return [Table(v, f"{self.key(name)}[{i}]", self.problems) for i, v in enumerate(value)]
+        self.wrong_type(name, "a list of tables")
         return None
 
     def json_table(self, name: str, required: bool = True) -> JsonObject | None:
