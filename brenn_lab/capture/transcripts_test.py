@@ -11,42 +11,27 @@ from pathlib import Path
 
 import pytest
 
-from brenn_lab.capture.pod_capture import ContractError, parse_line
+from brenn_lab.capture.messages import Build
+from brenn_lab.capture.pod_capture import ContractError, _StartedLine, parse_line
 from brenn_lab.data import JsonValue
 from brenn_lab.testing.transcript_files import DIR as TRANSCRIPTS
-from brenn_lab.testing.transcript_files import objects
+from brenn_lab.testing.transcript_files import objects, shape
 
 RECORDED = sorted((TRANSCRIPTS / "recorded").glob("*.jsonl"))
 AUTHORED = sorted((TRANSCRIPTS / "authored").glob("*.jsonl"))
 
 CARD_REASONS = {"no_card", "ambiguous_card"}
 
-# What the recorder's contract lets differ between two lines of one event:
-# `record_id` and `at_frame` are null before a log exists, and a gap's
-# `frames` is null when it was not measured.
+# What the recorder's contract lets differ between two lines of one event, by
+# dotted key: `record_id` and `at_frame` are null before a log exists, a gap's
+# `frames` is null when it was not measured, and `build.dirty` is null when the
+# build declared its commit rather than reading it from a checkout.
 EITHER = {
     ("capture_failed", "record_id"): {"str", "null"},
     ("capture_failed", "at_frame"): {"int", "null"},
     ("capture_gap", "frames"): {"int", "null"},
+    ("capture_started", "build.dirty"): {"bool", "null"},
 }
-
-
-def shape(value: JsonValue) -> object:
-    match value:
-        case None:
-            return "null"
-        case bool():
-            return "bool"
-        case int():
-            return "int"
-        case float():
-            return "float"
-        case str():
-            return "str"
-        case list():
-            return ("list", frozenset(repr(shape(v)) for v in value))
-        case dict():
-            return {k: shape(v) for k, v in value.items()}
 
 
 def recorded_by_event() -> dict[str, list[dict[str, JsonValue]]]:
@@ -136,16 +121,36 @@ def test_parse_line_reads_absent_cards_as_null() -> None:
     assert absent != parse_line(_bytes(_recorded("capture_failed")))
 
 
+def _alike(event: str, key: str, a: JsonValue, b: JsonValue) -> bool:
+    """Whether `a` and `b`, the values at dotted `key` of two lines of `event`,
+    have the same shape or two shapes the contract lets differ there.
+    """
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_alike(event, f"{key}.{k}", a[k], b[k]) for k in a)
+    sa, sb = shape(a), shape(b)
+    either = EITHER.get((event, key))
+    return sa == sb or bool(either and {str(sa), str(sb)} <= either)
+
+
+def test_parse_line_takes_a_declared_and_a_checkout_build() -> None:
+    recorded = _recorded("capture_started")
+    build = recorded["build"]
+    assert isinstance(build, dict)
+    commit = str(build["commit"])
+    for dirty, source in ((None, "declared"), (False, "git")):
+        given = {"commit": commit, "dirty": dirty, "source": source}
+        parsed = parse_line(_with("capture_started", "build", given))
+        assert isinstance(parsed, _StartedLine), source
+        assert parsed.build == Build(commit, dirty, source)
+
+
 def _comparable(line: dict[str, JsonValue], against: dict[str, JsonValue]) -> bool:
     event = str(line["event"])
     keys = set(line) - {"cards"}
     if keys != set(against) - {"cards"}:
         return False
-    for key in keys:
-        a, b = shape(line[key]), shape(against[key])
-        either = EITHER.get((event, key))
-        if a != b and not (either and {str(a), str(b)} <= either):
-            return False
+    if not all(_alike(event, key, line[key], against[key]) for key in keys):
+        return False
     if "cards" in line and "cards" in against:
         return shape(line["cards"]) == shape(against["cards"])
     return True

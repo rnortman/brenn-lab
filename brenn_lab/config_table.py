@@ -44,21 +44,34 @@ class Table:
             return None
         return self.value[name]
 
-    def _wrong(self, name: str, expected: str) -> None:
+    def wrong_type(self, name: str, expected: str) -> None:
         self.problem(name, "wrong_type", f"expected {expected}")
+
+    def raw(self, name: str) -> object:
+        """The required value of any type, for a caller that reads more than
+        one form; None when missing, having recorded why.
+        """
+        return self._take(name, True)
+
+    def boolean(self, name: str) -> bool | None:
+        value = self._take(name, True)
+        if value is None or isinstance(value, bool):
+            return value
+        self.wrong_type(name, "a boolean")
+        return None
 
     def string(self, name: str) -> str | None:
         value = self._take(name, True)
         if value is None or isinstance(value, str):
             return value
-        self._wrong(name, "a string")
+        self.wrong_type(name, "a string")
         return None
 
     def integer(self, name: str) -> int | None:
         value = self._take(name, True)
         if value is None or (isinstance(value, int) and not isinstance(value, bool)):
             return value
-        self._wrong(name, "an integer")
+        self.wrong_type(name, "an integer")
         return None
 
     def string_list(self, name: str) -> list[str] | None:
@@ -67,7 +80,7 @@ class Table:
             return None
         if isinstance(value, list) and all(isinstance(v, str) for v in value):
             return [str(v) for v in value]
-        self._wrong(name, "a list of strings")
+        self.wrong_type(name, "a list of strings")
         return None
 
     def table(self, name: str, required: bool = True) -> Table | None:
@@ -76,7 +89,7 @@ class Table:
             return None
         if isinstance(value, dict):
             return Table(value, self.key(name), self.problems)
-        self._wrong(name, "a table")
+        self.wrong_type(name, "a table")
         return None
 
     def json_table(self, name: str, required: bool = True) -> JsonObject | None:

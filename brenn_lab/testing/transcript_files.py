@@ -9,7 +9,7 @@ that is not JSON on purpose; the readers here skip such a line.
 import json
 from pathlib import Path
 
-from brenn_lab.data import MONOTONIC, REALTIME, JsonObject
+from brenn_lab.data import MONOTONIC, REALTIME, JsonObject, JsonValue
 
 DIR = Path(__file__).absolute().parent / "transcripts"
 KINDS = ("recorded", "authored")
@@ -56,6 +56,27 @@ def layout_of(name: str) -> tuple[str, ...]:
     layout = line(name, "capture_started")["layout"]
     assert isinstance(layout, list)
     return tuple(str(x) for x in layout)
+
+
+def shape(value: JsonValue) -> object:
+    """The JSON type of `value`: an object key for key, a list by the set of
+    its elements' shapes.
+    """
+    match value:
+        case None:
+            return "null"
+        case bool():
+            return "bool"
+        case int():
+            return "int"
+        case float():
+            return "float"
+        case str():
+            return "str"
+        case list():
+            return ("list", frozenset(repr(shape(v)) for v in value))
+        case dict():
+            return {k: shape(v) for k, v in value.items()}
 
 
 def reading(value: JsonObject, machine: str) -> JsonObject:

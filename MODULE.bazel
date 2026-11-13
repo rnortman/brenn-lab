@@ -1,11 +1,14 @@
 """brenn-lab's Bazel module graph.
 
-Every tool and interpreter here is pinned and fetched by checksum, so on
-linux x86_64 a build needs nothing from the host but bazelisk. On linux aarch64
-the C toolchain has no pinned sysroot and links against the host's. Python dependencies are not declared
+Every tool and interpreter here is pinned and fetched by checksum, except
+brenn-pod's crates, which are pinned by commit and fetched with the host's git;
+so on linux x86_64 a build needs nothing from the host but bazelisk and git. On
+linux aarch64 the C toolchain has no pinned sysroot and links against the
+host's, the recorder's libasound included. Python dependencies are not declared
 here: `requirements.in` names them and `requirements_lock.txt` pins them with
-hashes; `make repin` regenerates the lock. The Rust and LLVM toolchains exist
-only to build the two gate tools, brenn-scrub and allthechanges; the
+hashes; `make repin` regenerates that lock and the four crate locks. The Rust
+and LLVM toolchains build the two gate tools, brenn-scrub and allthechanges,
+and the two programs pinned from brenn-pod, pod-capture and frame-log; the
 repository has no Rust of its own.
 """
 
@@ -80,9 +83,10 @@ http_archive(
           "/ruff-aarch64-unknown-linux-musl.tar.gz",
 )
 
-# --- Rust toolchain, for the gate tools only --------------------------------
+# --- Rust toolchain, for the gate tools and brenn-pod's programs ------------
 # brenn-scrub publishes no binaries, so the gate builds it from its crate, and
-# allthechanges the same way. Nothing else here is Rust.
+# allthechanges the same way; brenn-pod's recorder and reader are built from
+# their crates at a pinned commit. Nothing else here is Rust.
 RUST_VERSION = "1.98.0"
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
@@ -134,7 +138,78 @@ crate.from_specs(
     cargo_lockfile = "//tools/allthechanges:Cargo.lock",
     lockfile = "//tools/allthechanges:cargo-bazel-lock.json",
 )
-use_repo(crate, "allthechanges_crates", "scrub_crates")
+
+# --- brenn-pod's programs -------------------------------------------------
+# The recorder, pod-capture, which the runner carries for a capture role whose
+# machine names `pod_capture = { pinned = true }`, and the reader, frame-log.
+# Each is a hub of its own on the same extension, pinned by the two files under
+# tools/brenn_pod/<program>. Unlike every other pin here they are fetched by
+# commit, with the host's git, and not by checksum. BRENN_POD_COMMIT is the one
+# statement of the revision; //tools/pins:pins_test holds every use of it.
+# TODO(pinned-brenn-pod-revision-not-on-main): the commit is the head of a
+# branch on brenn-pod's remote, not on its main.
+BRENN_POD_COMMIT = "145886ac600a4512a41c42a065a606e70e7046d8"
+
+BRENN_POD_REMOTE = "https://github.com/rnortman/brenn-pod.git"
+
+crate.spec(
+    git = BRENN_POD_REMOTE,
+    package = "pod-capture",
+    repositories = ["pod_capture_crates"],
+    rev = BRENN_POD_COMMIT,
+)
+crate.annotation(
+    crate = "pod-capture",
+    gen_binaries = ["pod-capture"],
+    repositories = ["pod_capture_crates"],
+)
+
+# build-id's build script runs the host's git even when the commit is declared
+# to it. Off, and these are the three values it sets for a declared commit.
+# TODO(pinned-recorder-build-states-build-id-internals): the names and the
+# rule are the crate's own.
+crate.annotation(
+    crate = "build-id",
+    gen_build_script = "off",
+    repositories = ["pod_capture_crates"],
+    rustc_env = {
+        "HIL_BUILD_COMMIT": BRENN_POD_COMMIT,
+        "HIL_BUILD_DIRTY": "false",
+        "HIL_BUILD_SOURCE": "declared",
+    },
+)
+
+# alsa-sys's build script reads the host's pkg-config, which puts the host's
+# library directory ahead of the pinned sysroot and breaks the link. Off; the
+# library is found through the C toolchain's sysroot.
+crate.annotation(
+    crate = "alsa-sys",
+    gen_build_script = "off",
+    repositories = ["pod_capture_crates"],
+    rustc_flags = ["-ldylib=asound"],
+)
+crate.from_specs(
+    name = "pod_capture_crates",
+    cargo_lockfile = "//tools/brenn_pod/pod_capture:Cargo.lock",
+    lockfile = "//tools/brenn_pod/pod_capture:cargo-bazel-lock.json",
+)
+crate.spec(
+    git = BRENN_POD_REMOTE,
+    package = "frame-log",
+    repositories = ["frame_log_crates"],
+    rev = BRENN_POD_COMMIT,
+)
+crate.annotation(
+    crate = "frame-log",
+    gen_binaries = ["frame-log"],
+    repositories = ["frame_log_crates"],
+)
+crate.from_specs(
+    name = "frame_log_crates",
+    cargo_lockfile = "//tools/brenn_pod/frame_log:Cargo.lock",
+    lockfile = "//tools/brenn_pod/frame_log:cargo-bazel-lock.json",
+)
+use_repo(crate, "allthechanges_crates", "frame_log_crates", "pod_capture_crates", "scrub_crates")
 
 # --- gitleaks -------------------------------------------------------------
 # The release brenn-scrub 0.2.0 pins. brenn-scrub refuses any other gitleaks
@@ -168,9 +243,11 @@ http_archive(
 # keeps the host compiler out of it. The sysroot is Chromium's bullseye amd64
 # sysroot (glibc 2.31): binaries link against it and run on any newer glibc.
 # It is pinned for linux-x86_64 only; on a linux-aarch64 host the LLVM
-# toolchain falls back to the host's own headers and libc.
+# toolchain falls back to the host's own headers and libc, and the recorder's
+# link takes the host's libasound, from the host's ALSA development files.
 # TODO(aarch64-gate-tools-link-host-libc): pin a sysroot for linux-aarch64
-# too, so the gate tools build there without the host's libc.
+# too, so the gate tools and brenn-pod's programs build there without the
+# host's libc or ALSA development files.
 # `dev_dependency`: registration is unconditional, and a module depending on
 # this one brings its own toolchain.
 bazel_dep(name = "toolchains_llvm", version = "1.12.0", dev_dependency = True)

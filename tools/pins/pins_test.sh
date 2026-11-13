@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
-# Asserts that the Python version, stated in four files that cannot share a
-# constant, is the same in all of them:
+# Holds two pins.
+#
+# The Python version, stated in four files that cannot share a constant, is the
+# same in all of them:
 #   1. PYTHON_VERSION in MODULE.bazel (major.minor);
 #   2. python_version of mypy_cli in tools/mypy/BUILD.bazel;
 #   3. python_version in mypy.ini;
 #   4. target-version in ruff.toml, as py<major><minor>.
+#
+# The brenn-pod commit is stated once, as BRENN_POD_COMMIT in MODULE.bazel,
+# and every use of it goes through that constant:
+#   1. exactly one BRENN_POD_COMMIT line, a 40-digit lowercase hex commit;
+#   2. every `rev = ` line in MODULE.bazel is `rev = BRENN_POD_COMMIT,`, and
+#      there are two, one per hub;
+#   3. exactly one "HIL_BUILD_COMMIT" line, whose value is BRENN_POD_COMMIT;
+#   4. the commit the recorded transcripts' README names is BRENN_POD_COMMIT,
+#      so a pin moved without retaking the transcripts fails here.
 set -euo pipefail
 
 # --- begin runfiles.bash initialization v3 ---
@@ -23,6 +34,7 @@ module_bazel="$(rlocation "$MODULE_BAZEL")"
 mypy_build="$(rlocation "$MYPY_BUILD")"
 mypy_ini="$(rlocation "$MYPY_INI")"
 ruff_toml="$(rlocation "$RUFF_TOML")"
+transcripts_readme="$(rlocation "$TRANSCRIPTS_README")"
 
 # Prints the one value a sed script extracts from a file; fails unless there
 # is exactly one.
@@ -67,7 +79,45 @@ if [[ "$ruff_target" != "$expected_target" ]]; then
     status=1
 fi
 
+brenn_pod_commit="$(extract BRENN_POD_COMMIT "$module_bazel" \
+    's/^BRENN_POD_COMMIT = "\([0-9a-f]\{40\}\)"$/\1/p')"
+# Any line that assigns BRENN_POD_COMMIT, well-formed or not.
+brenn_pod_commit_lines="$(grep -c '^ *BRENN_POD_COMMIT *=' "$module_bazel" || true)"
+if [[ "$brenn_pod_commit_lines" -ne 1 ]]; then
+    echo "FAIL: expected one assignment of BRENN_POD_COMMIT in MODULE.bazel," \
+        "found $brenn_pod_commit_lines" >&2
+    status=1
+fi
+
+rev_lines="$(grep '^ *rev = ' "$module_bazel" || true)"
+rev_count="$(grep -c . <<<"$rev_lines" || true)"
+rev_by_constant="$(grep -c '^ *rev = BRENN_POD_COMMIT,$' <<<"$rev_lines" || true)"
+if [[ "$rev_count" -ne 2 || "$rev_by_constant" -ne 2 ]]; then
+    echo "FAIL: expected two rev lines in MODULE.bazel, each" \
+        "'rev = BRENN_POD_COMMIT,'; found:" >&2
+    printf '%s\n' "$rev_lines" >&2
+    status=1
+fi
+
+hil_value="$(extract HIL_BUILD_COMMIT "$module_bazel" \
+    's/^ *"HIL_BUILD_COMMIT": \(.*\),$/\1/p')"
+hil_lines="$(grep -c '"HIL_BUILD_COMMIT"' "$module_bazel" || true)"
+if [[ "$hil_value" != "BRENN_POD_COMMIT" || "$hil_lines" -ne 1 ]]; then
+    echo "FAIL: expected one \"HIL_BUILD_COMMIT\" line in MODULE.bazel, with" \
+        "the value BRENN_POD_COMMIT; found $hil_lines, value $hil_value" >&2
+    status=1
+fi
+
+readme_commit="$(extract "brenn-pod commit" "$transcripts_readme" \
+    's/^brenn-pod commit: `\([^`]*\)`$/\1/p')"
+if [[ "$readme_commit" != "$brenn_pod_commit" ]]; then
+    echo "FAIL: the recorded transcripts were taken at brenn-pod $readme_commit" \
+        "but BRENN_POD_COMMIT in MODULE.bazel is $brenn_pod_commit; retake them" \
+        "from the hardware lane's saved outputs" >&2
+    status=1
+fi
+
 if [[ "$status" -eq 0 ]]; then
-    echo "pins agree: python $python_version"
+    echo "pins agree: python $python_version, brenn-pod $brenn_pod_commit"
 fi
 exit "$status"

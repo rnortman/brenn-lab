@@ -1,6 +1,8 @@
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
-# Holds the Python version pins that live in more than one file equal.
+# Holds two pins: the Python version, which lives in four files, equal; and
+# every use of the brenn-pod commit, the transcripts' README included, to the
+# one constant in MODULE.bazel.
 sh_test(
     name = "pins_test",
     size = "small",
@@ -9,6 +11,7 @@ sh_test(
         "//:MODULE.bazel",
         "//:mypy.ini",
         "//:ruff.toml",
+        "//brenn_lab/testing:transcripts/README.md",
         "//tools/mypy:BUILD.bazel",
     ],
     env = {
@@ -16,6 +19,7 @@ sh_test(
         "MYPY_BUILD": "$(rlocationpath //tools/mypy:BUILD.bazel)",
         "MYPY_INI": "$(rlocationpath //:mypy.ini)",
         "RUFF_TOML": "$(rlocationpath //:ruff.toml)",
+        "TRANSCRIPTS_README": "$(rlocationpath //brenn_lab/testing:transcripts/README.md)",
     },
     deps = ["@bazel_tools//tools/bash/runfiles"],
 )

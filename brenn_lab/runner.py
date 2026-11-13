@@ -51,7 +51,7 @@ from brenn_lab.data import (
     encode_object,
     encode_value,
 )
-from brenn_lab.labconfig import LabConfig
+from brenn_lab.labconfig import Installed, LabConfig
 from brenn_lab.place import Place
 from brenn_lab.roles import KINDS, Role
 from brenn_lab.rundir import LAYOUT, RunDir
@@ -217,12 +217,22 @@ def _binding(config: LabConfig, machine: str, name: str, kind: str) -> Failure |
 
 
 def _make_role(
-    config: LabConfig, name: str, sink: Callable[[Event], None], place: Place | None
+    config: LabConfig,
+    pinned: Mapping[str, str],
+    name: str,
+    sink: Callable[[Event], None],
+    place: Place | None,
 ) -> Role:
+    """The hosted role `name`, handed the path of each program its machine
+    names: an installed program's configured path, or the path at which this
+    process carries a pinned one.
+    """
     role = config.roles[name]
-    return KINDS[role.kind].make(
-        name, role.machine, config.machines[role.machine].programs, role.parameters, sink, place
-    )
+    programs = {
+        program: source.path if isinstance(source, Installed) else pinned[program]
+        for program, source in config.machines[role.machine].programs.items()
+    }
+    return KINDS[role.kind].make(name, role.machine, programs, role.parameters, sink, place)
 
 
 # The dry run.
@@ -254,8 +264,11 @@ class _Trace:
         pass
 
 
-def dry_run(lab_path: Path, machine: str, script_path: Path) -> JsonObject | Refused:
-    """The dry-run report, or the refusal of the invocation.
+def dry_run(
+    lab_path: Path, machine: str, script_path: Path, pinned: Mapping[str, str]
+) -> JsonObject | Refused:
+    """The dry-run report, or the refusal of the invocation. `pinned` maps
+    each program the build pins to the path this process carries it at.
 
     Must be called on the main thread: for the length of the dry run SIGTERM
     raises `KeyboardInterrupt`, as SIGINT does, so that a probe interrupted
@@ -263,7 +276,7 @@ def dry_run(lab_path: Path, machine: str, script_path: Path) -> JsonObject | Ref
     """
     previous = signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
-        return _dry_run(lab_path, machine, script_path)
+        return _dry_run(lab_path, machine, script_path, pinned)
     finally:
         signal.signal(signal.SIGTERM, previous)
 
@@ -272,7 +285,9 @@ def _no_events(event: Event) -> None:
     raise AssertionError(f"a role reported an event in a dry run: {event}")
 
 
-def _dry_run(lab_path: Path, machine: str, script_path: Path) -> JsonObject | Refused:
+def _dry_run(
+    lab_path: Path, machine: str, script_path: Path, pinned: Mapping[str, str]
+) -> JsonObject | Refused:
     lab_data = _read(lab_path, "lab configuration")
     script_data = _read(script_path, "script")
     unread = [d for d in (lab_data, script_data) if isinstance(d, Problem)]
@@ -322,7 +337,7 @@ def _dry_run(lab_path: Path, machine: str, script_path: Path) -> JsonObject | Re
         else:
             # A role with no place to write sends only dry commands and probes,
             # and neither reports an event.
-            roles[name] = _make_role(config, name, _no_events, None)
+            roles[name] = _make_role(config, pinned, name, _no_events, None)
 
     for name, role in roles.items():
         reply = role.handle(Command(role=name, body=Check(), dry=True))
@@ -690,9 +705,11 @@ def run(
     notes_path: Path | None,
     harness: Revision,
     workspace: Path | None,
+    pinned: Mapping[str, str],
 ) -> JsonObject | Refused:
     """Run the script and return the pointer to its results, or refuse. A
-    relative `out` is taken from the current directory.
+    relative `out` is taken from the current directory. `pinned` maps each
+    program the build pins to the path this process carries it at.
 
     Must be called on the main thread: it takes SIGINT and SIGTERM for the
     length of the run.
@@ -745,6 +762,7 @@ def run(
             notes,
             harness,
             unreachable,
+            pinned,
         )
     finally:
         rundir.close()
@@ -758,6 +776,7 @@ def _out_problems(out: Path, workspace: Path | None) -> list[Problem]:
         return [problem("out_exists", f"{out} exists; a run never writes into another")]
     if not out.parent.is_dir():
         return [problem("out_parent_missing", f"{out.parent} is not a directory")]
+    # TODO(run-refused-inside-workspace)
     if workspace is not None:
         target = out.parent.resolve() / out.name
         if target.is_relative_to(workspace.resolve()):
@@ -782,6 +801,7 @@ def _run(
     notes: tuple[str, bytes] | None,
     harness: Revision,
     unreachable: dict[str, Failure],
+    pinned: Mapping[str, str],
 ) -> JsonObject:
     run_id = str(uuid.uuid4())
     started = now(machine)
@@ -824,7 +844,7 @@ def _run(
     for name in script.roles:
         if name not in unreachable:
             place = Place(captures=rundir.captures(name), logs=rundir.logs(name), note=rundir.note)
-            hosted[name] = _make_role(config, name, ledger.event, place)
+            hosted[name] = _make_role(config, pinned, name, ledger.event, place)
 
     stop = _Stop()
     session = _Live(ledger, hosted, unreachable, stop)

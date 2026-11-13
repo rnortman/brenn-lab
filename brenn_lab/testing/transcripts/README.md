@@ -8,9 +8,11 @@ brenn-pod commit: `145886ac600a4512a41c42a065a606e70e7046d8`
 
 ## `recorded/`
 
-The real `pod-capture`'s stdout, built at the commit above with no tracked
-change, recording a reSpeaker Flex XVF3800 at 16 kHz, `s16_le`, six channels.
-Each file is the `logs/mic/recorder-0001.stdout.jsonl` of a run made through
+The stdout of the `pod-capture` this repository pins, built by Bazel at the
+commit above, which that build declares, recording a reSpeaker Flex XVF3800 at
+16 kHz, `s16_le`, six channels. Each file is the saved output, `<case>.jsonl`,
+of the hardware-lane test `//brenn_lab:capture_flex_hardware_test` for its
+case: the `logs/mic/recorder-0001.stdout.jsonl` of a run made through
 `//brenn_lab:lab` with `examples/ten_seconds.py`.
 
 - `clean.jsonl`: a ten-second capture started and stopped by the script.
@@ -29,9 +31,14 @@ Replaced by hand before committing, and nothing else:
 These are a tool's event lines; no audio is in them. No replay file sits in
 this directory: a recorded transcript replays by the stand-in's default rule.
 
+To retake them: run `make hardware-test` with the Flex attached, take the three
+saved outputs from
+`bazel-testlogs/brenn_lab/capture_flex_hardware_test/test.outputs/`, make the
+replacements above, and set the commit above to the one `MODULE.bazel` pins.
+
 ## `authored/`
 
-Cases no hand run produces, written from brenn-pod's
+Cases no lane test produces, written from brenn-pod's
 `docs/reference/pod-capture.md` at the commit above. They are held to that
 document only, and to the recorded lines wherever the same event was recorded.
 

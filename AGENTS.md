@@ -12,31 +12,46 @@ Bazel is the build. The Makefile is a frontend whose every target is a
 spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
 `python` or `cargo` on the host, and the gate never will.
 
-- Every toolchain and every tool the gate runs is pinned in `MODULE.bazel` and
-  fetched by checksum. On linux x86_64 the only host prerequisites are
+- Every toolchain and every tool the gate runs is pinned in `MODULE.bazel`.
+  brenn-pod's two programs are fetched by commit, with the host's git; the
+  rest by checksum. On linux x86_64 the only host prerequisites are
   bazelisk (as `bazel`), git and make, on a base system that has `bash`,
   `grep`, `sed` and the coreutils `env`, `uname`, `dirname`, `cut`, `tr` and
   `wc`. On linux aarch64 the C toolchain has no pinned sysroot, so building
-  the gate tools also needs the host's libc headers and libraries.
+  the gate tools and the two pinned programs also needs the host's libc
+  headers and libraries and, for the recorder's link, the host's ALSA
+  development files.
 - Nothing in a build or test action may reach for a host-installed program.
   A test that needs a service, a fixture generator or a linter gets it as a
   Bazel dependency. If a tool is genuinely impractical to bring in through
   Bazel, pick a different tool, and if that is not possible either, surface it
   as a decision rather than adding a host dependency.
-- The one place the build reads git is the workspace status command,
-  `tools/buildinfo/status.sh`, which `.bazelrc` names; it stamps the runner
-  with the commit and cleanliness of the tree it was built from.
+- The one place the build reads this tree's git state is the workspace status
+  command, `tools/buildinfo/status.sh`, which `.bazelrc` names; it stamps the
+  runner with the commit and cleanliness of the tree it was built from. The
+  one other use of the host's git is the fetch of brenn-pod's crates, by
+  commit, in a repository rule and in no build or test action.
 - Python dependencies are `requirements.in` and its lock,
   `requirements_lock.txt`, hash-pinned for both linux CPUs and resolved by the
   pinned uv with the hermetic interpreter. `make repin` regenerates it and the
-  two gate-tool crate locks. After any change to `requirements.in` or a tool
-  bump, run it and commit every lock file that changed.
+  four crate locks. After any change to `requirements.in`, a tool bump or a
+  move of the brenn-pod pin, run it and commit every lock file that changed.
 - Python tests in BUILD files use `py_pytest_test` from
   `//tools/pytest:defs.bzl`.
-- The Rust and LLVM toolchains exist only to build the two gate tools,
-  `//tools/scrub` (the secret scanner) and `//tools/allthechanges` (the
-  changelog and TODO fragment tool), each pinned by its own `Cargo.lock` and
-  `cargo-bazel-lock.json`. The repository has no Rust of its own.
+- The Rust and LLVM toolchains build the two gate tools, `//tools/scrub` (the
+  secret scanner) and `//tools/allthechanges` (the changelog and TODO fragment
+  tool), and the two programs pinned from brenn-pod,
+  `//tools/brenn_pod:pod-capture` (the recorder the runner carries) and
+  `//tools/brenn_pod:frame-log` (the reader), each hub pinned by its own
+  `Cargo.lock` and `cargo-bazel-lock.json`. The repository still has no Rust
+  of its own. `BRENN_POD_COMMIT` in `MODULE.bazel` is the one statement of
+  brenn-pod's revision, and `//tools/pins:pins_test` holds the file's uses of
+  it and the recorded transcripts' README to it.
+- Moving the brenn-pod pin, in order: change `BRENN_POD_COMMIT`, `make repin`,
+  `make hardware-test`, retake the recorded transcripts from its saved outputs
+  and set the commit in their README
+  (`brenn_lab/testing/transcripts/README.md` says how), `make check`, then
+  `make hardware-test` again.
 - The Python version is written in `MODULE.bazel`, `tools/mypy/BUILD.bazel`,
   `mypy.ini` and `ruff.toml`; `//tools/pins:pins_test` holds them equal.
 
@@ -50,7 +65,7 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
 | `make hardware-test` | Run the hardware lane: tests that need a device attached |
 | `make audible-test WINDOW=...` | Run the audible lane: tests that play sound or move a robot. Refuses without `WINDOW` (see Test lanes) |
 | `make fix` | ruff (format and lint fixes) and buildifier the tree in place |
-| `make repin` | Regenerate the Python lock and both gate-tool crate locks |
+| `make repin` | Regenerate the Python lock and the four crate locks |
 | `make todo-gather` | Fold `todo.d/` fragments into `TODO.md` |
 | `make changes ARGS=...` | Run allthechanges: `ARGS="query"`, `ARGS="todo query"`, `ARGS="gather --version X.Y.Z --dry-run"` |
 | `make lab ARGS=...` | Run the experiment runner: `ARGS="dry-run --lab <lab.toml> --machine <name> --script <script.py>"`, or `run` with `--out <dir>` |
@@ -118,6 +133,12 @@ is never served from cache.
 - Run a lane with `make hardware-test` or `make audible-test`. The canaries in
   `tools/lanes/` pass only inside their lane and fail the default check if the
   filter ever stops excluding them.
+- A lane test that records runs the pinned recorder, which loads the host's
+  ALSA runtime library (`libasound.so.2`). That library is a prerequisite of
+  the lanes and of running the pinned recorder, and of nothing in
+  `make check`. The capture role's lane test,
+  `//brenn_lab:capture_flex_hardware_test`, needs a reSpeaker Flex XVF3800 on
+  its six-channel USB image; without it the lane fails.
 - Hardware-in-the-loop tests assert the expected behaviour and are allowed to
   fail. They are not throwaway probes. An unexpected hardware reading goes to
   the maintainer before any test is changed to pass.

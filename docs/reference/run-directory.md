@@ -132,8 +132,13 @@ every source file by name, so a new source file reaches the runner only
 through a change to a tracked BUILD file, which is dirty until it is
 committed. A commit that names a source file and leaves the file itself
 untracked stamps clean: the runner then holds code that no commit has, and
-`dirty` false does not show it. `dirty` may be `null` when a
-build declared its commit rather than reading it from a checkout.
+`dirty` false does not show it.
+
+`dirty` is `null` when a build declared its commit rather than reading it
+from a checkout, and `null` means "not asserted", not "clean". The recorder
+this repository's build pins is such a build: it reports `source` `declared`,
+`dirty` `null`, and as `commit` the brenn-pod commit Bazel fetched, the one
+`MODULE.bazel` pins.
 
 ## `manifest.json`
 
@@ -153,7 +158,7 @@ temporary file, then a rename) each time a capture starts.
  "repositories": [
    {"repository": "brenn-lab", "commit": "…", "dirty": false, "source": "git",
     "from": "the harness's build stamp"},
-   {"repository": "brenn-pod", "commit": "…", "dirty": false, "source": "git",
+   {"repository": "brenn-pod", "commit": "…", "dirty": null, "source": "declared",
     "from": "the recorder's report at the start of capture mic/0001"}],
  "roles": {"mic": {
    "kind": "capture", "machine": "bench",
@@ -197,7 +202,7 @@ temporary file, then a rename) each time a capture starts.
 {"capture": 1,
  "capture_id": "<32 hex>",
  "recorder": {"program": "pod-capture", "repository": "brenn-pod",
-              "build": {"commit": "…", "dirty": false, "source": "git"}},
+              "build": {"commit": "…", "dirty": null, "source": "declared"}},
  "device": {"selector": "…", "card_index": 2, "card_name": "…", "card_long_name": "…",
             "pcm": "hw:2,0", "usb_id": "2886:0022"},
  "granted": {"rate_hz": 16000, "channels": 6, "sample_format": "s16_le",
@@ -363,7 +368,7 @@ described in `experiments.md`, *Failure reasons*.
 | Reason | `data` |
 |---|---|
 | the recorder's ten (`destination_exists`, `no_card`, `ambiguous_card`, `open`, `params`, `destination`, `stream_died`, `destination_full`, `write_failed`, `write_stalled`) | `at_frame` (`null` before a log exists) and `at` (a clock reading on the role's machine); `cards`, each `{index, name, long_name}`, as well when the recorder listed cards (`no_card`, `ambiguous_card`); `log_complete: "not_established"` as well for `write_stalled` |
-| `recorder_missing` | `{program}`: the configured path |
+| `recorder_missing` | `{program}`: the path tried, the configured one or the pinned recorder's |
 | `recorder_usage` | `{channel}` when the harness refused a channel name with a comma; `{stderr, exit_status}` when the recorder refused its command line |
 | `recorder_exited` | `{exit_status}` |
 | `recorder_contract` | `{line}` for a line outside the recorder's contract; `{exit_status}` for an exit status that disagrees with the last line; `{reason}` for a failure reason the recorder's contract does not list |

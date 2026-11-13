@@ -11,6 +11,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,9 @@ STAND_IN = os.path.abspath(os.environ["STAND_IN"])
 EXAMPLE = Path(os.path.abspath(os.environ["EXAMPLE"]))
 MACHINE = "bench"
 HARNESS = Revision(commit="0123456789abcdef0123456789abcdef01234567", dirty=False, source="git")
+# Where the runner carries the pinned recorder: no executable, so a role that
+# took it in place of a configured path fails with recorder_missing.
+PINNED = {"pod_capture": "/nonexistent/pinned/pod-capture"}
 
 
 def line(name: str, event: str) -> Any:
@@ -42,14 +46,16 @@ def lab(
     tmp_path: Path,
     roles: dict[str, tuple[str, str]],
     layout: tuple[str, ...] | None = None,
+    program: str = json.dumps(STAND_IN),
 ) -> Path:
     """A lab with machines `bench` and `far`; `roles` maps a role to its card
-    (a transcript name) and machine.
+    (a transcript name) and machine. `program` is bench's `pod_capture`, as
+    TOML: the stand-in's path unless given.
     """
     text = textwrap.dedent(f"""\
         schema = 1
         [machines.bench.programs]
-        pod_capture = {json.dumps(STAND_IN)}
+        pod_capture = {program}
         [machines.far.programs]
         pod_capture = "/opt/pod-capture"
         """)
@@ -93,7 +99,7 @@ mic.send(capture.Stop())
 
 
 def dry(lab_path: Path, script_path: Path) -> Any:
-    report = runner.dry_run(lab_path, MACHINE, script_path)
+    report = runner.dry_run(lab_path, MACHINE, script_path, PINNED)
     assert isinstance(report, dict), report
     return report
 
@@ -104,10 +110,11 @@ def do_run(
     script_path: Path,
     notes: Path | None = None,
     workspace: Path | None = None,
+    pinned: Mapping[str, str] = PINNED,
 ) -> tuple[Path, Any, Any]:
     out = tmp_path / "run"
     pointer = runner.run(
-        lab_path, MACHINE, script_path, str(script_path), out, notes, HARNESS, workspace
+        lab_path, MACHINE, script_path, str(script_path), out, notes, HARNESS, workspace, pinned
     )
     assert isinstance(pointer, dict), pointer
     assert pointer["run"] == str(out)
@@ -369,7 +376,7 @@ def test_a_script_that_does_not_load(tmp_path: Path) -> None:
 
     bad.write_text("raise KeyboardInterrupt\n")
     with pytest.raises(KeyboardInterrupt):
-        runner.dry_run(lab_path, MACHINE, bad)
+        runner.dry_run(lab_path, MACHINE, bad, PINNED)
 
 
 def test_a_check_while_capturing_is_refused_in_both(tmp_path: Path) -> None:
@@ -407,7 +414,9 @@ def test_a_relative_out_is_taken_from_the_current_directory(
 ) -> None:
     lab_path = lab(tmp_path, {"mic": ("clean", MACHINE)})
     monkeypatch.chdir(tmp_path)
-    pointer = runner.run(lab_path, MACHINE, EXAMPLE, str(EXAMPLE), Path("run"), None, HARNESS, None)
+    pointer = runner.run(
+        lab_path, MACHINE, EXAMPLE, str(EXAMPLE), Path("run"), None, HARNESS, None, PINNED
+    )
     assert isinstance(pointer, dict) and pointer["run"] == str(tmp_path / "run")
     results = json.loads((tmp_path / "run" / "results.json").read_text())
     assert results["captures"][0]["file"]["in_run"] is True
@@ -423,7 +432,7 @@ def test_a_dry_run_stopped_by_sigterm_kills_its_probe(
     timer.start()
     try:
         with pytest.raises(KeyboardInterrupt):
-            runner.dry_run(lab_path, MACHINE, EXAMPLE)
+            runner.dry_run(lab_path, MACHINE, EXAMPLE, PINNED)
     finally:
         timer.cancel()
     assert procs and all(p.returncode is not None for p in procs)
@@ -465,6 +474,69 @@ def test_a_late_block_is_recorded(tmp_path: Path) -> None:
         }
     ]
     assert capture["loss_free"] is True
+
+
+PINNED_FORM = "{ pinned = true }"
+
+
+def test_a_pinned_recorder_runs_as_a_configured_one(tmp_path: Path) -> None:
+    by_path = tmp_path / "by_path"
+    by_pin = tmp_path / "by_pin"
+    by_path.mkdir()
+    by_pin.mkdir()
+    _, path_manifest, path_results = do_run(
+        by_path, lab(by_path, {"mic": ("clean", MACHINE)}), EXAMPLE
+    )
+    _, pin_manifest, pin_results = do_run(
+        by_pin,
+        lab(by_pin, {"mic": ("clean", MACHINE)}, program=PINNED_FORM),
+        EXAMPLE,
+        pinned={"pod_capture": STAND_IN},
+    )
+    assert pin_results["completed"] is True, pin_results
+
+    # Everything the recorder reported, and nothing of the clocks.
+    assert pin_manifest["repositories"] == path_manifest["repositories"]
+    [pin_capture] = pin_manifest["roles"]["mic"]["captures"]
+    [path_capture] = path_manifest["roles"]["mic"]["captures"]
+    for key in ("capture_id", "file", "recorder", "device", "granted", "layout"):
+        assert pin_capture[key] == path_capture[key], key
+    for key in ("outcome", "completed", "failure", "recorded", "roles"):
+        assert pin_results[key] == path_results[key], key
+    [pin_result] = pin_results["captures"]
+    [path_result] = path_results["captures"]
+    for key in ("file", "ended", "stopped_by", "frames", "gaps_reported", "loss_free"):
+        assert pin_result[key] == path_result[key], key
+
+
+def recorder_missing(results: Any) -> str:
+    failure = results["failure"]
+    assert (failure["where"], failure["role"], failure["reason"]) == (
+        "role",
+        "mic",
+        "recorder_missing",
+    ), failure
+    program = failure["data"]["program"]
+    assert isinstance(program, str)
+    return program
+
+
+def test_a_pinned_recorder_that_is_missing_does_not_fall_back(tmp_path: Path) -> None:
+    lab_path = lab(tmp_path, {"mic": ("clean", MACHINE)}, program=PINNED_FORM)
+    report = dry(lab_path, EXAMPLE)
+    assert [r for r in reasons(report) if r[2] == "recorder_missing"] == [
+        ("role", "mic", "recorder_missing")
+    ]
+    _, _, results = do_run(tmp_path, lab_path, EXAMPLE)
+    assert recorder_missing(results) == PINNED["pod_capture"]
+
+
+def test_a_configured_recorder_that_is_missing_does_not_fall_back(tmp_path: Path) -> None:
+    missing = str(tmp_path / "no-pod-capture")
+    lab_path = lab(tmp_path, {"mic": ("clean", MACHINE)}, program=json.dumps(missing))
+    _, _, results = do_run(tmp_path, lab_path, EXAMPLE, pinned={"pod_capture": STAND_IN})
+    assert results["completed"] is False, results
+    assert recorder_missing(results) == missing
 
 
 def test_a_start_on_a_missing_card(tmp_path: Path) -> None:
@@ -682,6 +754,7 @@ def test_a_release_does_not_wait_on_the_runners_files(
             None,
             HARNESS,
             None,
+            PINNED,
         )
     assert raised.value.exceptions and all(isinstance(e, OSError) for e in raised.value.exceptions)
     assert procs and all(p.poll() is not None for p in procs)
@@ -709,6 +782,7 @@ def test_a_release_does_not_wait_on_recording_the_scripts_end(
             None,
             HARNESS,
             None,
+            PINNED,
         )
     assert [str(e) for e in raised.value.exceptions] == ["the ledger failed"]
     assert procs and all(p.poll() is not None for p in procs)
@@ -743,7 +817,7 @@ def refused(
 ) -> list[tuple[JsonValue, JsonValue]]:
     before = created(tmp_path)
     result = runner.run(
-        lab_path, MACHINE, script_path, str(script_path), out, None, HARNESS, workspace
+        lab_path, MACHINE, script_path, str(script_path), out, None, HARNESS, workspace, PINNED
     )
     assert isinstance(result, Refused), result
     assert created(tmp_path) == before
@@ -775,7 +849,7 @@ def test_what_a_run_refuses(tmp_path: Path) -> None:
     assert refused(tmp_path, lab_path, missing, tmp_path / "run") == [("arguments", "unreadable")]
     before = created(tmp_path)
     result = runner.run(
-        lab_path, MACHINE, EXAMPLE, str(EXAMPLE), tmp_path / "run", missing, HARNESS, None
+        lab_path, MACHINE, EXAMPLE, str(EXAMPLE), tmp_path / "run", missing, HARNESS, None, PINNED
     )
     assert isinstance(result, Refused)
     assert [(p.where, p.reason) for p in result.problems] == [("arguments", "unreadable")]
@@ -784,7 +858,7 @@ def test_what_a_run_refuses(tmp_path: Path) -> None:
     broken.write_text("schema = 1\nmachines = 3\n")
     assert refused(tmp_path, broken, EXAMPLE, tmp_path / "run")[0][0] == "lab"
     result = runner.run(
-        lab_path, "elsewhere", EXAMPLE, str(EXAMPLE), tmp_path / "run", None, HARNESS, None
+        lab_path, "elsewhere", EXAMPLE, str(EXAMPLE), tmp_path / "run", None, HARNESS, None, PINNED
     )
     assert isinstance(result, Refused)
     assert [p.reason for p in result.problems] == ["unknown_machine"]
@@ -832,7 +906,7 @@ if die_after_create:
         os._exit(9)
     rundir.RunDir.keep = keep
 runner.run(Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]), sys.argv[3], Path(sys.argv[4]),
-           None, Revision(None, None, "unknown", "test"), None)
+           None, Revision(None, None, "unknown", "test"), None, {})
 """
 
 

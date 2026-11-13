@@ -17,6 +17,7 @@ py_library(
         "config_table.py",
         "data.py",
         "labconfig.py",
+        "pinned.py",
         "place.py",
         "roles.py",
         "rundir.py",
@@ -25,19 +26,32 @@ py_library(
     ],
     imports = [".."],
     visibility = ["//visibility:public"],
+    deps = ["@rules_python//python/runfiles"],
 )
 
-# The runner: `bazel run //brenn_lab:lab -- dry-run|run ...`.
+# The runner: `bazel run //brenn_lab:lab -- dry-run|run ...`. It carries the
+# pinned recorder, which a machine's `pod_capture = { pinned = true }` names.
 py_binary(
     name = "lab",
     srcs = ["cli.py"],
-    data = ["//tools/buildinfo:build_info"],
+    data = [
+        "//tools/brenn_pod:pod-capture",
+        "//tools/buildinfo:build_info",
+    ],
     main = "cli.py",
     visibility = ["//visibility:public"],
     deps = [
         ":brenn_lab",
         "@rules_python//python/runfiles",
     ],
+)
+
+py_pytest_test(
+    name = "pinned_test",
+    size = "small",
+    srcs = ["pinned_test.py"],
+    data = ["//tools/brenn_pod:pod-capture"],
+    deps = [":brenn_lab"],
 )
 
 py_pytest_test(
@@ -54,7 +68,7 @@ py_pytest_test(
     },
     deps = [
         ":brenn_lab",
-        "//brenn_lab/testing:transcript_files",
+        "//brenn_lab/testing:lab_driver",
     ],
 )
 
@@ -93,6 +107,40 @@ py_pytest_test(
     },
     deps = [
         ":brenn_lab",
+        "//brenn_lab/testing:transcript_files",
+    ],
+)
+
+# The hardware lane: the capture role on an attached reSpeaker Flex XVF3800,
+# six-channel USB image, through the pinned recorder and reader. The recorder
+# loads the host's ALSA runtime library, so this test needs it; nothing in the
+# default check runs the recorder.
+# TODO(lanes-load-host-alsa-runtime)
+# The Flex has one opener and Bazel runs test targets in parallel, so this is
+# the only target that opens the Flex: another test that opens it is added to
+# this target, or that target and this one are both tagged `exclusive`.
+py_pytest_test(
+    name = "capture_flex_hardware_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = ["capture/flex_hardware_test.py"],
+    data = [
+        ":lab",
+        "//examples:ten_seconds.py",
+        "//tools/brenn_pod:frame-log",
+    ],
+    env = {
+        "EXAMPLE": "$(rootpath //examples:ten_seconds.py)",
+        "FRAME_LOG": "$(rootpath //tools/brenn_pod:frame-log)",
+        "LAB": "$(rootpath :lab)",
+    },
+    tags = [
+        "external",
+        "hardware",
+    ],
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:lab_driver",
         "//brenn_lab/testing:transcript_files",
     ],
 )

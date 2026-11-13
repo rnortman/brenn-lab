@@ -31,6 +31,13 @@ TRANSCRIPTS = [
     "transcripts/recorded/no_card.jsonl",
 ]
 
+# The README names the brenn-pod commit the recorded transcripts were taken
+# at; //tools/pins holds it to the pin.
+exports_files(
+    ["transcripts/README.md"],
+    visibility = ["//tools/pins:__pkg__"],
+)
+
 filegroup(
     name = "transcripts",
     testonly = True,
@@ -44,6 +51,14 @@ py_library(
     data = [":transcripts"],
     visibility = ["//brenn_lab:__subpackages__"],
     deps = ["//brenn_lab"],
+)
+
+py_library(
+    name = "lab_driver",
+    testonly = True,
+    srcs = ["lab_driver.py"],
+    visibility = ["//brenn_lab:__subpackages__"],
+    deps = [":transcript_files"],
 )
 
 py_binary(

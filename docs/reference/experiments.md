@@ -14,7 +14,8 @@ A TOML file, read from wherever the caller says. Schema 1:
 schema = 1
 
 [machines.bench.programs]
-pod_capture = "/opt/brenn-pod/bin/pod-capture"
+pod_capture = { pinned = true }    # the recorder this harness's build pins
+# or: pod_capture = "/opt/brenn-pod/bin/pod-capture", one installed at that path on bench
 
 [roles.mic]
 kind = "capture"
@@ -35,11 +36,23 @@ position = "desk, 1 m from the door"
   checked.
 - `machines` and `roles` are required tables; either may be empty.
 - `machines.<m>`: a machine of any name. Its optional `programs` table says
-  where programs that roles call are installed **on that machine**, each as an
-  absolute path. Only program names some kind uses are read there; the
-  capture kind uses `pod_capture`, the path of brenn-pod's recorder. Whether
-  a program exists at its path is not a configuration problem: the role's
-  `check` reports it (`recorder_missing`).
+  where programs that roles call are **on that machine**, each in one of two
+  forms. Only program names some kind uses are read there; the capture kind
+  uses `pod_capture`, brenn-pod's recorder.
+  - A string is an absolute path on that machine where the program is
+    installed (`relative_path` otherwise).
+  - `{ pinned = true }` is the program this harness's build pins, as carried
+    by the harness process that hosts the machine's roles: in this version
+    the runner, for the machine `--machine` names (see *The pinned
+    recorder*). `pinned = false` is `bad_value`: to use an installed program,
+    name its path. A table without `pinned` is `missing_key`, one with
+    another key `unknown_key`, and any value of another type `wrong_type`.
+
+  There is no default and neither form falls back to the other: a machine
+  that names nothing has no recorder, and a path with no executable is not
+  replaced by the pinned recorder, nor the reverse. Whether a program exists
+  where its form says is not a configuration problem: the role's `check`
+  reports it (`recorder_missing`).
 - `roles.<r>`: a role, the name a script uses for one device. A role name
   matches `[a-z][a-z0-9_]*` and is at most 32 bytes: it names a directory in
   the run and is the recorded stream's source name.
@@ -161,8 +174,22 @@ The registered names:
 ## The capture kind
 
 A capture role records every channel of one device to a frame log with
-brenn-pod's recorder, `pod-capture`, found at the machine's
-`programs.pod_capture`.
+brenn-pod's recorder, `pod-capture`: the pinned one or the one installed at a
+path, as the machine's `programs.pod_capture` says, and never the other.
+
+### The pinned recorder
+
+`{ pinned = true }` names the `pod-capture` this repository's build pins and
+builds with the runner, `//brenn_lab:lab`. It runs on the runner's machine
+and loads that machine's ALSA runtime library (`libasound.so.2`); the build
+carries none. On a host without it the loader ends the recorder with exit
+status 127 before it prints a line, and the role reports `recorder_exited`
+with `data.exit_status` 127, from `check` as from `start`. The failure does
+not carry the loader's message: a dry run keeps the recorder's stderr nowhere,
+and a run keeps it in `logs/<role>/recorder-<NNNN>.stderr.log`. Its build
+reports the commit the build pins, with
+`source` `declared` and `dirty` `null` (see `run-directory.md`, *What `dirty`
+means*).
 
 ### Commands and results
 
@@ -247,7 +274,7 @@ The role's own:
 
 | Reason | Meaning |
 |---|---|
-| `recorder_missing` | no executable at the configured path |
+| `recorder_missing` | no executable at the recorder's path, the configured one or the pinned one's; `data.program` is the path tried |
 | `recorder_usage` | the device parameters cannot be put to the recorder: a channel name with a comma, or the recorder refused its command line (exit status 2); `data.stderr` is the recorder's stderr whole and `detail` its first line |
 | `recorder_exited` | the recorder ended without a final line |
 | `recorder_contract` | the recorder printed something its contract does not allow, its exit status disagrees with its last line, or the layout or channel count it reported is not what was sent |

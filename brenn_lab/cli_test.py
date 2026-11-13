@@ -12,11 +12,10 @@ from typing import Any
 
 import pytest
 
-from brenn_lab.testing.transcript_files import layout_of
+from brenn_lab.testing.lab_driver import document, dry_args, lab_toml, run_args
 
 LAB = os.path.abspath(os.environ["LAB"])
 STAND_IN = os.path.abspath(os.environ["STAND_IN"])
-MACHINE = "bench"
 PROBLEM_KEYS = {"where", "reason", "detail", "role", "command", "key", "data"}
 
 SHORT = """\
@@ -29,22 +28,7 @@ mic.send(capture.Stop())
 
 def lab_file(tmp_path: Path, card: str = "clean", extra: str = "") -> Path:
     path = tmp_path / "lab.toml"
-    path.write_text(
-        textwrap.dedent(f"""\
-            schema = 1
-            [machines.bench.programs]
-            pod_capture = {json.dumps(STAND_IN)}
-            [roles.mic]
-            kind = "capture"
-            machine = "bench"
-            [roles.mic.device]
-            card = {json.dumps(card)}
-            rate_hz = 16000
-            sample_format = "s16_le"
-            layout = {json.dumps(layout_of("clean"))}
-            """)
-        + extra
-    )
+    path.write_text(lab_toml(json.dumps(STAND_IN), card) + extra)
     return path
 
 
@@ -74,30 +58,6 @@ def start(args: list[str], **env: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def document(done: subprocess.CompletedProcess[str]) -> Any:
-    """The one JSON document on stdout, which holds nothing else."""
-    assert done.stdout.endswith("\n") and done.stdout.count("\n") == 1, done.stdout
-    return json.loads(done.stdout)
-
-
-def dry_args(lab: Path, script: Path) -> list[str]:
-    return ["dry-run", "--lab", str(lab), "--machine", MACHINE, "--script", str(script)]
-
-
-def run_args(lab: Path, script: Path, out: Path) -> list[str]:
-    return [
-        "run",
-        "--lab",
-        str(lab),
-        "--machine",
-        MACHINE,
-        "--script",
-        str(script),
-        "--out",
-        str(out),
-    ]
-
-
 def only_problem(refusal: Any) -> Any:
     assert refusal.keys() == {"ok", "problems"} and refusal["ok"] is False
     [problem] = refusal["problems"]
@@ -109,13 +69,13 @@ def test_a_dry_run_and_a_run(tmp_path: Path) -> None:
     lab, script = lab_file(tmp_path), script_file(tmp_path)
     done = start(dry_args(lab, script))
     assert done.returncode == 0, done.stderr
-    report = document(done)
+    report = document(done.stdout)
     assert report["ok"] is True and report["problems"] == []
 
     out = tmp_path / "run"
     done = start(run_args(lab, script, out))
     assert done.returncode == 0, done.stderr
-    assert document(done) == {
+    assert document(done.stdout) == {
         "run": str(out),
         "outcome": "completed",
         "completed": True,
@@ -142,7 +102,7 @@ def test_a_run_that_does_not_complete(tmp_path: Path) -> None:
     out = tmp_path / "run"
     done = start(run_args(lab_file(tmp_path, card="no_card"), script_file(tmp_path), out))
     assert done.returncode == 1, done.stderr
-    pointer = document(done)
+    pointer = document(done.stdout)
     assert (pointer["outcome"], pointer["completed"]) == ("failed", False)
     assert (out / "results.json").is_file()
 
@@ -151,7 +111,7 @@ def test_a_dry_run_with_a_problem_reports_it(tmp_path: Path) -> None:
     lab = lab_file(tmp_path, extra="surprise = 1\n")
     done = start(dry_args(lab, script_file(tmp_path)))
     assert done.returncode == 1, done.stderr
-    report = document(done)
+    report = document(done.stdout)
     assert report["ok"] is False
     assert [(p["where"], p["reason"]) for p in report["problems"]] == [("lab", "unknown_key")]
 
@@ -159,7 +119,7 @@ def test_a_dry_run_with_a_problem_reports_it(tmp_path: Path) -> None:
 def test_a_dry_run_whose_script_does_not_exist_is_refused(tmp_path: Path) -> None:
     done = start(dry_args(lab_file(tmp_path), tmp_path / "missing.py"))
     assert done.returncode == 2
-    problem = only_problem(document(done))
+    problem = only_problem(document(done.stdout))
     assert (problem["where"], problem["reason"]) == ("arguments", "unreadable")
 
 
@@ -189,7 +149,7 @@ def test_a_dry_run_whose_script_does_not_exist_is_refused(tmp_path: Path) -> Non
 def test_a_command_line_the_parser_refuses(tmp_path: Path, args: list[str]) -> None:
     done = start(args)
     assert done.returncode == 2
-    problem = only_problem(document(done))
+    problem = only_problem(document(done.stdout))
     assert (problem["where"], problem["reason"]) == ("arguments", "usage")
     assert problem["detail"]
     assert "usage:" in done.stderr
@@ -217,7 +177,7 @@ def test_relative_paths_under_bazel_run(tmp_path: Path) -> None:
         BUILD_WORKSPACE_DIRECTORY=str(workspace),
     )
     assert done.returncode == 0, done.stderr
-    assert document(done)["run"] == str(tmp_path / "run")
+    assert document(done.stdout)["run"] == str(tmp_path / "run")
     manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
     assert manifest["script"]["given_as"] == "script.py"
     assert (tmp_path / "run" / "notes" / "notes.md").read_text() == "why this run\n"
@@ -245,6 +205,6 @@ def test_a_run_inside_the_workspace_is_refused(tmp_path: Path) -> None:
         BUILD_WORKSPACE_DIRECTORY=str(workspace),
     )
     assert done.returncode == 2
-    problem = only_problem(document(done))
+    problem = only_problem(document(done.stdout))
     assert (problem["where"], problem["reason"]) == ("out", "out_in_workspace")
     assert not out.exists()

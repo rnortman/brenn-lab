@@ -19,7 +19,10 @@ are. The runner dry-runs a script against a lab, probing every device it needs
 without recording anything, and runs it, writing a run directory with a
 manifest, a journal of every command, reply and event, and results. The one
 role kind is capture, which records a device through brenn-pod's recorder,
-`pod-capture`, installed where the lab configuration says. There is no
+`pod-capture`: the one this repository's build pins, or one installed where
+the lab configuration says. The build also pins brenn-pod's reader,
+`frame-log`. The capture role has hardware-lane tests that record from an
+attached reSpeaker Flex through the pinned recorder. There is no
 playback, alignment or run-validity checking yet, and roles on other machines
 cannot be reached.
 

@@ -22,7 +22,8 @@ jobs:
     name: check
     runs-on: ubuntu-latest
     # A cold cache fetches the Python, Rust and LLVM toolchains and compiles
-    # the two gate tools' dependency closures once.
+    # the dependency closures of the two gate tools and of brenn-pod's
+    # recorder and reader once.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -40,8 +41,9 @@ jobs:
       # repository fully extracted, the LLVM toolchain alone many gigabytes),
       # and bazelisk's download of the Bazel that .bazelversion names, so both
       # cache keys hash every file that pins one: MODULE.bazel, its lock,
-      # .bazelversion, requirements_lock.txt and the two gate tools'
-      # Cargo.lock files. A new pin file joins the list here, once. The disk
+      # .bazelversion, requirements_lock.txt and the Cargo.lock files of the
+      # two gate tools and of brenn-pod's two programs. A new pin file joins
+      # the list here, once. The disk
       # cache holds action outputs, which change with every commit, so it is
       # restored from the nearest earlier run and written back fresh.
       #
@@ -58,7 +60,7 @@ jobs:
       # bound the saved repository cache, extracted repositories included.
       - name: Hash the pin files
         id: pins
-        run: echo "hash=${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelversion', 'requirements_lock.txt', 'tools/scrub/Cargo.lock', 'tools/allthechanges/Cargo.lock') }}" >> "$GITHUB_OUTPUT"
+        run: echo "hash=${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelversion', 'requirements_lock.txt', 'tools/scrub/Cargo.lock', 'tools/allthechanges/Cargo.lock', 'tools/brenn_pod/pod_capture/Cargo.lock', 'tools/brenn_pod/frame_log/Cargo.lock') }}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Bazel repository cache
         uses: actions/cache@v6

@@ -19,7 +19,7 @@ test --test_summary=terse
 common --lockfile_mode=update
 
 # --- Build stamp ---
-# The one place the build reads git: the commit and cleanliness of the tree,
+# The one place the build reads this tree's git state: the commit and cleanliness of the tree,
 # which //tools/buildinfo:build_info stamps into the runner.
 build --workspace_status_command=tools/buildinfo/status.sh
 

@@ -26,7 +26,7 @@ help:
 	@echo "  make audible-test WINDOW=<agreed window>"
 	@echo "                      run the audible lane: tests that play sound or move a robot"
 	@echo "  make fix            ruff (format and lint fixes) and buildifier the tree in place"
-	@echo "  make repin          regenerate the Python lock and both gate-tool crate locks"
+	@echo "  make repin          regenerate the Python lock and the four crate locks"
 	@echo "  make todo-gather    fold todo.d fragments into TODO.md"
 	@echo "  make changes        run allthechanges (ARGS=\"query\", ARGS=\"todo query\", ...)"
 	@echo "  make lab            run the experiment runner (ARGS=\"dry-run --lab ... --machine ... --script ...\")"
@@ -71,6 +71,7 @@ hardware-test:
 # Anything audible needs the maintainer's agreement on when. WINDOW is a speed
 # bump, not an enforcement: it keeps the lane off tab completion and puts the
 # rule on screen at the moment it matters.
+# TODO(first-audible-run-needs-a-window)
 .PHONY: audible-test
 audible-test:
 	@if [[ "$(origin WINDOW)" != "command line" || -z "$(WINDOW)" ]]; then \
@@ -107,15 +108,19 @@ fix:
 	bazel run //tools/ruff:fix
 	bazel run //:buildifier
 
-# Regenerates requirements_lock.txt from requirements.in with the pinned uv
-# and the hermetic interpreter, then re-renders both gate-tool crate hubs,
-# tools/scrub's and tools/allthechanges's, with the pinned cargo; a hub whose
-# inputs did not change renders byte-identically. Commit every lock file that
-# changed.
+# Re-renders the four crate hubs with the pinned cargo: the two gate tools',
+# tools/scrub's and tools/allthechanges's, and the two programs pinned from
+# brenn-pod, under tools/brenn_pod. Then regenerates requirements_lock.txt from
+# requirements.in with the pinned uv and the hermetic interpreter. The hubs go
+# first: a crate lock that no longer matches MODULE.bazel fails every Bazel
+# command that evaluates the crate extension, and the repin is the repair. A
+# hub whose inputs did not change renders byte-identically. Commit every lock
+# file that changed.
 .PHONY: repin
 repin:
+	CARGO_BAZEL_REPIN=1 bazel fetch --repo=@scrub_crates --repo=@allthechanges_crates \
+	    --repo=@pod_capture_crates --repo=@frame_log_crates
 	bazel run //:requirements.update
-	CARGO_BAZEL_REPIN=1 bazel fetch --repo=@scrub_crates --repo=@allthechanges_crates
 
 # Wire git at the tracked hooks directory through the scrub kit's own init,
 # which sets core.hooksPath, removes a stale .git/hooks/pre-commit and lays

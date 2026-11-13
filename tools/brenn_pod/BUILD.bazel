@@ -1,0 +1,33 @@
+"""brenn-pod's two programs, at the commit MODULE.bazel pins.
+
+`pod-capture` is the recorder the runner carries; `frame-log` is the reader of
+the log it writes. In a dependant's runfiles they are
+`_main/tools/brenn_pod/pod-capture` and `_main/tools/brenn_pod/frame-log`.
+"""
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(":defs.bzl", "fixed_name_executable")
+
+fixed_name_executable(
+    name = "pod-capture",
+    binary = "@pod_capture_crates//:pod-capture__pod-capture",
+    visibility = ["//visibility:public"],
+)
+
+fixed_name_executable(
+    name = "frame-log",
+    binary = "@frame_log_crates//:frame-log__frame-log",
+    visibility = ["//visibility:public"],
+)
+
+# Holds the pinned reader to starting and printing its usage. It loads no sound
+# library, so it runs in the default check; the recorder is built and never run
+# there.
+sh_test(
+    name = "frame_log_usage_test",
+    size = "small",
+    srcs = ["frame_log_usage_test.sh"],
+    data = [":frame-log"],
+    env = {"FRAME_LOG": "$(rlocationpath :frame-log)"},
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)

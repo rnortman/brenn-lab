@@ -2,7 +2,7 @@ import pytest
 
 from brenn_lab.capture.device import CaptureDevice
 from brenn_lab.config_table import ConfigProblem
-from brenn_lab.labconfig import LabConfig, Machine, RoleConfig, parse
+from brenn_lab.labconfig import Installed, LabConfig, Machine, Pinned, RoleConfig, parse
 
 GOOD = """
 schema = 1
@@ -41,7 +41,7 @@ def _reasons(text: str) -> set[tuple[str, str]]:
 def test_a_good_configuration() -> None:
     assert parse(GOOD.encode()) == LabConfig(
         machines={
-            "bench": Machine("bench", {"pod_capture": "/opt/pod/bin/pod-capture"}),
+            "bench": Machine("bench", {"pod_capture": Installed("/opt/pod/bin/pod-capture")}),
             "robot": Machine("robot", {}),
         },
         roles={
@@ -145,6 +145,46 @@ def test_a_problem_in_a_machine_does_not_hide_the_roles_on_it() -> None:
 )
 def test_role_and_machine_rules(change: tuple[str, str], expected: set[tuple[str, str]]) -> None:
     assert _reasons(GOOD.replace(*change)) == expected
+
+
+PATH_FORM = 'pod_capture = "/opt/pod/bin/pod-capture"'
+
+
+def test_a_pinned_program() -> None:
+    result = parse(GOOD.replace(PATH_FORM, "pod_capture = { pinned = true }").encode())
+    assert isinstance(result, LabConfig)
+    assert result.machines["bench"].programs == {"pod_capture": Pinned()}
+
+
+def test_a_pinned_program_on_a_machine_the_runner_is_not_on() -> None:
+    # Which machine the runner is on is not the configuration's to know.
+    text = GOOD.replace("[machines.robot]", "[machines.robot.programs]\npod_capture.pinned = true")
+    result = parse(text.encode())
+    assert isinstance(result, LabConfig)
+    assert result.machines["robot"].programs == {"pod_capture": Pinned()}
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("{ pinned = false }", {("machines.bench.programs.pod_capture.pinned", "bad_value")}),
+        ("{ pinned = 1 }", {("machines.bench.programs.pod_capture.pinned", "wrong_type")}),
+        ("{}", {("machines.bench.programs.pod_capture.pinned", "missing_key")}),
+        (
+            "{ pinned = true, path = 1 }",
+            {("machines.bench.programs.pod_capture.path", "unknown_key")},
+        ),
+        ("7", {("machines.bench.programs.pod_capture", "wrong_type")}),
+        ("[]", {("machines.bench.programs.pod_capture", "wrong_type")}),
+        ('"pod-capture"', {("machines.bench.programs.pod_capture", "relative_path")}),
+    ],
+)
+def test_a_program_is_a_path_or_pinned(value: str, expected: set[tuple[str, str]]) -> None:
+    assert _reasons(GOOD.replace(PATH_FORM, f"pod_capture = {value}")) == expected
+
+
+def test_a_machine_naming_neither_form_has_no_program() -> None:
+    assert _reasons(GOOD.replace(PATH_FORM, "")) == {("roles.mic.machine", "missing_program")}
 
 
 @pytest.mark.parametrize("name", ["Mic", "m-c", "1mic", "_mic", "a" + "b" * 32])

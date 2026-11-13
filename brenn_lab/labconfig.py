@@ -1,6 +1,6 @@
-"""The lab configuration: which machines there are, what programs each has
-installed, and which roles there are, of what kind, on which machine, with
-which device parameters.
+"""The lab configuration: which machines there are, where each has the
+programs its roles call, and which roles there are, of what kind, on which
+machine, with which device parameters.
 
 Schema 1, TOML. The loader returns every problem it finds; a configuration
 with any problem is not used.
@@ -22,11 +22,30 @@ _ROLE_NAME_MAX_BYTES = 32
 
 
 @dataclass(frozen=True)
+class Installed:
+    """A program installed at this absolute path on the machine."""
+
+    path: str
+
+
+@dataclass(frozen=True)
+class Pinned:
+    """The program this harness's build pins, as carried by whichever harness
+    process hosts the machine's roles.
+    """
+
+
+type Program = Installed | Pinned
+
+
+@dataclass(frozen=True)
 class Machine:
-    """A machine, and the absolute paths on it of the programs its roles call."""
+    """A machine, and where it has each program its roles call: one source per
+    program, never a second to fall back to.
+    """
 
     name: str
-    programs: dict[str, str]
+    programs: dict[str, Program]
 
 
 @dataclass(frozen=True)
@@ -97,26 +116,43 @@ def _machine(machines: Table, name: str) -> Machine | None:
     if table is None:
         return None
     before = len(table.problems)
-    programs: dict[str, str] = {}
+    programs: dict[str, Program] = {}
     known = frozenset().union(*(kind.programs for kind in KINDS.values()))
-    # TODO(pin-brenn-pod-programs): the runner's own machine could take the
-    # recorder from the build; `programs.pod_capture` stays the way to name a
-    # recorder installed on any other machine.
     programs_table = table.table("programs", required=False)
     if programs_table is not None:
         for program in sorted(known & programs_table.value.keys()):
-            path = programs_table.string(program)
-            if path is None:
-                continue
-            if not PurePosixPath(path).is_absolute():
-                programs_table.problem(program, "relative_path", "must be an absolute path")
-                continue
-            programs[program] = path
+            source = _program(programs_table, program)
+            if source is not None:
+                programs[program] = source
         programs_table.done()
     table.done()
     if len(table.problems) != before:
         return None
     return Machine(name, programs)
+
+
+def _program(programs: Table, name: str) -> Program | None:
+    """`name` in a machine's programs: an absolute path, or `{ pinned = true }`."""
+    value = programs.raw(name)
+    if isinstance(value, str):
+        if not PurePosixPath(value).is_absolute():
+            programs.problem(name, "relative_path", "must be an absolute path")
+            return None
+        return Installed(value)
+    table = programs.table(name) if isinstance(value, dict) else None
+    if table is not None:
+        pinned = table.boolean("pinned")
+        table.done()
+        if pinned is None:
+            return None
+        if not pinned:
+            table.problem(
+                "pinned", "bad_value", "must be true; to use an installed program, name its path"
+            )
+            return None
+        return Pinned()
+    programs.wrong_type(name, "an absolute path or { pinned = true }")
+    return None
 
 
 def _role(

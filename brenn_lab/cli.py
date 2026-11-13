@@ -31,7 +31,7 @@ from python.runfiles import runfiles
 if TYPE_CHECKING:
     from _typeshed import SupportsWrite
 
-from brenn_lab import buildinfo, runner
+from brenn_lab import buildinfo, pinned, runner
 from brenn_lab.data import JsonObject, to_text
 from brenn_lab.runner import Problem, Refused
 
@@ -88,15 +88,9 @@ def _path(given: str) -> Path:
     return path
 
 
-def _harness() -> buildinfo.Revision:
+def _harness(found: runfiles.Runfiles) -> buildinfo.Revision:
     """The revision the runner's build stamp states."""
-    found = runfiles.Create()
-    if found is None:
-        raise RuntimeError("the runner's runfiles cannot be found")
-    stamp = found.Rlocation(BUILD_INFO)
-    if stamp is None:
-        raise RuntimeError(f"{BUILD_INFO} is not in the runner's runfiles")
-    return buildinfo.parse(Path(stamp).read_text())
+    return buildinfo.parse(pinned.locate(found, BUILD_INFO).read_text())
 
 
 def _emit(document: JsonObject) -> None:
@@ -113,8 +107,10 @@ def main(argv: list[str]) -> int:
 
     workspace = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
     try:
+        found = pinned.runner_runfiles()
+        programs = pinned.resolve(found)
         if args.command == "dry-run":
-            result = runner.dry_run(_path(args.lab), args.machine, _path(args.script))
+            result = runner.dry_run(_path(args.lab), args.machine, _path(args.script), programs)
         else:
             result = runner.run(
                 _path(args.lab),
@@ -123,8 +119,9 @@ def main(argv: list[str]) -> int:
                 args.script,
                 _path(args.out),
                 None if args.notes is None else _path(args.notes),
-                _harness(),
+                _harness(found),
                 Path(workspace) if workspace else None,
+                programs,
             )
     except BaseException:
         traceback.print_exc()
