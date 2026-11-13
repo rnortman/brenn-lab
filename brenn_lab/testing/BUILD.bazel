@@ -1,0 +1,55 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+
+# The stand-in recorder, the transcripts it replays, and the helpers tests
+# read them with. Test-only: nothing that ships depends on this package.
+
+TRANSCRIPTS = [
+    "transcripts/README.md",
+    "transcripts/authored/after_terminal.jsonl",
+    "transcripts/authored/channels_mismatch.jsonl",
+    "transcripts/authored/exit_after_failed.jsonl",
+    "transcripts/authored/exit_after_failed.replay.toml",
+    "transcripts/authored/exit_after_stopped.jsonl",
+    "transcripts/authored/exit_after_stopped.replay.toml",
+    "transcripts/authored/exits_at_stop.jsonl",
+    "transcripts/authored/exits_mid_capture.jsonl",
+    "transcripts/authored/exits_mid_capture.replay.toml",
+    "transcripts/authored/gap_first.jsonl",
+    "transcripts/authored/late.jsonl",
+    "transcripts/authored/not_json.jsonl",
+    "transcripts/authored/second_started.jsonl",
+    "transcripts/authored/silent.jsonl",
+    "transcripts/authored/stops_unasked.jsonl",
+    "transcripts/authored/stops_unasked.replay.toml",
+    "transcripts/authored/stream_died.jsonl",
+    "transcripts/authored/unknown_event.jsonl",
+    "transcripts/authored/unknown_reason.jsonl",
+    "transcripts/authored/write_stalled.jsonl",
+    "transcripts/authored/write_stalled.replay.toml",
+    "transcripts/recorded/clean.jsonl",
+    "transcripts/recorded/loss.jsonl",
+    "transcripts/recorded/no_card.jsonl",
+]
+
+filegroup(
+    name = "transcripts",
+    testonly = True,
+    srcs = TRANSCRIPTS,
+)
+
+py_library(
+    name = "transcript_files",
+    testonly = True,
+    srcs = ["transcript_files.py"],
+    data = [":transcripts"],
+    visibility = ["//brenn_lab:__subpackages__"],
+    deps = ["//brenn_lab"],
+)
+
+py_binary(
+    name = "stand_in",
+    testonly = True,
+    srcs = ["stand_in.py"],
+    visibility = ["//brenn_lab:__subpackages__"],
+    deps = [":transcript_files"],
+)

@@ -18,8 +18,10 @@ __pycache__/
 .mypy_cache/
 
 # Capture and run artifacts. Recordings never enter the repository; a
-# synthetic fixture is re-included by its own named `!` line.
+# synthetic fixture is re-included by its own named `!` line. A run directory
+# hides itself with a `.gitignore` of its own; these globs catch a stray file.
 # Audio.
+*.framelog
 *.wav
 *.flac
 *.ogg
@@ -42,17 +44,26 @@ __pycache__/
 # Logs and streams.
 *.log
 *.jsonl
-logs/
-# Run and capture directories. These and `logs/` match at any depth, so a
-# source package must not take one of these names: git, ruff and the tree scan
-# would all skip it while the local Bazel build still sees it.
-# TODO(correctness-gitignore-run-dirs-hide-source-packages): anchor these to
-# where runs are written once that is decided.
-runs/
-captures/
-recordings/
-framelogs/
-segments/
+# The recorder transcripts the stand-in replays: event lines, no audio.
+!/brenn_lab/testing/transcripts/authored/after_terminal.jsonl
+!/brenn_lab/testing/transcripts/authored/channels_mismatch.jsonl
+!/brenn_lab/testing/transcripts/authored/exit_after_failed.jsonl
+!/brenn_lab/testing/transcripts/authored/exit_after_stopped.jsonl
+!/brenn_lab/testing/transcripts/authored/exits_at_stop.jsonl
+!/brenn_lab/testing/transcripts/authored/exits_mid_capture.jsonl
+!/brenn_lab/testing/transcripts/authored/gap_first.jsonl
+!/brenn_lab/testing/transcripts/authored/late.jsonl
+!/brenn_lab/testing/transcripts/authored/not_json.jsonl
+!/brenn_lab/testing/transcripts/authored/second_started.jsonl
+!/brenn_lab/testing/transcripts/authored/silent.jsonl
+!/brenn_lab/testing/transcripts/authored/stops_unasked.jsonl
+!/brenn_lab/testing/transcripts/authored/stream_died.jsonl
+!/brenn_lab/testing/transcripts/authored/unknown_event.jsonl
+!/brenn_lab/testing/transcripts/authored/unknown_reason.jsonl
+!/brenn_lab/testing/transcripts/authored/write_stalled.jsonl
+!/brenn_lab/testing/transcripts/recorded/clean.jsonl
+!/brenn_lab/testing/transcripts/recorded/loss.jsonl
+!/brenn_lab/testing/transcripts/recorded/no_card.jsonl
 
 # Per-machine tool configuration that names local paths.
 *.local.toml

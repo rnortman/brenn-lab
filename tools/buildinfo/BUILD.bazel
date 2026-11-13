@@ -1,0 +1,23 @@
+# The harness's own revision, as a build stamp. `.bazelrc` names status.sh as
+# the workspace status command; this genrule, always stamped, copies its two
+# stable values into build_info.json, which //brenn_lab:lab carries as data.
+# The values are copied as text; brenn_lab/buildinfo.py reads and checks them.
+# The command uses bash builtins only, so the action runs no other program.
+
+genrule(
+    name = "build_info",
+    outs = ["build_info.json"],
+    cmd = """
+commit=
+dirty=
+while read -r key value; do
+    case "$$key" in
+        STABLE_BRENN_LAB_COMMIT) commit=$$value ;;
+        STABLE_BRENN_LAB_DIRTY) dirty=$$value ;;
+    esac
+done < bazel-out/stable-status.txt
+printf '{"commit": "%s", "dirty": "%s"}\\n' "$$commit" "$$dirty" > $@
+""",
+    stamp = 1,
+    visibility = ["//brenn_lab:__pkg__"],
+)

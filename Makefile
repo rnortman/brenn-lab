@@ -29,6 +29,7 @@ help:
 	@echo "  make repin          regenerate the Python lock and both gate-tool crate locks"
 	@echo "  make todo-gather    fold todo.d fragments into TODO.md"
 	@echo "  make changes        run allthechanges (ARGS=\"query\", ARGS=\"todo query\", ...)"
+	@echo "  make lab            run the experiment runner (ARGS=\"dry-run --lab ... --machine ... --script ...\")"
 	@echo "  make setup          wire git at .githooks (once per clone)"
 	@echo "  make scrub-tree     whole-tree secret sweep"
 	@echo "  make clean          drop Bazel's outputs for this workspace"
@@ -86,6 +87,13 @@ ARGS ?=
 .PHONY: changes
 changes:
 	$(CHANGES) $(ARGS)
+
+# The experiment runner: `make lab ARGS="dry-run --lab lab.toml --machine bench
+# --script script.py"`, or `run` with `--out <dir>`. Relative paths are taken
+# from the directory make was started in.
+.PHONY: lab
+lab:
+	bazel run //brenn_lab:lab -- $(ARGS)
 
 .PHONY: todo-gather
 todo-gather:

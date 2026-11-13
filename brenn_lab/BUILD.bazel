@@ -1,20 +1,122 @@
-load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 load("//tools/pytest:defs.bzl", "py_pytest_test")
 
+# Every source is listed by name, with no glob: a new file reaches a target
+# only through a tracked change to this file.
+
 py_library(
-    name = "placeholder",
+    name = "brenn_lab",
     srcs = [
         "__init__.py",
-        "placeholder.py",
+        "buildinfo.py",
+        "capture/__init__.py",
+        "capture/device.py",
+        "capture/messages.py",
+        "capture/pod_capture.py",
+        "capture/role.py",
+        "config_table.py",
+        "data.py",
+        "labconfig.py",
+        "place.py",
+        "roles.py",
+        "rundir.py",
+        "runner.py",
+        "script.py",
     ],
     imports = [".."],
     visibility = ["//visibility:public"],
-    deps = ["@pypi_lab//numpy"],
+)
+
+# The runner: `bazel run //brenn_lab:lab -- dry-run|run ...`.
+py_binary(
+    name = "lab",
+    srcs = ["cli.py"],
+    data = ["//tools/buildinfo:build_info"],
+    main = "cli.py",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":brenn_lab",
+        "@rules_python//python/runfiles",
+    ],
 )
 
 py_pytest_test(
-    name = "placeholder_test",
+    name = "cli_test",
     size = "small",
-    srcs = ["placeholder_test.py"],
-    deps = [":placeholder"],
+    srcs = ["cli_test.py"],
+    data = [
+        ":lab",
+        "//brenn_lab/testing:stand_in",
+    ],
+    env = {
+        "LAB": "$(rootpath :lab)",
+        "STAND_IN": "$(rootpath //brenn_lab/testing:stand_in)",
+    },
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:transcript_files",
+    ],
+)
+
+py_pytest_test(
+    name = "buildinfo_test",
+    size = "small",
+    srcs = ["buildinfo_test.py"],
+    deps = [":brenn_lab"],
+)
+
+py_pytest_test(
+    name = "runner_test",
+    size = "small",
+    srcs = ["runner_test.py"],
+    data = [
+        "//brenn_lab/testing:stand_in",
+        "//examples:ten_seconds.py",
+    ],
+    env = {
+        "EXAMPLE": "$(rootpath //examples:ten_seconds.py)",
+        "STAND_IN": "$(rootpath //brenn_lab/testing:stand_in)",
+    },
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:transcript_files",
+    ],
+)
+
+py_pytest_test(
+    name = "capture_role_test",
+    size = "small",
+    srcs = ["capture/role_test.py"],
+    data = ["//brenn_lab/testing:stand_in"],
+    env = {
+        "STAND_IN": "$(rootpath //brenn_lab/testing:stand_in)",
+    },
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:transcript_files",
+    ],
+)
+
+py_pytest_test(
+    name = "transcripts_test",
+    size = "small",
+    srcs = ["capture/transcripts_test.py"],
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:transcript_files",
+    ],
+)
+
+py_pytest_test(
+    name = "data_test",
+    size = "small",
+    srcs = ["data_test.py"],
+    deps = [":brenn_lab"],
+)
+
+py_pytest_test(
+    name = "labconfig_test",
+    size = "small",
+    srcs = ["labconfig_test.py"],
+    deps = [":brenn_lab"],
 )

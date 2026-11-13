@@ -18,6 +18,11 @@ test --test_summary=terse
 # --lockfile_mode=error so resolution drift is a red build there.
 common --lockfile_mode=update
 
+# --- Build stamp ---
+# The one place the build reads git: the commit and cleanliness of the tree,
+# which //tools/buildinfo:build_info stamps into the runner.
+build --workspace_status_command=tools/buildinfo/status.sh
+
 # --- Caching ---
 # `common`, so a `common --disk_cache` in .bazelrc.user replaces it.
 common --disk_cache=~/.cache/brenn-lab-bazel-disk

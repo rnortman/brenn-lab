@@ -1,0 +1,105 @@
+"""The run directory, layout 1.
+
+<run>/.gitignore          `*`: created first, so git ignores the whole run
+<run>/manifest.json       rewritten whole, by a temporary file and a rename
+<run>/journal.jsonl       every command, reply and event, appended
+<run>/results.json        written last, by a temporary file and a rename
+<run>/script/<file>       the script, the lab configuration and the notes,
+<run>/lab/<file>          byte for byte as they were read
+<run>/notes/<file>
+<run>/captures/<role>/    what each capture role recorded
+<run>/logs/runner.log     the runner's own log
+<run>/logs/<role>/        the output of the programs each role calls
+"""
+
+import os
+import threading
+from pathlib import Path
+from typing import IO
+
+from brenn_lab.data import JsonObject, to_text
+
+LAYOUT = 1
+GITIGNORE = "*\n"
+
+
+class RunDir:
+    """A run directory this process created, and the only place it writes."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._journal: IO[str] | None = None
+        self._log: IO[str] | None = None
+
+    @classmethod
+    def create(cls, path: Path) -> RunDir:
+        """Create the directory, which must not exist, and its `.gitignore`."""
+        path.mkdir()
+        (path / ".gitignore").write_text(GITIGNORE)
+        return cls(path)
+
+    def keep(self, section: str, name: str, data: bytes) -> str:
+        """Write `data` as `<section>/<name>`; its path in the run."""
+        if Path(name).name != name or name in ("", ".", ".."):
+            raise ValueError(f"{name!r} is not a file name")
+        (self.path / section).mkdir()
+        (self.path / section / name).write_bytes(data)
+        return f"{section}/{name}"
+
+    def captures(self, role: str) -> Path:
+        return self.path / "captures" / role
+
+    def logs(self, role: str) -> Path:
+        return self.path / "logs" / role
+
+    def in_run(self, path: Path) -> str | None:
+        """`path` relative to the run, if it lies inside it."""
+        if not path.is_absolute():
+            return None
+        resolved = path.resolve()
+        root = self.path.resolve()
+        if resolved == root or not resolved.is_relative_to(root):
+            return None
+        return resolved.relative_to(root).as_posix()
+
+    def write_manifest(self, manifest: JsonObject) -> None:
+        self._replace("manifest.json", manifest)
+
+    def write_results(self, results: JsonObject) -> None:
+        self._replace("results.json", results)
+
+    def _replace(self, name: str, value: JsonObject) -> None:
+        temporary = self.path / f".{name}.tmp"
+        with temporary.open("w") as f:
+            f.write(to_text(value) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        temporary.replace(self.path / name)
+
+    def open_journal(self) -> None:
+        self._journal = (self.path / "journal.jsonl").open("x", buffering=1)
+
+    def journal(self, line: JsonObject) -> None:
+        """Append one line to the journal, flushed before this returns."""
+        assert self._journal is not None
+        with self._lock:
+            self._journal.write(to_text(line) + "\n")
+            self._journal.flush()
+
+    def note(self, text: str) -> None:
+        """Append to `logs/runner.log`."""
+        with self._lock:
+            if self._log is None:
+                (self.path / "logs").mkdir(exist_ok=True)
+                self._log = (self.path / "logs" / "runner.log").open("a", buffering=1)
+            self._log.write(text.rstrip("\n") + "\n")
+            self._log.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            for f in (self._journal, self._log):
+                if f is not None:
+                    f.close()
+            self._journal = None
+            self._log = None

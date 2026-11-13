@@ -1,0 +1,1 @@
+{"ts_ms":1794000000000,"event":"capture_gap","record_id":"00000000000000000000000000000010","cause":"overrun","at_frame":0,"frames":null,"mono_us":1000000000,"wall_us":1794000000000000,"detail":"ALSA function 'snd_pcm_wait' failed with error 'Broken pipe (32)'"}

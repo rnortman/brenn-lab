@@ -23,6 +23,9 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
   Bazel dependency. If a tool is genuinely impractical to bring in through
   Bazel, pick a different tool, and if that is not possible either, surface it
   as a decision rather than adding a host dependency.
+- The one place the build reads git is the workspace status command,
+  `tools/buildinfo/status.sh`, which `.bazelrc` names; it stamps the runner
+  with the commit and cleanliness of the tree it was built from.
 - Python dependencies are `requirements.in` and its lock,
   `requirements_lock.txt`, hash-pinned for both linux CPUs and resolved by the
   pinned uv with the hermetic interpreter. `make repin` regenerates it and the
@@ -50,6 +53,7 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
 | `make repin` | Regenerate the Python lock and both gate-tool crate locks |
 | `make todo-gather` | Fold `todo.d/` fragments into `TODO.md` |
 | `make changes ARGS=...` | Run allthechanges: `ARGS="query"`, `ARGS="todo query"`, `ARGS="gather --version X.Y.Z --dry-run"` |
+| `make lab ARGS=...` | Run the experiment runner: `ARGS="dry-run --lab <lab.toml> --machine <name> --script <script.py>"`, or `run` with `--out <dir>` |
 | `make setup` | Wire git at `.githooks` (once per clone; `make check` fails until it has run) |
 | `make scrub-tree` | Whole-tree secret sweep |
 | `make clean` | Drop Bazel's outputs for this workspace |

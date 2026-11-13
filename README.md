@@ -13,8 +13,20 @@ need not be audio: pose, fault and status streams are data too.
 
 ## Status
 
-Scaffolding only. The repository has its build, its gates and a placeholder
-target that proves them; it has no harness logic yet.
+The run spine and one device role. A script declares the roles it uses and
+sends them commands; a lab configuration says which machines and devices there
+are. The runner dry-runs a script against a lab, probing every device it needs
+without recording anything, and runs it, writing a run directory with a
+manifest, a journal of every command, reply and event, and results. The one
+role kind is capture, which records a device through brenn-pod's recorder,
+`pod-capture`, installed where the lab configuration says. There is no
+playback, alignment or run-validity checking yet, and roles on other machines
+cannot be reached.
+
+- `docs/reference/experiments.md`: the lab configuration, writing a script,
+  the capture role, the dry run and the run.
+- `docs/reference/run-directory.md`: what a run leaves behind, file by file
+  and key by key.
 
 ## Contributing
 

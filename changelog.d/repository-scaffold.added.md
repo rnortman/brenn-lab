@@ -1,8 +1,5 @@
 - First release of brenn-lab, an experimental harness for audio and motion
-  work, published under the Apache 2.0 licence. This release is the
-  repository's foundation only. It has no harness logic yet: a single
-  placeholder Python target shows that building, testing, linting and type
-  checking all work.
+  work, published under the Apache 2.0 licence.
 - Bazel is the only build. The Python interpreter and packages, ruff, mypy and
   every tool the checks use are pinned and downloaded by checksum. On linux
   x86_64 a fresh clone needs only bazelisk, git and make. `make check` is the
