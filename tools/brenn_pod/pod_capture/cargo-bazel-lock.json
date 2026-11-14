@@ -2,7 +2,7 @@
   "binary_crates": [
     "pod-capture 0.1.0"
   ],
-  "checksum": "e699ac1c611aa61e5c1feb0157ee8390973925226f9d9c3b9996db0cc8f8b51b",
+  "checksum": "9f31d99596d2bdf47d9b6c23c7bb3fb29a30c24285cfdb4543d5e7a3eafeb216",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -130,7 +130,7 @@
       "repository": {
         "Git": {
           "commitish": {
-            "Rev": "145886ac600a4512a41c42a065a606e70e7046d8"
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
           },
           "remote": "https://github.com/rnortman/brenn-pod.git",
           "strip_prefix": "firmware/crates/alsa-pcm"
@@ -219,7 +219,7 @@
       "repository": {
         "Git": {
           "commitish": {
-            "Rev": "145886ac600a4512a41c42a065a606e70e7046d8"
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
           },
           "remote": "https://github.com/rnortman/brenn-pod.git",
           "strip_prefix": "firmware/crates/audio-pipeline"
@@ -265,6 +265,11 @@
       "version": "2.13.2"
     },
     "build-id 0.1.0": {
+      "build_script_attrs": {
+        "build_script_env": {
+          "BRENN_POD_BUILD_COMMIT": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
+        }
+      },
       "common_attrs": {
         "deps": [
           {
@@ -277,11 +282,9 @@
           }
         ],
         "edition": "2024",
-        "rustc_env": {
-          "HIL_BUILD_COMMIT": "145886ac600a4512a41c42a065a606e70e7046d8",
-          "HIL_BUILD_DIRTY": "false",
-          "HIL_BUILD_SOURCE": "declared"
-        }
+        "extra_deps": [
+          ":build_script_build"
+        ]
       },
       "library_target_name": "build_id",
       "license": "Apache-2.0",
@@ -292,7 +295,7 @@
       "repository": {
         "Git": {
           "commitish": {
-            "Rev": "145886ac600a4512a41c42a065a606e70e7046d8"
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
           },
           "remote": "https://github.com/rnortman/brenn-pod.git",
           "strip_prefix": "firmware/crates/build-id"
@@ -303,6 +306,12 @@
           "Library": {
             "crate_name": "build_id",
             "crate_root": "src/lib.rs"
+          }
+        },
+        {
+          "BuildScript": {
+            "crate_name": "build_script_build",
+            "crate_root": "build.rs"
           }
         }
       ],
@@ -467,7 +476,7 @@
       "repository": {
         "Git": {
           "commitish": {
-            "Rev": "145886ac600a4512a41c42a065a606e70e7046d8"
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
           },
           "remote": "https://github.com/rnortman/brenn-pod.git",
           "strip_prefix": "firmware/crates/device-protocol"
@@ -566,7 +575,7 @@
       "repository": {
         "Git": {
           "commitish": {
-            "Rev": "145886ac600a4512a41c42a065a606e70e7046d8"
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
           },
           "remote": "https://github.com/rnortman/brenn-pod.git",
           "strip_prefix": "firmware/crates/frame-log"
@@ -983,6 +992,18 @@
           {
             "id": "serde 1.0.229",
             "target": "serde"
+          },
+          {
+            "id": "serde_json 1.0.154",
+            "target": "serde_json"
+          },
+          {
+            "id": "xvf3800-ctrl 0.1.0",
+            "target": "xvf3800_ctrl"
+          },
+          {
+            "id": "xvf3800-usb 0.1.0",
+            "target": "xvf3800_usb"
           }
         ],
         "edition": "2024"
@@ -996,7 +1017,7 @@
       "repository": {
         "Git": {
           "commitish": {
-            "Rev": "145886ac600a4512a41c42a065a606e70e7046d8"
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
           },
           "remote": "https://github.com/rnortman/brenn-pod.git",
           "strip_prefix": "firmware/devices/pod-capture"
@@ -1041,7 +1062,7 @@
       "repository": {
         "Git": {
           "commitish": {
-            "Rev": "145886ac600a4512a41c42a065a606e70e7046d8"
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
           },
           "remote": "https://github.com/rnortman/brenn-pod.git",
           "strip_prefix": "firmware/crates/pod-jsonl"
@@ -1781,7 +1802,7 @@
       "repository": {
         "Git": {
           "commitish": {
-            "Rev": "145886ac600a4512a41c42a065a606e70e7046d8"
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
           },
           "remote": "https://github.com/rnortman/brenn-pod.git",
           "strip_prefix": "firmware/crates/truncfmt"
@@ -1826,6 +1847,78 @@
         }
       ],
       "version": "1.0.27"
+    },
+    "xvf3800-ctrl 0.1.0": {
+      "common_attrs": {
+        "edition": "2024"
+      },
+      "library_target_name": "xvf3800_ctrl",
+      "license": "Apache-2.0",
+      "license_ids": [
+        "Apache-2.0"
+      ],
+      "name": "xvf3800-ctrl",
+      "repository": {
+        "Git": {
+          "commitish": {
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
+          },
+          "remote": "https://github.com/rnortman/brenn-pod.git",
+          "strip_prefix": "firmware/crates/xvf3800-ctrl"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "xvf3800_ctrl",
+            "crate_root": "src/lib.rs"
+          }
+        }
+      ],
+      "version": "0.1.0"
+    },
+    "xvf3800-usb 0.1.0": {
+      "common_attrs": {
+        "deps": [
+          {
+            "id": "libc 0.2.191",
+            "target": "libc"
+          },
+          {
+            "id": "log 0.4.35",
+            "target": "log"
+          },
+          {
+            "id": "xvf3800-ctrl 0.1.0",
+            "target": "xvf3800_ctrl"
+          }
+        ],
+        "edition": "2024"
+      },
+      "library_target_name": "xvf3800_usb",
+      "license": "Apache-2.0",
+      "license_ids": [
+        "Apache-2.0"
+      ],
+      "name": "xvf3800-usb",
+      "repository": {
+        "Git": {
+          "commitish": {
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
+          },
+          "remote": "https://github.com/rnortman/brenn-pod.git",
+          "strip_prefix": "firmware/crates/xvf3800-usb"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "xvf3800_usb",
+            "crate_root": "src/lib.rs"
+          }
+        }
+      ],
+      "version": "0.1.0"
     },
     "zmij 1.0.23": {
       "build_script_attrs": {},

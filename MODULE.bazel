@@ -148,7 +148,7 @@ crate.from_specs(
 # statement of the revision; //tools/pins:pins_test holds every use of it.
 # TODO(pinned-brenn-pod-revision-not-on-main): the commit is the head of a
 # branch on brenn-pod's remote, not on its main.
-BRENN_POD_COMMIT = "145886ac600a4512a41c42a065a606e70e7046d8"
+BRENN_POD_COMMIT = "5a55610ba6e84fe484291ed83a442bccbfd853f2"
 
 BRENN_POD_REMOTE = "https://github.com/rnortman/brenn-pod.git"
 
@@ -164,19 +164,14 @@ crate.annotation(
     repositories = ["pod_capture_crates"],
 )
 
-# build-id's build script runs the host's git even when the commit is declared
-# to it. Off, and these are the three values it sets for a declared commit.
-# TODO(pinned-recorder-build-states-build-id-internals): the names and the
-# rule are the crate's own.
+# build-id's build script stamps the commit declared in BRENN_POD_BUILD_COMMIT
+# and, with no checkout of brenn-pod around the crate, starts no program.
 crate.annotation(
-    crate = "build-id",
-    gen_build_script = "off",
-    repositories = ["pod_capture_crates"],
-    rustc_env = {
-        "HIL_BUILD_COMMIT": BRENN_POD_COMMIT,
-        "HIL_BUILD_DIRTY": "false",
-        "HIL_BUILD_SOURCE": "declared",
+    build_script_env = {
+        "BRENN_POD_BUILD_COMMIT": BRENN_POD_COMMIT,
     },
+    crate = "build-id",
+    repositories = ["pod_capture_crates"],
 )
 
 # alsa-sys's build script reads the host's pkg-config, which puts the host's

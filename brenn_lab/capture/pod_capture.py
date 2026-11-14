@@ -1,7 +1,8 @@
 """The one place in brenn-lab that knows brenn-pod's recorder, `pod-capture`.
 
 Its command line, its event lines, its exit statuses, its failure reasons, the
-clocks its readings are on, how long to wait for it, and the process. Nothing
+clocks its readings are on, how long to wait for it, the device's state it
+states and the little of that brenn-lab reads, and the process. Nothing
 else in brenn-lab names a flag, an event or a key of the recorder; what the
 recorder reports reaches the capture role as the capture kind's own types.
 
@@ -25,13 +26,14 @@ from typing import IO
 from brenn_lab.capture.device import CaptureDevice
 from brenn_lab.capture.messages import (
     Build,
+    Device,
     Failed,
     Gap,
     Late,
-    NotRead,
     Recorder,
     Started,
     Stopped,
+    device_state_problem,
 )
 from brenn_lab.data import (
     MONOTONIC,
@@ -40,12 +42,13 @@ from brenn_lab.data import (
     ClockValue,
     DecodeError,
     Failure,
+    JsonObject,
     JsonValue,
     Location,
     decode_value,
     encode_value,
 )
-from brenn_lab.sound import CardIdentity, Granted
+from brenn_lab.sound import Granted
 
 PROGRAM = "pod-capture"
 REPOSITORY = "brenn-pod"
@@ -73,11 +76,6 @@ REASONS: dict[str, str] = {
     "write_stalled": "write_stalled",
 }
 
-# TODO(manifest-device-firmware-unread): the recorder sends the device no
-# control command, so neither the device's firmware nor its configuration is
-# read for any capture.
-_NOT_READ = NotRead("the recorder sends the device no control command, so this was not read")
-
 
 @dataclass(frozen=True)
 class Spec:
@@ -96,18 +94,20 @@ class Spec:
 
 
 # The event lines, as far as brenn-lab reads them. Keys beyond these are
-# ignored; a field with a default of None may be absent and reads as null; a
-# missing key otherwise, or a value of another type, is a contract break.
+# ignored, but inside a field typed `JsonObject`, which is carried whole; a
+# field with a default of None may be absent and reads as null; a missing key
+# otherwise, or a value of another type, is a contract break.
 
 
 @dataclass(frozen=True)
 class _StartedLine:
     record_id: str
     path: str
-    device: CardIdentity
+    device: Device
     granted: Granted
     layout: tuple[str, ...]
     build: Build
+    device_state: JsonObject
     frame: int
     mono_us: int
     wall_us: int
@@ -194,6 +194,10 @@ def parse_line(raw: bytes) -> _Line:
         line = decode_value(cls, _documented(cls, value), "line")
     except DecodeError as e:
         raise ContractError(f"{name}: {e}") from e
+    if isinstance(line, _StartedLine):
+        problem = device_state_problem(line.device_state)
+        if problem is not None:
+            raise ContractError(f"{name}: {problem}")
     return typing.cast(_Line, line)
 
 
@@ -204,12 +208,15 @@ def _refuse_constant(name: str) -> JsonValue:
 def _documented(tp: object, value: JsonValue) -> JsonValue:
     """`value` with every object restricted to the fields of the dataclass it is
     read as, so that keys beyond the documented ones are ignored. A field whose
-    default is None reads as null when absent. The strict decoding that follows
-    judges everything else.
+    default is None reads as null when absent. A field typed `JsonObject` is
+    carried whole: the object is not walked and nothing in it is cut. The
+    strict decoding that follows judges everything else.
 
     Only the shapes the line types use are walked; a line type with any other
     shape is refused here, so it cannot slip past the walk unnoticed.
     """
+    if tp is JsonObject:
+        return value
     if isinstance(tp, type) and dataclasses.is_dataclass(tp):
         if not isinstance(value, dict):
             return value
@@ -571,8 +578,7 @@ class Running:
             granted=line.granted,
             layout=line.layout,
             start=_reading(self._machine, line.mono_us, line.wall_us),
-            device_firmware=_NOT_READ,
-            device_configuration=_NOT_READ,
+            device_state=line.device_state,
         )
 
     def _break(self, why: str, raw: bytes) -> None:

@@ -33,6 +33,15 @@ MACHINE = "bench"
 RUN_ID = "00000000-0000-4000-8000-000000000000"
 SEED = 20261113
 UNMEASURED = ("clock_estimate", "unknown")
+READ_STATE: JsonObject = {
+    "outcome": "read",
+    "kind": "xvf3800",
+    "begun_mono_us": 1,
+    "ended_mono_us": 2,
+    "wall_us": 3,
+    "registers": {"version": {"resid": 48, "cmd": 0, "bytes": "010000", "value": [1, 0, 0]}},
+}
+"""A device's state as a capture's manifest entry carries one that was read."""
 
 
 @dataclass(frozen=True)
@@ -156,6 +165,7 @@ class Capture:
     `status` and that message. `tail` is the reader's verdict. `account` is
     the recorder's record (None: the one the losses make, every measured or
     unmeasured hole a gap); `recorded` False leaves the capture without one.
+    `device_state` is the manifest entry's statement of the device's state.
     """
 
     role: str = "mic"
@@ -173,6 +183,7 @@ class Capture:
     account: Account | None = None
     recorded: bool = True
     in_run: bool = True
+    device_state: JsonObject = field(default_factory=lambda: dict(READ_STATE))
 
     def capture_frame(self, x: float) -> float:
         """The capture frame of stream frame `x`: losses across which the
@@ -240,7 +251,7 @@ def build(
         if c.recorded:
             accounts.append(account)
     manifest: JsonObject = {
-        "layout": 3,
+        "layout": 4,
         "run_id": RUN_ID,
         "roles": {**sections, **(roles or {})},
     }
@@ -356,6 +367,7 @@ def _capture(
             "buffer_frames": 4096,
         },
         "layout": list(c.layout),
+        "device_state": c.device_state,
     }
     if c.refuse is not None:
         log.write_text(json.dumps({"status": c.status, "stderr": c.refuse}))

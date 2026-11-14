@@ -24,14 +24,23 @@ CARD_REASONS = {"no_card", "ambiguous_card"}
 
 # What the recorder's contract lets differ between two lines of one event, by
 # dotted key: `record_id` and `at_frame` are null before a log exists, a gap's
-# `frames` is null when it was not measured, and `build.dirty` is null when the
-# build declared its commit rather than reading it from a checkout.
+# `frames` is null when it was not measured, `build.dirty` is null when the
+# build declared its commit rather than reading it from a checkout, and a
+# card's `usb_id` and `usb`, and a USB device's `serial`, are null for a card
+# or a device that has none.
 EITHER = {
     ("capture_failed", "record_id"): {"str", "null"},
     ("capture_failed", "at_frame"): {"int", "null"},
     ("capture_gap", "frames"): {"int", "null"},
     ("capture_started", "build.dirty"): {"bool", "null"},
+    ("capture_started", "device.usb_id"): {"str", "null"},
+    ("capture_started", "device.usb"): {"object", "null"},
+    ("capture_started", "device.usb.serial"): {"str", "null"},
 }
+
+# The placeholders the README's hand replacements put in `device.usb`.
+USB_PLACEHOLDERS = {"port": "1-1", "bus": 1, "address": 2}
+SERIAL_PLACEHOLDER = "EXAMPLE-SERIAL"
 
 
 def recorded_by_event() -> dict[str, list[dict[str, JsonValue]]]:
@@ -95,7 +104,42 @@ REFUSED: dict[str, tuple[Callable[[], bytes], str]] = {
     "missing_field": (lambda: _without("capture_started", "record_id"), "record_id"),
     "wrong_type": (lambda: _with("capture_stopped", "frames", "many"), "frames"),
     "nested_wrong_type": (lambda: _with("capture_started", "granted.channels", "6"), "channels"),
+    "no_device_state": (lambda: _without("capture_started", "device_state"), "device_state"),
+    "device_state_not_an_object": (
+        lambda: _with("capture_started", "device_state", "read"),
+        "device_state",
+    ),
+    "unknown_outcome": (
+        lambda: _with("capture_started", "device_state.outcome", "partly"),
+        "outcome",
+    ),
+    "unavailable_without_why": (
+        lambda: _with(
+            "capture_started",
+            "device_state",
+            {"outcome": "unavailable", "detail": "no node", "kind": "xvf3800"},
+        ),
+        "why",
+    ),
+    "not_attempted_detail_not_a_string": (
+        lambda: _with(
+            "capture_started",
+            "device_state",
+            {"outcome": "not_attempted", "why": "not_usb", "detail": None},
+        ),
+        "detail",
+    ),
+    "no_device_usb": (lambda: _without_device_usb(), "usb"),
+    "device_usb_a_string": (lambda: _with("capture_started", "device.usb", "3-2.2"), "usb"),
 }
+
+
+def _without_device_usb() -> bytes:
+    value = _recorded("capture_started")
+    device = value["device"]
+    assert isinstance(device, dict)
+    del device["usb"]
+    return _bytes(value)
 
 
 @pytest.mark.parametrize("case", REFUSED, ids=str)
@@ -115,6 +159,21 @@ def test_parse_line_ignores_keys_beyond_the_contract() -> None:
     assert parse_line(_bytes(value)) == original
 
 
+def test_parse_line_carries_the_device_statement_whole() -> None:
+    value = _recorded("capture_started")
+    state = value["device_state"]
+    device = value["device"]
+    assert isinstance(state, dict) and isinstance(device, dict)
+    usb = device["usb"]
+    assert isinstance(usb, dict)
+    state["future_key"] = {"nested": [1, None]}
+    usb["future_key"] = "x"
+    parsed = parse_line(_bytes(value))
+    assert isinstance(parsed, _StartedLine)
+    assert parsed.device_state == state
+    assert parsed.device.usb == usb
+
+
 def test_parse_line_reads_absent_cards_as_null() -> None:
     absent = parse_line(_without("capture_failed", "cards"))
     assert absent == parse_line(_with("capture_failed", "cards", None))
@@ -126,10 +185,21 @@ def _alike(event: str, key: str, a: JsonValue, b: JsonValue) -> bool:
     have the same shape or two shapes the contract lets differ there.
     """
     if isinstance(a, dict) and isinstance(b, dict):
+        if (event, key) == ("capture_started", "device_state") and a.get("outcome") != b.get(
+            "outcome"
+        ):
+            # A union tagged on `outcome`: states of two outcomes are not
+            # compared, and one no recorded line has is held to brenn-pod's
+            # references alone.
+            return True
         return a.keys() == b.keys() and all(_alike(event, f"{key}.{k}", a[k], b[k]) for k in a)
-    sa, sb = shape(a), shape(b)
     either = EITHER.get((event, key))
-    return sa == sb or bool(either and {str(sa), str(sb)} <= either)
+    return shape(a) == shape(b) or bool(either and {_kind(a), _kind(b)} <= either)
+
+
+def _kind(value: JsonValue) -> str:
+    """The JSON type of `value` as `EITHER` names it."""
+    return "object" if isinstance(value, dict) else str(shape(value))
 
 
 def test_parse_line_takes_a_declared_and_a_checkout_build() -> None:
@@ -179,11 +249,22 @@ def test_the_readme_names_the_recorders_commit() -> None:
     assert match is not None
     commits = {
         value["build"]["commit"]  # type: ignore[call-overload,index]
-        for path in RECORDED
+        for path in RECORDED + AUTHORED
         for value in objects(path)
         if value["event"] == "capture_started"
     }
     assert commits == {match.group(1)}
+
+
+@pytest.mark.parametrize("path", RECORDED + AUTHORED, ids=lambda p: p.name)
+def test_no_usb_location_or_serial_but_the_placeholders(path: Path) -> None:
+    for value in objects(path):
+        device = value.get("device")
+        usb = device.get("usb") if isinstance(device, dict) else None
+        if not isinstance(usb, dict):
+            continue
+        assert usb["serial"] in (None, SERIAL_PLACEHOLDER), path.name
+        assert {k: usb[k] for k in USB_PLACEHOLDERS} == USB_PLACEHOLDERS, path.name
 
 
 def test_replay_files() -> None:

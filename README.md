@@ -23,7 +23,8 @@ manifest, a journal of every command, reply and event, and results.
   the one this repository's build pins, or one installed where the lab
   configuration says. The build also pins brenn-pod's reader, `frame-log`.
   Its hardware-lane tests record from an attached reSpeaker Flex through the
-  pinned recorder.
+  pinned recorder. A capture's manifest entry carries the device's state as
+  the recorder read it.
 - **Playback** plays WAV files through an ALSA card or a sink of the
   desktop's sound server, keeps an exact copy of every play in the run, and
   holds the output under a volume cap and quiet hours that only the lab

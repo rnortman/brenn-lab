@@ -432,6 +432,7 @@ def test_align_relative_run_under_bazel_run(tmp_path: Path) -> None:
         ("no_manifest", "unreadable"),
         ("not_json", "unreadable"),
         ("layout_2", "layout"),
+        ("layout_3", "layout"),
         ("read_only", "not_writable"),
     ],
 )
@@ -443,8 +444,9 @@ def test_align_refusals_write_no_report(tmp_path: Path, setup: str, reason: str)
         run.mkdir()
     if setup == "not_json":
         (run / "manifest.json").write_text("{")
-    elif setup == "layout_2":
-        (run / "manifest.json").write_text(json.dumps({"layout": 2, "roles": {}}))
+    elif setup.startswith("layout_"):
+        layout = int(setup.removeprefix("layout_"))
+        (run / "manifest.json").write_text(json.dumps({"layout": layout, "roles": {}}))
     if setup == "read_only":
         run.chmod(0o555)
         assert not os.access(run, os.W_OK), "the test's process can write a 0o555 directory"
@@ -512,6 +514,7 @@ def test_assess_twice_names_the_report_replaced(tmp_path: Path) -> None:
         ("no_manifest", "unreadable"),
         ("results_without_restored", "unreadable"),
         ("layout_2", "layout"),
+        ("layout_3", "layout"),
         ("read_only", "not_writable"),
     ],
 )
@@ -521,8 +524,9 @@ def test_assess_refusals_write_nothing(tmp_path: Path, setup: str, reason: str) 
         scenes.build(run, [Play("speaker", 1, 3, at=5000.0)])
     else:
         run.mkdir()
-    if setup == "layout_2":
-        (run / "manifest.json").write_text(json.dumps({"layout": 2, "roles": {}}))
+    if setup.startswith("layout_"):
+        layout = int(setup.removeprefix("layout_"))
+        (run / "manifest.json").write_text(json.dumps({"layout": layout, "roles": {}}))
     elif setup == "results_without_restored":
         results = json.loads((run / "results.json").read_text())
         del results["sources"][0]["restored"]

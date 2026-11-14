@@ -1,4 +1,4 @@
-# The run directory, layout 3
+# The run directory, layout 4
 
 A run directory is what one run of an experiment script leaves behind. This
 document says what every file and key in it means, so that a reader with the
@@ -84,13 +84,13 @@ the file.
 ### Reserved names
 
 `streams/` (other recorded streams such as pose, status and faults, per role)
-is **reserved**. Its name and meaning are fixed by layout 3, and no code in
+is **reserved**. Its name and meaning are fixed by layout 4, and no code in
 this version creates it. The manifest's and the results' key `streams` is
 reserved the same way.
 
 ### The version rule
 
-`manifest.json`'s `layout` is 3 and `results.json`'s `schema` is 2;
+`manifest.json`'s `layout` is 4 and `results.json`'s `schema` is 2;
 `alignment.json`'s and `assessment.json`'s `schema` are each 1. Adding a file
 or a key changes none of them: a new role kind that writes under a reserved
 name, or adds a section of its own beside `captures`, a new key in an entry,
@@ -132,11 +132,13 @@ under `not_assessed`, and calls every marker of such a play with an underrun
 
 **Older runs.** Layout 1 is the run directory before the four keys were
 defined by the output kind. In layout 2 a source entry's `first` was the
-first mark of every play; in layout 3 it is `null` for a play with a stated
+first mark of every play; from layout 3 it is `null` for a play with a stated
 start, whose first mark is in `results.json` and in the journal's line for
-the play's end. `lab align` and `lab assess` refuse a layout-1 or layout-2
-run by its number, as they refuse any layout but their own; such a run is
-read by the harness revision that wrote it.
+the play's end. In layout 3 a capture entry held `device_firmware` and
+`device_configuration`, both always not read, where layout 4 carries the
+recorder's `device.usb` and `device_state`. `lab align` and `lab assess`
+refuse a run of layouts 1 to 3 by its number, as they refuse any layout but
+their own; such a run is read by the harness revision that wrote it.
 
 ## Common shapes
 
@@ -216,7 +218,7 @@ Written when the run directory is created, and rewritten whole (to a
 temporary file, then a rename) each time a capture or a play starts.
 
 ```json
-{"layout": 2,
+{"layout": 4,
  "run_id": "<uuid4>",
  "created": {…clock reading, runner's machine…},
  "runner": {"machine": "bench"},
@@ -284,13 +286,15 @@ temporary file, then a rename) each time a capture or a play starts.
  "recorder": {"program": "pod-capture", "repository": "brenn-pod",
               "build": {"commit": "…", "dirty": null, "source": "declared"}},
  "device": {"selector": "…", "card_index": 2, "card_name": "…", "card_long_name": "…",
-            "pcm": "hw:2,0", "usb_id": "2886:0022"},
+            "pcm": "hw:2,0", "usb_id": "2886:0022",
+            "usb": {"port": "1-1", "bus": 1, "address": 2, "serial": "…",
+                    "bcd_device": "0100"}},
  "granted": {"rate_hz": 16000, "channels": 6, "sample_format": "s16_le",
              "period_frames": 320, "buffer_frames": 5120},
  "layout": ["conference_beam", "…"],
  "start": {…clock reading, the role's machine…},
- "device_firmware": {"reason": "…", "read": false},
- "device_configuration": {"reason": "…", "read": false},
+ "device_state": {"outcome": "read", "kind": "xvf3800", "begun_mono_us": …,
+                  "ended_mono_us": …, "wall_us": …, "registers": {…}},
  "file": {…pointer…}}
 ```
 
@@ -306,12 +310,17 @@ later appears here too.
     them.
   - `device` and `granted` are the card as ALSA and USB name it (`usb_id` may
     be `null`) and what the open stream granted.
-  - `device_firmware` and `device_configuration` are the device's own firmware
-    and configuration. In this version both are always
-    `{"reason": "…", "read": false}`: the recorder sends the device no control
-    command, so neither is read. They are never absent and never filled from
-    the recorder's build or the card's name. `{"read": true, "value": …}` is
-    reserved for a later version; nothing in this version writes it.
+  - `device.usb` and `device_state` are the recorder's statement of where the
+    device is on USB and of the device's own state (for an XVF3800: its
+    firmware identity and routing registers), carried as the recorder gave
+    them. Their members and meaning are stated in brenn-pod's
+    `docs/reference/frame-log.md`, not here, when `device.usb` is `null`
+    included. brenn-lab guarantees only that `device_state` is present, that
+    its `outcome` is `not_attempted`, `unavailable` or `read`, and that its
+    `why` and `detail` are strings when it is `not_attempted` or
+    `unavailable`. It is never absent and never filled by brenn-lab; a
+    recorder that states no `device_state` fails the start with
+    `recorder_contract`.
 - `layout` is the channel names the configuration gave and the recorder
   wrote into the log. It is the configuration's naming of the channels, not a
   reading of the chip's routing. The harness holds the recorder's reported
@@ -983,7 +992,7 @@ the largest capture's export, in the run's `.alignment.tmp/`.
 every instant and a capture still being written exports with an
 `unterminated` tail; the report describes the run so far. A source entry
 with no `marker` key is `no_marker_record`, and results with no `sources`
-are read as a run with no play. A layout-1 or layout-2 run is refused (*The
+are read as a run with no play. A run of layouts 1 to 3 is refused (*The
 version rule*).
 
 ## `assessment.json`
@@ -1091,8 +1100,11 @@ Not findings: a play the script stopped, which is the script doing what it
 meant to; a marker of any play that is `not_handed` or `unknown` and was not
 found; a marker not found on one channel while the play is found on another
 (a processed channel may remove the played sound); any level, drift or count
-of `late`; and a play whose drift alignment could not measure, since each
-reason for that is already a `loss` or a `play_underrun` finding.
+of `late`; a play whose drift alignment could not measure, since each
+reason for that is already a `loss` or a `play_underrun` finding; and a
+device's state of any outcome, `unavailable` and `not_attempted` included,
+which says nothing of the recording and is stated in the capture's entry
+under *Captures* as `device_state`.
 
 A `not_assessed` entry has exactly `what`, `reason`, `role`, `capture`,
 `play`, `detail`:
@@ -1122,6 +1134,7 @@ One entry per capture entry of every capture role, in the manifest's order:
  "frames": 417600, "tail": "ended",
  "recorder": {"ended": "stopped", "frames": 417600, "gaps_reported": 0, "late": 0,
               "loss_free": true, "failure": null},
+ "device_state": {"outcome": "unavailable", "why": "open", "detail": "…"},
  "loss": [],
  "channels": [{"channel": "raw_mic_0", "frames": 417600, "min": -2457, "max": 2403,
                "mean": -0.5, "peak_mb": -2250, "rms_mb": -4540,
@@ -1137,6 +1150,12 @@ One entry per capture entry of every capture role, in the manifest's order:
   `tail`: the reader's verdict on the log's end.
 - `recorder`: the capture's record in `results.json`, `late` as a count;
   `null` when there is none.
+- `device_state`: the device's state as the manifest's capture entry carries
+  it, in part: `outcome`, and the recorder's `why` and `detail` as given for
+  `not_attempted` and `unavailable`, both `null` for `read`. The rest of the
+  statement (its registers, `kind` and times) is in the manifest, and its
+  meaning is brenn-pod's. Present for every capture, read or not. No outcome
+  is a finding.
 - `loss`: every loss either witness states, by `at_frame`:
   `{at_frame, frames, basis, estimated_frames, cause, witnesses}`. `frames`
   is the length where a witness measured it (the recorder's gap length, else
@@ -1248,11 +1267,14 @@ The assessment locks nothing; on a run still recording it describes the run
 so far, and a capture being written is `log_not_ended`. A run with no
 `results.json`, including one whose runner died while writing it, is
 assessed in part: `run_not_completed` and `results`/`no_results`, every
-capture read and measured, loss stated from the reader alone. A layout-1
-or layout-2 run is refused by its number (*The version rule*). A `manifest.json` or
+capture read and measured, loss stated from the reader alone. A run of
+layouts 1 to 3 is refused by its number (*The version rule*). A `manifest.json` or
 `results.json` that is present and damaged is refused, as above; a source
-entry with no `output.kind` is such damage, refused before any capture is
-read, though `lab align`, which does not read the key, still aligns the run. One `results.json` the runner writes itself is refused the same way.
+entry with no `output.kind`, and a capture entry with no `device_state` or
+one whose `outcome` is not `not_attempted`, `unavailable` or `read` (or whose
+`why` or `detail` is not a string when it is not `read`), are such damage,
+refused before any capture is read, though `lab align`, which does not read
+those keys, still aligns the run. One `results.json` the runner writes itself is refused the same way.
 When a capture's recorder reader failed, or a play's end could not be
 reported, and a command of the script's raised that error, the run
 ends `failed` and the record keeps `ended` `null`, a play's `restored` too;

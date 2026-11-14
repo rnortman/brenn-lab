@@ -170,6 +170,23 @@ def check_summary(summary: Any, started: Any, ended: Any) -> None:
     assert summary["tail"]["verdict"] == "ended"
 
 
+def check_device_state(started: Any, checked: Any, live: Path, summary: Any) -> None:
+    """The device's state was read, and the manifest entry and the frame log's
+    header carry what the recorder printed. No register's value is asserted.
+    """
+    [line] = [v for v in objects(live) if v["event"] == "capture_started"]
+    printed_device = line["device"]
+    assert isinstance(printed_device, dict)
+    assert started["device_state"]["outcome"] == "read", started["device_state"]
+    assert started["device_state"] == line["device_state"]
+    assert started["device"]["usb"] == printed_device["usb"]
+    header = summary["header"]["capture"]
+    assert header["device_state"] == line["device_state"]
+    assert header["device"]["usb"] == printed_device["usb"]
+    # The probe read the state at another time, so only its outcome is compared.
+    assert checked["device_state"]["outcome"] == "read", checked["device_state"]
+
+
 def same_case(live: Path, case: str) -> None:
     """The live lines against the recorded transcript `case`: the same events
     in the same order, `capture_late` left out of both; line by line the same
@@ -226,6 +243,7 @@ def test_clean() -> None:
     summary = frame_log_summary(capture)
     check_summary(summary, started, ended)
     assert summary["discontinuities"] == []
+    check_device_state(started, checked, live, summary)
 
     same_case(live, "clean")
 

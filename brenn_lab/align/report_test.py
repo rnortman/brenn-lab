@@ -633,6 +633,7 @@ def test_a_run_that_cannot_be_written_is_refused_and_unchanged(
         ("not_json", "unreadable"),
         ("layout_1", "layout"),
         ("layout_2", "layout"),
+        ("layout_3", "layout"),
         ("malformed", "unreadable"),
     ],
 )
@@ -642,12 +643,11 @@ def test_a_run_that_cannot_be_read_is_refused(tmp_path: Path, setup: str, reason
         run.mkdir()
     if setup == "not_json":
         (run / "manifest.json").write_text("{")
-    elif setup == "layout_1":
-        (run / "manifest.json").write_text(json.dumps({"layout": 1, "roles": {}}))
-    elif setup == "layout_2":
-        (run / "manifest.json").write_text(json.dumps({"layout": 2, "roles": {}}))
+    elif setup.startswith("layout_"):
+        layout = int(setup.removeprefix("layout_"))
+        (run / "manifest.json").write_text(json.dumps({"layout": layout, "roles": {}}))
     elif setup == "malformed":
-        (run / "manifest.json").write_text(json.dumps({"layout": 3, "roles": {"r": {}}}))
+        (run / "manifest.json").write_text(json.dumps({"layout": 4, "roles": {"r": {}}}))
     refused = report.align(run, READER, True, HARNESS)
     assert isinstance(refused, Failure)
     assert refused.reason == reason

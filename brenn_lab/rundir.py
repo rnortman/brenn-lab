@@ -1,4 +1,4 @@
-"""The run directory, layout 3.
+"""The run directory, layout 4.
 
 <run>/.gitignore          `*`: created first, so git ignores the whole run
 <run>/manifest.json       rewritten whole, by a temporary file and a rename
@@ -28,7 +28,7 @@ from typing import IO
 
 from brenn_lab.data import JsonObject, to_text
 
-LAYOUT = 3
+LAYOUT = 4
 GITIGNORE = "*\n"
 
 

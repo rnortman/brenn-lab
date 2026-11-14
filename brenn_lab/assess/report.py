@@ -22,6 +22,7 @@ from brenn_lab import rundir
 from brenn_lab.align import report as alignment
 from brenn_lab.align.capture import Exported, Hole
 from brenn_lab.assess.measure import Measured, measure
+from brenn_lab.capture.messages import device_state_problem
 from brenn_lab.data import DecodeError, Failure, JsonObject, JsonValue, get, get_or_null
 from brenn_lab.marker import Span
 from brenn_lab.playback.output import OUTPUTS, PLAYS_ON_AFTER_UNDERRUN
@@ -85,6 +86,10 @@ class _Run:
     """Every value the assessment reads from the manifest and the results."""
 
     roles: tuple[_Role, ...]
+    device_states: dict[tuple[str, int], JsonObject]
+    """Each capture's device state as its assessment states it: the outcome,
+    and the recorder's `why` and `detail` for a state that was not read.
+    """
     results_read: bool
     outcome: str | None
     failure: JsonObject | None
@@ -110,12 +115,25 @@ def _parse(manifest: JsonObject, results: JsonObject | None) -> _Run:
     """
     roles: list[_Role] = []
     outputs: dict[tuple[str, int], str] = {}
+    states: dict[tuple[str, int], JsonObject] = {}
     for name, section in get(manifest, "roles", dict, "manifest.json").items():
         where = f"manifest.json: roles.{name}"
         kind = get(section, "kind", str, where)
         if kind == capture_kind.KIND:
             entries = get(section, "captures", list, where)
             numbers = tuple(get(e, "capture", int, f"{where}.captures") for e in entries)
+            for n, e in zip(numbers, entries, strict=True):
+                at = f"{where}.captures[capture {n}]"
+                state = get(e, "device_state", dict, at)
+                problem = device_state_problem(state)
+                if problem is not None:
+                    raise DecodeError(f"{at}: {problem}")
+                read = state["outcome"] == "read"
+                states[(name, n)] = {
+                    "outcome": state["outcome"],
+                    "why": None if read else state["why"],
+                    "detail": None if read else state["detail"],
+                }
         elif kind == playback_kind.KIND:
             entries = get(section, "sources", list, where)
             numbers = tuple(get(e, "play", int, f"{where}.sources") for e in entries)
@@ -126,7 +144,7 @@ def _parse(manifest: JsonObject, results: JsonObject | None) -> _Run:
             numbers = ()
         roles.append(_Role(name, kind, numbers))
     if results is None:
-        return _Run(tuple(roles), False, None, None, {}, {}, outputs)
+        return _Run(tuple(roles), states, False, None, None, {}, {}, outputs)
     captures: dict[tuple[str, int], _CaptureRecord] = {}
     for i, record in enumerate(get(results, "captures", list, "results.json")):
         where = f"results.json: captures[{i}]"
@@ -142,6 +160,7 @@ def _parse(manifest: JsonObject, results: JsonObject | None) -> _Run:
                 plays[key] = replace(plays[key], unplayed_frames=None)
     return _Run(
         tuple(roles),
+        states,
         True,
         get(results, "outcome", str, "results.json"),
         get_or_null(results, "failure", dict, "results.json"),
@@ -455,6 +474,7 @@ class _Report:
                 "loss_free": record.loss_free,
                 "failure": record.failure,
             },
+            "device_state": self.run.device_states[(role, n)],
             "loss": loss,
             "channels": None if exported is None else [_encode_measured(m) for m in measured],
         }

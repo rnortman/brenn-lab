@@ -279,16 +279,25 @@ is the configuration's.
   the run, from 1; 0 in a dry reply), `capture_id`, `location`
   (`{machine, path}`, the path the role gave the recorder; `null` in a dry
   reply), `recorder` (`{program, repository, build}`), `device`, `granted`,
-  `layout`, `start`, `device_firmware`, `device_configuration`. These are the
-  manifest's capture entry (see `run-directory.md`).
+  `layout`, `start`, `device_state`. These are the manifest's capture entry
+  (see `run-directory.md`).
 - `capture.stop` → `capture.stopped`: `capture`, `frames`, `gaps_reported`,
   `end`.
-- `check` → `capture.checked`: `recorder`, `device`, `granted`, `layout`.
+- `check` → `capture.checked`: `recorder`, `device`, `granted`, `layout`,
+  `device_state`.
 - `release` → `capture.released`: `stopped`, a `capture.stopped` or `null`.
 
-`build.dirty` and `device.usb_id` may be `null`. `device_firmware` and
-`device_configuration` are always `{"reason": "…", "read": false}` in this
-version: the recorder sends the device no control command.
+`build.dirty`, `device.usb_id` and `device.usb` may be `null`. `device.usb`
+and `device_state` are the recorder's own statement of where the device is on
+USB and of the device's state, carried as given; their meaning is brenn-pod's
+(`docs/reference/frame-log.md`). `device_state.outcome` is `read`,
+`unavailable` (the recorder tried and could not reach the state, for example
+an account that may not open the device's usbfs node) or `not_attempted` (a
+device the recorder does not read). The recorder writes nothing to the device;
+for an XVF3800 it reads the chip's firmware identity and routing registers
+before the capture starts. A check is a real start of the recorder, so
+`capture.checked` says what that start read: a dry run shows a board whose
+chip cannot be read before anything is recorded.
 
 ### Events
 
@@ -357,7 +366,7 @@ The role's own:
 | `recorder_usage` | the device parameters cannot be put to the recorder: a channel name with a comma, or the recorder refused its command line (exit status 2); `data.stderr` is the recorder's stderr whole and `detail` its first line |
 | `recorder_exited` | the recorder ended without a final line |
 | `recorder_contract` | the recorder printed something its contract does not allow, its exit status disagrees with its last line, or the layout or channel count it reported is not what was sent |
-| `recorder_timeout` | no first line within 10 s of the start, or no final line within 15 s of the stop; the recorder is killed |
+| `recorder_timeout` | no first line within 10 s of the start, or no final line within 15 s of the stop; the recorder is killed. Inside the first 10 s the recorder opens the card and, for an XVF3800, first reads the chip's state (152 ms on the maintainer's Flex). A chip that answers "retry" throughout can hold that read past the 10 s, and the start then fails here; bounding the read is brenn-pod's to add |
 | `stopped_unasked` | the recorder stopped cleanly when the role had not asked |
 | `already_capturing` | a capture is running |
 | `not_capturing` | no capture is running |
@@ -1680,7 +1689,7 @@ verdict on the run.
 |---|---|
 | 0 | a report was written; every capture and play was read and every marked play located in some capture. A run with no marked play aligns with 0 |
 | 1 | a report was written that says otherwise |
-| 2 | refused, no report written: `where` `run`, `reason` `unreadable` (no directory, no `manifest.json` or `results.json` that is JSON of the expected shape), `layout` (not layout 3) or `not_writable` (the run directory cannot be written: a read-only disk, a directory without write permission, or a leftover `.alignment.tmp/` that cannot be removed, which the detail names; decided after the run is read and before any capture is read); or `where` `arguments`, `reason` `usage` |
+| 2 | refused, no report written: `where` `run`, `reason` `unreadable` (no directory, no `manifest.json` or `results.json` that is JSON of the expected shape), `layout` (not layout 4) or `not_writable` (the run directory cannot be written: a read-only disk, a directory without write permission, or a leftover `.alignment.tmp/` that cannot be removed, which the detail names; decided after the run is read and before any capture is read); or `where` `arguments`, `reason` `usage` |
 | 3 | the command raised; a `.alignment.tmp/` left in the run is not part of the record, and the next `align` clears it, or refuses with `not_writable` if it cannot |
 
 `align` writes its report and its scratch into the run and nowhere else. To

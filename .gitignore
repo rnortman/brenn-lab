@@ -56,6 +56,8 @@ __pycache__/
 !/brenn_lab/testing/transcripts/authored/not_json.jsonl
 !/brenn_lab/testing/transcripts/authored/second_started.jsonl
 !/brenn_lab/testing/transcripts/authored/silent.jsonl
+!/brenn_lab/testing/transcripts/authored/state_not_attempted.jsonl
+!/brenn_lab/testing/transcripts/authored/state_unavailable.jsonl
 !/brenn_lab/testing/transcripts/authored/stops_unasked.jsonl
 !/brenn_lab/testing/transcripts/authored/stream_died.jsonl
 !/brenn_lab/testing/transcripts/authored/unknown_event.jsonl

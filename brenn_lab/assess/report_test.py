@@ -110,6 +110,85 @@ def test_a_marked_play_located_with_no_loss_is_clean(tmp_path: Path) -> None:
     }
 
 
+UNAVAILABLE: JsonObject = {
+    "outcome": "unavailable",
+    "why": "open",
+    "detail": "cannot open /dev/bus/usb/001/002: permission denied",
+    "kind": "xvf3800",
+}
+NOT_ATTEMPTED: JsonObject = {
+    "outcome": "not_attempted",
+    "why": "not_usb",
+    "detail": "card 0's device is not on USB",
+}
+
+
+@pytest.mark.parametrize(
+    ("state", "stated"),
+    [
+        (scenes.READ_STATE, {"outcome": "read", "why": None, "detail": None}),
+        (UNAVAILABLE, {k: UNAVAILABLE[k] for k in ("outcome", "why", "detail")}),
+        (NOT_ATTEMPTED, NOT_ATTEMPTED),
+    ],
+    ids=["read", "unavailable", "not_attempted"],
+)
+def test_the_device_state_is_stated_and_is_no_finding(
+    tmp_path: Path, state: JsonObject, stated: JsonObject
+) -> None:
+    c = Capture(device_state=dict(state))
+    done = assess(scenes.build(tmp_path / "run", [MARKED], [c]).run)
+    assert done["answer"] == "clean"
+    [captured] = done["captures"]
+    assert captured["device_state"] == stated
+    keys = list(captured)
+    assert keys[keys.index("recorder") + 1] == "device_state"
+
+
+def test_a_capture_that_could_not_be_read_states_its_device_state(tmp_path: Path) -> None:
+    c = Capture(refuse="error: no", device_state=dict(UNAVAILABLE))
+    done = assess(scenes.build(tmp_path / "run", [], [c]).run)
+    assert names(done) == ["capture_unreadable"]
+    [captured] = done["captures"]
+    assert captured["read"] is False
+    assert captured["device_state"] == {k: UNAVAILABLE[k] for k in ("outcome", "why", "detail")}
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        None,
+        "read",
+        {"why": "open", "detail": "x"},
+        {"outcome": "partly"},
+        {"outcome": "unavailable", "detail": "x"},
+        {"outcome": "not_attempted", "why": "not_usb", "detail": 1},
+    ],
+    ids=["absent", "not_an_object", "no_outcome", "unknown_outcome", "no_why", "detail_int"],
+)
+def test_a_capture_entry_without_a_device_state_is_unreadable_and_still_aligned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: object
+) -> None:
+    built = scenes.build(tmp_path / "run", [MARKED])
+    path = built.run / "manifest.json"
+    manifest = json.loads(path.read_text())
+    entry = manifest["roles"]["mic"]["captures"][0]
+    if state is None:
+        del entry["device_state"]
+    else:
+        entry["device_state"] = state
+    path.write_text(json.dumps(manifest))
+    before = listing(built.run)
+    exports: list[Path] = []
+    monkeypatch.setattr(capture, "read", lambda log, *a: exports.append(log))
+    refused = report.assess(built.run, READER, False, HARNESS)
+    assert isinstance(refused, Failure) and refused.reason == "unreadable"
+    assert "device_state" in refused.detail and "manifest" in refused.detail, refused.detail
+    assert listing(built.run) == before
+    assert exports == []
+    monkeypatch.undo()
+    assert not isinstance(alignment.align(built.run, READER, False, HARNESS), Failure)
+
+
 def test_a_run_with_no_playback_is_clean(tmp_path: Path) -> None:
     done = assess(scenes.build(tmp_path / "run", []).run)
     assert done["answer"] == "clean"
@@ -630,7 +709,7 @@ def test_a_missing_manifest_or_another_layout_is_refused(tmp_path: Path) -> None
     run.mkdir()
     refused = report.assess(run, READER, False, HARNESS)
     assert isinstance(refused, Failure) and refused.reason == "unreadable"
-    for layout in (1, 2):
+    for layout in (1, 2, 3):
         (run / "manifest.json").write_text(json.dumps({"layout": layout, "roles": {}}))
         refused = report.assess(run, READER, False, HARNESS)
         assert isinstance(refused, Failure) and refused.reason == "layout"

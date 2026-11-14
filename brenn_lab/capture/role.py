@@ -112,7 +112,13 @@ class CaptureRole:
         if isinstance(probe, Failure):
             return probe
         s = probe.started
-        return Checked(recorder=s.recorder, device=s.device, granted=s.granted, layout=s.layout)
+        return Checked(
+            recorder=s.recorder,
+            device=s.device,
+            granted=s.granted,
+            layout=s.layout,
+            device_state=s.device_state,
+        )
 
     def _run_probe(self) -> _Probe | Failure:
         """Start a capture into a scratch directory, stop it as soon as it has

@@ -13,7 +13,9 @@
 #   1. exactly one BRENN_POD_COMMIT line, a 40-digit lowercase hex commit;
 #   2. every `rev = ` line in MODULE.bazel is `rev = BRENN_POD_COMMIT,`, and
 #      there are two, one per hub;
-#   3. exactly one "HIL_BUILD_COMMIT" line, whose value is BRENN_POD_COMMIT;
+#   3. exactly one "BRENN_POD_BUILD_COMMIT" line, whose value is
+#      BRENN_POD_COMMIT, and no line naming the build-id crate's own
+#      HIL_BUILD_ values;
 #   4. the commit the recorded transcripts' README names is BRENN_POD_COMMIT,
 #      so a pin moved without retaking the transcripts fails here.
 #
@@ -104,12 +106,20 @@ if [[ "$rev_count" -ne 2 || "$rev_by_constant" -ne 2 ]]; then
     status=1
 fi
 
-hil_value="$(extract HIL_BUILD_COMMIT "$module_bazel" \
-    's/^ *"HIL_BUILD_COMMIT": \(.*\),$/\1/p')"
-hil_lines="$(grep -c '"HIL_BUILD_COMMIT"' "$module_bazel" || true)"
-if [[ "$hil_value" != "BRENN_POD_COMMIT" || "$hil_lines" -ne 1 ]]; then
-    echo "FAIL: expected one \"HIL_BUILD_COMMIT\" line in MODULE.bazel, with" \
-        "the value BRENN_POD_COMMIT; found $hil_lines, value $hil_value" >&2
+declared_count="$(grep -c '"BRENN_POD_BUILD_COMMIT"' "$module_bazel" || true)"
+declared_by_constant="$(grep -c \
+    '^ *"BRENN_POD_BUILD_COMMIT": BRENN_POD_COMMIT,$' "$module_bazel" || true)"
+if [[ "$declared_count" -ne 1 || "$declared_by_constant" -ne 1 ]]; then
+    echo "FAIL: expected one \"BRENN_POD_BUILD_COMMIT\" line in MODULE.bazel," \
+        "'\"BRENN_POD_BUILD_COMMIT\": BRENN_POD_COMMIT,'; found:" >&2
+    grep '"BRENN_POD_BUILD_COMMIT"' "$module_bazel" >&2 || true
+    status=1
+fi
+internal_lines="$(grep -c 'HIL_BUILD_' "$module_bazel" || true)"
+if [[ "$internal_lines" -ne 0 ]]; then
+    echo "FAIL: MODULE.bazel names the build-id crate's own HIL_BUILD_ values" \
+        "on $internal_lines lines; declare the commit through" \
+        "BRENN_POD_BUILD_COMMIT" >&2
     status=1
 fi
 

@@ -6,9 +6,11 @@ transcript the stand-in replays, never written here.
 
 import errno
 import io
+import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -133,9 +135,7 @@ def test_a_clean_capture(tmp_path: Path) -> None:
     assert encode_value(started.granted) == started_line["granted"]
     assert list(started.layout) == started_line["layout"]
     assert encode_value(started.start) == reading(started_line)
-    for fact in (started.device_firmware, started.device_configuration):
-        assert encode_value(fact) == {"reason": fact.reason, "read": False}
-        assert fact.reason
+    assert started.device_state == started_line["device_state"]
 
     stopped = bench.send(Stop())
     assert isinstance(stopped, Stopped)
@@ -175,7 +175,43 @@ def test_check_probes_without_leaving_anything(tmp_path: Path) -> None:
         assert encode_value(checked.device) == started_line["device"]
         assert encode_value(checked.granted) == started_line["granted"]
         assert list(checked.layout) == started_line["layout"]
+        assert checked.device_state == started_line["device_state"]
     assert not bench.run.exists()
+
+
+@pytest.mark.parametrize("name", ["clean", "state_not_attempted", "state_unavailable"])
+def test_the_device_and_its_state_are_carried_as_given(tmp_path: Path, name: str) -> None:
+    bench = Bench(tmp_path, name)
+    started_line = line(name, "capture_started")
+    checked = bench.send(Check())
+    assert isinstance(checked, Checked)
+    started = bench.send(Start())
+    assert isinstance(started, Started)
+    for result in (checked, started):
+        assert encode_value(result.device) == started_line["device"]
+        assert result.device_state == started_line["device_state"]
+    assert isinstance(bench.send(Stop()), Stopped)
+
+
+# Prints its one argument as a line and waits to be killed.
+PRINT_AND_WAIT = "import sys, time; print(sys.argv[1], flush=True); time.sleep(60)"
+
+
+def test_a_start_with_no_device_state_is_a_contract_break(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_line = dict(line("clean", "capture_started"))
+    del started_line["device_state"]
+    text = json.dumps(started_line)
+    monkeypatch.setattr(
+        pod_capture, "argv", lambda spec: [sys.executable, "-c", PRINT_AND_WAIT, text]
+    )
+    bench = Bench(tmp_path, "clean")
+    for body in (Check(), Start()):
+        f = failure(bench.send(body), "recorder_contract")
+        assert "device_state" in f.detail, f
+        assert f.data["line"] == text
+    assert bench.sink.events == []
 
 
 def test_dry_commands_answer_with_the_probe_and_track_order(tmp_path: Path) -> None:

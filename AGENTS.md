@@ -34,6 +34,13 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
   `lanes-load-host-alsa-runtime`). A playback role on a sound-server sink
   loads no host library: it runs the pinned sink client, which speaks the
   server's protocol itself.
+- For an XVF3800 the pinned recorder reads the chip's state over USB before
+  it starts a capture: it opens the device's usbfs node,
+  `/dev/bus/usb/<bus>/<address>`, read-write, sends device-to-host control
+  transfers only and links no USB library. An account that may not open the
+  node still records, and the capture's manifest entry says `unavailable`.
+  brenn-pod ships a udev rule for the node. Nothing in `make check` opens a
+  device.
 - numpy, pinned in the Python lock, loads two host libraries at run time in
   the process that imports it: the C++ runtime, `libstdc++.so.6`, and zlib,
   `libz.so.1`. Its one importer in product code is the alignment search,
@@ -165,7 +172,9 @@ is never served from cache.
   the lanes, of running the pinned recorder and of a playback role, and of
   nothing in `make check`. The capture role's lane test,
   `//brenn_lab:capture_flex_hardware_test`, needs a reSpeaker Flex XVF3800 on
-  its six-channel USB image; without it the lane fails. The audible lane's
+  its six-channel USB image, whose usbfs node the account may open, since
+  the lane asserts that the chip's state was read; without either the lane
+  fails. The audible lane's
   one test target, `//brenn_lab:bench_audible_test`, finds for each output
   the quietest level at which the Flex's microphones detect a marked play
   three runs in a row, then plays everything else one step above it, but

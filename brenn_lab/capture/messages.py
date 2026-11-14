@@ -2,14 +2,43 @@
 
 These are the harness's own types. What the recorder prints is turned into
 them in one place, the recorder adapter; nothing here names a recorder's flag,
-event or key.
+event or key but two members, `device.usb` and `device_state`. They are the
+recorder's own statement about the device, carried whole under the recorder's
+names; their meaning is brenn-pod's (`docs/reference/frame-log.md`,
+`device_state`).
 """
 
 from dataclasses import dataclass
-from typing import Literal
 
-from brenn_lab.data import ClockReading, Failure, Location, Request, command, event, result
+from brenn_lab.data import (
+    ClockReading,
+    Failure,
+    JsonObject,
+    Location,
+    Request,
+    command,
+    event,
+    result,
+)
 from brenn_lab.sound import CardIdentity, Granted
+
+DEVICE_STATE_OUTCOMES = frozenset({"not_attempted", "unavailable", "read"})
+"""The outcomes of a device's state; the only words of it brenn-lab reads."""
+
+
+def device_state_problem(state: JsonObject) -> str | None:
+    """What makes `state` other than a device's state as brenn-lab reads one:
+    an `outcome` of `DEVICE_STATE_OUTCOMES`, with string `why` and `detail`
+    when the state was not read. None when there is nothing.
+    """
+    outcome = state.get("outcome")
+    if not isinstance(outcome, str) or outcome not in DEVICE_STATE_OUTCOMES:
+        return f"device_state.outcome {outcome!r} is not one of {sorted(DEVICE_STATE_OUTCOMES)}"
+    if outcome != "read":
+        for key in ("why", "detail"):
+            if not isinstance(state.get(key), str):
+                return f"device_state.{key} of a state {outcome} is not a string"
+    return None
 
 
 @dataclass(frozen=True)
@@ -33,11 +62,12 @@ class Recorder:
 
 
 @dataclass(frozen=True)
-class NotRead:
-    """A fact about the device that was not read, and why."""
+class Device(CardIdentity):
+    """The card as ALSA names it, and `usb`, the recorder's statement of the
+    USB device behind it, an object or null, carried as given.
+    """
 
-    reason: str
-    read: Literal[False] = False
+    usb: JsonObject | None
 
 
 @result("capture.started")
@@ -45,18 +75,18 @@ class NotRead:
 class Started:
     """A capture is running. `location` is null in a dry reply; `capture` is 0
     there, and counts a role's captures in a run from 1 otherwise.
+    `device_state` is the recorder's statement of the device's own state.
     """
 
     capture: int
     capture_id: str
     location: Location | None
     recorder: Recorder
-    device: CardIdentity
+    device: Device
     granted: Granted
     layout: tuple[str, ...]
     start: ClockReading
-    device_firmware: NotRead
-    device_configuration: NotRead
+    device_state: JsonObject
 
 
 @result("capture.stopped")
@@ -76,9 +106,10 @@ class Checked:
     """What a probe of the device learned."""
 
     recorder: Recorder
-    device: CardIdentity
+    device: Device
     granted: Granted
     layout: tuple[str, ...]
+    device_state: JsonObject
 
 
 @result("capture.released")

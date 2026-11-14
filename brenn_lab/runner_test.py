@@ -162,12 +162,13 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
     assert check["ok"] is True
     assert check["result"]["device"] == started_line["device"]
     assert check["result"]["granted"] == started_line["granted"]
+    assert check["result"]["device_state"] == started_line["device_state"]
 
     notes = tmp_path / "room.md"
     notes.write_text("door shut\n")
     out, manifest, results = do_run(tmp_path, lab_path, EXAMPLE, notes)
 
-    assert manifest["layout"] == 3
+    assert manifest["layout"] == 4
     assert results["schema"] == 2
     assert manifest["harness"] == HARNESS.encode()
     assert manifest["runner"] == {"machine": MACHINE}
@@ -200,11 +201,10 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
         "repository": "brenn-pod",
         "build": started_line["build"],
     }
-    for key in ("device", "granted", "layout"):
+    for key in ("device", "granted", "layout", "device_state"):
         assert capture[key] == started_line[key]
     assert capture["start"] == reading(started_line)
-    for key in ("device_firmware", "device_configuration"):
-        assert capture[key]["read"] is False and capture[key]["reason"]
+    assert not {"device_firmware", "device_configuration"} & capture.keys()
 
     assert results["outcome"] == "completed" and results["completed"] is True
     assert results["failure"] is None
@@ -245,6 +245,23 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
         transcript_files.path("clean").read_bytes()
     )
     assert "pid" in (out / "logs" / "runner.log").read_text()
+
+
+@pytest.mark.parametrize("name", ["clean", "state_not_attempted", "state_unavailable"])
+def test_the_device_state_reaches_the_manifest_as_given(tmp_path: Path, name: str) -> None:
+    lab_path = lab(tmp_path, {"mic": (name, MACHINE)})
+    started_line = line(name, "capture_started")
+    script_path = script(tmp_path, START_WAIT_STOP)
+    report = dry(lab_path, script_path)
+    assert report["ok"] is True, report
+    check = report["roles"]["mic"]["check"]["result"]
+    assert check["device_state"] == started_line["device_state"]
+    out, manifest, _ = do_run(tmp_path, lab_path, script_path)
+    [capture] = manifest["roles"]["mic"]["captures"]
+    assert capture["device"] == started_line["device"]
+    assert capture["device_state"] == started_line["device_state"]
+    started = [e for e in journal(out) if e.get("command") == "capture.start" and "ok" in e]
+    assert [e["result"]["device_state"] for e in started] == [started_line["device_state"]]
 
 
 def test_a_configuration_reports_every_problem(tmp_path: Path) -> None:

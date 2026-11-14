@@ -2,7 +2,7 @@
   "binary_crates": [
     "frame-log 0.1.0"
   ],
-  "checksum": "53719606f5d3d77df01eabc4aebd4dc00993477962e01fe073def24a1ab120d7",
+  "checksum": "add690b8d5fa7c76612f7ab59d09be9902fd7e5b14400bdcd8275becbf19278f",
   "conditions": {
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
@@ -73,7 +73,7 @@
       "repository": {
         "Git": {
           "commitish": {
-            "Rev": "145886ac600a4512a41c42a065a606e70e7046d8"
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
           },
           "remote": "https://github.com/rnortman/brenn-pod.git",
           "strip_prefix": "firmware/crates/audio-pipeline"
@@ -207,7 +207,7 @@
       "repository": {
         "Git": {
           "commitish": {
-            "Rev": "145886ac600a4512a41c42a065a606e70e7046d8"
+            "Rev": "5a55610ba6e84fe484291ed83a442bccbfd853f2"
           },
           "remote": "https://github.com/rnortman/brenn-pod.git",
           "strip_prefix": "firmware/crates/frame-log"

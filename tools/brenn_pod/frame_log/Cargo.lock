@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "audio-pipeline"
 version = "0.1.0"
-source = "git+https://github.com/rnortman/brenn-pod.git?rev=145886ac600a4512a41c42a065a606e70e7046d8#145886ac600a4512a41c42a065a606e70e7046d8"
+source = "git+https://github.com/rnortman/brenn-pod.git?rev=5a55610ba6e84fe484291ed83a442bccbfd853f2#5a55610ba6e84fe484291ed83a442bccbfd853f2"
 dependencies = [
  "heapless",
  "log",
@@ -38,7 +38,7 @@ dependencies = [
 [[package]]
 name = "frame-log"
 version = "0.1.0"
-source = "git+https://github.com/rnortman/brenn-pod.git?rev=145886ac600a4512a41c42a065a606e70e7046d8#145886ac600a4512a41c42a065a606e70e7046d8"
+source = "git+https://github.com/rnortman/brenn-pod.git?rev=5a55610ba6e84fe484291ed83a442bccbfd853f2#5a55610ba6e84fe484291ed83a442bccbfd853f2"
 dependencies = [
  "audio-pipeline",
  "serde",

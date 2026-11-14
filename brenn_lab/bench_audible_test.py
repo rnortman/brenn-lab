@@ -32,6 +32,9 @@ Last, the Flex's microphones record while a dry run opens the Flex's output.
 Every run directory and exported capture is kept in the test's outputs.
 """
 
+# TODO(audible-lane-not-run-on-moved-pin): this bench has not run on the pinned
+# recorder that reads the Flex's state before a capture starts.
+
 import array
 import json
 import os

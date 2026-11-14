@@ -4,7 +4,7 @@ Each `.jsonl` file here is a recorder's stdout: the event lines brenn-pod's
 `pod-capture` prints, one per line. The stand-in recorder (`../stand_in.py`)
 replays them; nothing in brenn-lab builds an event line.
 
-brenn-pod commit: `145886ac600a4512a41c42a065a606e70e7046d8`
+brenn-pod commit: `5a55610ba6e84fe484291ed83a442bccbfd853f2`
 
 ## `recorded/`
 
@@ -25,8 +25,14 @@ Replaced by hand before committing, and nothing else:
 - `path`, by a placeholder path;
 - the tail of `device.card_long_name` after " at " (the USB port path), by a
   placeholder port path;
+- in `device.usb`, which says where the board is plugged in and which board it
+  is: `serial`, by `"EXAMPLE-SERIAL"`; `port`, by `"1-1"`; `bus` and
+  `address`, by 1 and 2;
 - the entries of `cards`, by one synthetic entry of the same keys, and the same
   card listing where the `detail` of `no_card` repeats it.
+
+`device.usb.bcd_device` and the whole of `device_state` are kept as recorded:
+they are the device's own.
 
 These are a tool's event lines; no audio is in them. No replay file sits in
 this directory: a recorded transcript replays by the stand-in's default rule.
@@ -35,12 +41,19 @@ To retake them: run `make hardware-test` with the Flex attached, take the three
 saved outputs from
 `bazel-testlogs/brenn_lab/capture_flex_hardware_test/test.outputs/`, make the
 replacements above, and set the commit above to the one `MODULE.bazel` pins.
+Then, in every `capture_started` line under `authored/`, set the `build`'s
+commit to the same, and take `device.usb` and `device_state` from the retaken
+`clean.jsonl` line, with the statement's three times set before the line's own
+`mono_us` and `wall_us` by the same distances as in that line; the two
+`state_*` cases keep their own statement.
 
 ## `authored/`
 
 Cases no lane test produces, written from brenn-pod's
-`docs/reference/pod-capture.md` at the commit above. They are held to that
-document only, and to the recorded lines wherever the same event was recorded.
+`docs/reference/pod-capture.md` and `docs/reference/frame-log.md` at the commit
+above. They are held to those documents only, and to the recorded lines
+wherever the same event was recorded; a `device_state` only to a recorded one
+with the same `outcome`.
 
 - `stream_died.jsonl`: a capture that fails after it started.
 - `write_stalled.jsonl` (`held = 1`): a capture that reports `write_stalled`
@@ -64,6 +77,10 @@ document only, and to the recorded lines wherever the same event was recorded.
 - `exit_after_failed.jsonl` (`unasked_exit = 0`): a recorder that exits 0
   after `capture_failed`.
 - `unknown_reason.jsonl`: a failure reason the contract does not have.
+- `state_not_attempted.jsonl`: a capture of a card not on USB, whose state is
+  `not_attempted`.
+- `state_unavailable.jsonl`: a capture of an XVF3800 whose usbfs node the
+  account may not open, whose state is `unavailable`.
 - `silent.jsonl`: empty, a recorder that prints nothing.
 
 A `<name>.replay.toml` beside a transcript says when the stand-in prints its

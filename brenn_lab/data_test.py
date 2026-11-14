@@ -28,7 +28,7 @@ from brenn_lab.data import (
     loads,
 )
 from brenn_lab.data import event as register_event
-from brenn_lab.sound import CardIdentity, Granted
+from brenn_lab.sound import Granted
 
 AT = ClockReading(
     machine="bench",
@@ -37,14 +37,20 @@ AT = ClockReading(
 )
 BUILD = m.Build(commit="0" * 40, dirty=None, source="declared")
 RECORDER = m.Recorder(program="pod-capture", repository="brenn-pod", build=BUILD)
-CARD = CardIdentity(
+CARD = m.Device(
     selector="Flex",
     card_index=2,
     card_name="reSpeaker Flex",
     card_long_name="Seeed reSpeaker Flex at usb-1",
     pcm="hw:2,0",
     usb_id=None,
+    usb={"port": "1-1", "bus": 1, "address": 2, "serial": None, "bcd_device": "0100"},
 )
+STATE: JsonObject = {
+    "outcome": "read",
+    "kind": "xvf3800",
+    "registers": {"version": {"bytes": "010000", "value": [1, 0, 0]}, "gain": {"value": 1.5}},
+}
 GRANTED = Granted(
     rate_hz=16000, channels=2, sample_format="s16_le", period_frames=320, buffer_frames=5120
 )
@@ -62,11 +68,16 @@ RESULT_BODIES: list[object] = [
         granted=GRANTED,
         layout=("left", "right"),
         start=AT,
-        device_firmware=m.NotRead("not read"),
-        device_configuration=m.NotRead("not read"),
+        device_state=STATE,
     ),
     STOPPED,
-    m.Checked(recorder=RECORDER, device=CARD, granted=GRANTED, layout=("left", "right")),
+    m.Checked(
+        recorder=RECORDER,
+        device=CARD,
+        granted=GRANTED,
+        layout=("left", "right"),
+        device_state={"outcome": "not_attempted", "why": "not_usb", "detail": "not on USB"},
+    ),
     m.Released(stopped=STOPPED),
     m.Released(stopped=None),
 ]
@@ -125,7 +136,9 @@ def test_json_forms() -> None:
     )
     result = started["result"]
     assert isinstance(result, dict)
-    assert result["device_firmware"] == {"reason": "not read", "read": False}
+    assert result["device_state"] == STATE
+    assert isinstance(result["device"], dict)
+    assert result["device"]["usb"] == CARD.usb
     assert result["start"] == {
         "machine": "bench",
         "monotonic": {"clock": "CLOCK_MONOTONIC", "us": 81234567},
@@ -196,13 +209,22 @@ def test_rejects_an_unknown_field() -> None:
         decode(gap)
 
 
-def test_not_read_is_never_read() -> None:
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("device_state", "read"),
+        ("device_state", None),
+        ("device", {**dataclasses.asdict(CARD), "usb": "1-1"}),
+        ("device", {k: v for k, v in dataclasses.asdict(CARD).items() if k != "usb"}),
+    ],
+)
+def test_the_device_statement_decodes_strictly(key: str, value: JsonValue) -> None:
     started = encode(
         Reply(role="mic", command="capture.start", dry=False, outcome=RESULT_BODIES[0])
     )
     result = started["result"]
     assert isinstance(result, dict)
-    result["device_firmware"] = {"reason": "x", "read": True}
+    result[key] = value
     with pytest.raises(DecodeError):
         decode(started)
 

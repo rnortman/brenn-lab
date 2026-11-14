@@ -20,6 +20,8 @@ TRANSCRIPTS = [
     "transcripts/authored/not_json.jsonl",
     "transcripts/authored/second_started.jsonl",
     "transcripts/authored/silent.jsonl",
+    "transcripts/authored/state_not_attempted.jsonl",
+    "transcripts/authored/state_unavailable.jsonl",
     "transcripts/authored/stops_unasked.jsonl",
     "transcripts/authored/stops_unasked.replay.toml",
     "transcripts/authored/stream_died.jsonl",
