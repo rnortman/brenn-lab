@@ -74,6 +74,8 @@ class Bench:
         self.output = output if output is not None else FakeOutput(fake_controls(), speed=4.0)
         self.events: list[Event] = []
         self.ended = threading.Event()
+        # The sink raises on a play's end instead of taking it.
+        self.refuse_end = False
         self.local = NOON
         device = PlaybackDevice(
             output="alsa",
@@ -98,6 +100,9 @@ class Bench:
         )
 
     def _sink(self, event: Event) -> None:
+        if self.refuse_end and isinstance(event.body, Ended | Failed):
+            self.ended.set()
+            raise RuntimeError("the sink failed")
         self.events.append(event)
         if isinstance(event.body, Ended | Failed):
             self.ended.set()
@@ -732,6 +737,31 @@ def test_an_error_in_the_plays_thread_ends_it_and_restores(
     b.role._playing.thread.join()  # type: ignore[union-attr]
     assert [str(e) for e in raised] == ["the output broke"]
     assert reason(b.send(Stop())) == "not_playing"
+
+
+@pytest.mark.parametrize("command", ["release", "stop", "play"])
+def test_an_end_that_could_not_be_reported_is_raised_by_the_next_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    raised: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: raised.append(args.exc_value))
+    b = Bench(tmp_path)
+    b.clip("a.wav", 0.2)
+    b.refuse_end = True
+    started(b.play())
+    assert b.ended.wait(10)
+    b.role._playing.thread.join()  # type: ignore[union-attr]
+    assert [str(e) for e in raised] == ["the sink failed"]
+    with pytest.raises(RuntimeError, match="before reporting its end") as error:
+        b.send(
+            {"release": Release(), "stop": Stop(), "play": Play(source="a.wav", volume_mb=-1800)}[
+                command
+            ]
+        )
+    assert str(error.value.__cause__) == "the sink failed"
+    assert b.output.open_streams == 0 and not b.output.attached
+    # Raised once: the next command finds no play.
+    assert b.send(Release()) == Released(stopped=None)
 
 
 def test_a_dry_play_and_stop(tmp_path: Path) -> None:

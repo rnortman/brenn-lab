@@ -110,6 +110,37 @@ def test_a_long_export_is_handed_out_in_blocks(tmp_path: Path) -> None:
     assert [s for b in blocks for s in b] == [-(n % 1000) for n in range(frames)]
 
 
+def test_run_blocks_hold_the_runs_alone_on_the_capture_index(tmp_path: Path) -> None:
+    exported = holed(tmp_path)
+    got = [(b.first_frame, list(b.samples), b.continues) for b in exported.run_blocks(1)]
+    assert got == [
+        (0, [-n for n in range(10)], False),
+        (14, [-n for n in range(14, 20)], False),
+        (20, [-n for n in range(23, 28)], False),
+        (25, [-28, -29], False),
+    ]
+
+
+def test_a_run_across_blocks_continues_and_one_block_can_hold_two_runs(tmp_path: Path) -> None:
+    frames = 2 * capture.BLOCK_FRAMES + 5
+    split = capture.BLOCK_FRAMES + 3
+    write_wav(tmp_path / "prepared.wav", [(n % 1000, 0) for n in range(frames)])
+    runs = [run_(0, 0, split), run_(split + 2, split, frames - split - 2)]
+    holes = [hole(split, split, 2, "clock_estimate")]
+    told: dict[str, object] = {"wav": "prepared.wav", "map": export_map(frames, runs, holes)}
+    exported = read(tmp_path, log_of(tmp_path, told))
+    assert isinstance(exported, capture.Exported), exported
+    got = [(b.first_frame, len(b.samples), b.continues) for b in exported.run_blocks(0)]
+    assert got == [
+        (0, capture.BLOCK_FRAMES, False),
+        (capture.BLOCK_FRAMES, 3, True),
+        (split, capture.BLOCK_FRAMES - 5, False),
+        (split + capture.BLOCK_FRAMES - 5, 5, True),
+    ]
+    samples = [s for b in exported.run_blocks(0) for s in b.samples]
+    assert samples == [n % 1000 for n in range(frames) if not split <= n < split + 2]
+
+
 def truncate(path: Path, frames: int) -> None:
     """Cut the last `frames` frames and half of one more off the two-channel,
     16-bit file at `path`, leaving its header as it was.

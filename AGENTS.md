@@ -36,8 +36,8 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
   the process that imports it: the C++ runtime, `libstdc++.so.6`, and zlib,
   `libz.so.1`. Its one importer in product code is the alignment search,
   `brenn_lab/align/search.py`, so the default tests of alignment and
-  `lab align` load them. Nothing a run, a dry run or `lab mark` does imports
-  numpy.
+  assessment, `lab align`, `lab assess` and the assessment a run makes at
+  its end load them. Nothing a dry run or `lab mark` does imports numpy.
   Both libraries are prerequisites of `make check` on either CPU; the build
   ships neither.
 - The one place the build reads this tree's git state is the workspace status
@@ -82,7 +82,7 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
 | `make repin` | Regenerate the Python lock and the four crate locks |
 | `make todo-gather` | Fold `todo.d/` fragments into `TODO.md` |
 | `make changes ARGS=...` | Run allthechanges: `ARGS="query"`, `ARGS="todo query"`, `ARGS="gather --version X.Y.Z --dry-run"` |
-| `make lab ARGS=...` | Run the experiment runner: `ARGS="dry-run --lab <lab.toml> --machine <name> --script <script.py>"`, or `run` with `--out <dir>`; `ARGS="mark --source <in.wav> --out <out.wav> --member <n>"` to mark a source; `ARGS="align --run <dir>"` to align a run |
+| `make lab ARGS=...` | Run the experiment runner: `ARGS="dry-run --lab <lab.toml> --machine <name> --script <script.py>"`, or `run` with `--out <dir>`; `ARGS="mark --source <in.wav> --out <out.wav> --member <n>"` to mark a source; `ARGS="align --run <dir>"` to align a run; `ARGS="assess --run <dir>"` to assess one |
 | `make setup` | Wire git at `.githooks` (once per clone; `make check` fails until it has run) |
 | `make scrub-tree` | Whole-tree secret sweep |
 | `make clean` | Drop Bazel's outputs for this workspace |

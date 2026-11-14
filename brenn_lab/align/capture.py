@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from brenn_lab.data import Failure
+from brenn_lab.data import Failure, JsonObject
 from brenn_lab.sound import SAMPLE_BYTES, TYPECODES
 
 SCRATCH = ".alignment.tmp"
@@ -54,6 +54,22 @@ class Hole:
     filled_frames: int
     basis: str
 
+    def encode(self) -> JsonObject:
+        """The hole as the reports state it, without its place in the export."""
+        return {"at_frame": self.at_frame, "filled_frames": self.filled_frames, "basis": self.basis}
+
+
+@dataclass(frozen=True)
+class RunBlock:
+    """Samples of one channel from within one run: `samples[0]` is capture
+    frame `first_frame`, and `continues` says the previous `RunBlock` was of
+    the same run and ended at the frame before it.
+    """
+
+    first_frame: int
+    samples: array.array[int]
+    continues: bool
+
 
 @dataclass(frozen=True)
 class Exported:
@@ -83,6 +99,33 @@ class Exported:
                 yield samples[channel::count]
         if seen != self.frames:
             raise RuntimeError(f"{self.path} held {seen} frames, not {self.frames}")
+
+    def run_blocks(self, channel: int) -> Iterator[RunBlock]:
+        """The samples of channel `channel` that lie in the export's runs, in
+        order, never a hole's silence: one `RunBlock` per piece of a run in a
+        block of `blocks`, each placed on the capture's frame index.
+        """
+        runs = sorted(self.runs, key=lambda r: r.wav_frame)
+        at = 0
+        index = 0
+        previous: Run | None = None
+        for samples in self.blocks(channel):
+            end = at + len(samples)
+            while index < len(runs) and runs[index].wav_frame < end:
+                run = runs[index]
+                first = max(run.wav_frame, at)
+                last = min(run.wav_frame + run.frames, end)
+                if first < last:
+                    yield RunBlock(
+                        run.first_frame + first - run.wav_frame,
+                        samples[first - at : last - at],
+                        run is previous,
+                    )
+                    previous = run
+                if run.wav_frame + run.frames > end:
+                    break
+                index += 1
+            at = end
 
     def capture_frame(self, position: float) -> float:
         """The capture frame at `position` in the exported file. Raises when

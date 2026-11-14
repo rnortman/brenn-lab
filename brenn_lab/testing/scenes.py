@@ -42,7 +42,11 @@ class Play:
     with the capture counting `drift_ppm` more frames per source frame than
     the nominal rates say. `handed` is the frames the results say were handed
     (None: all); a marker not handed whole is not sounded. `record` False
-    leaves the manifest's source entry without a `marker` key.
+    leaves the manifest's source entry without a `marker` key. `sounded` is
+    the frames that left the device (None: those handed); a marker not inside
+    them is not sounded. `ended`, `stopped_by`, `unplayed`, `restored` and
+    `failure` are the results record's; `result` False leaves the play
+    without one.
     """
 
     role: str
@@ -56,6 +60,18 @@ class Play:
     handed: int | None = None
     record: bool = True
     underruns: tuple[int, ...] = ()
+    sounded: int | None = None
+    ended: str = "completed"
+    stopped_by: str | None = None
+    unplayed: int | None = 0
+    restored: bool = True
+    failure: JsonObject | None = None
+    result: bool = True
+
+    def sounds(self, last: int) -> bool:
+        """Whether a marker ending before kept-copy frame `last` sounded."""
+        left = self.handed if self.sounded is None else self.sounded
+        return left is None or left >= last
 
 
 @dataclass(frozen=True)
@@ -81,11 +97,58 @@ class Extra:
 
 
 @dataclass(frozen=True)
+class Silent:
+    """A channel whose every sample is 0."""
+
+
+@dataclass(frozen=True)
+class Constant:
+    """A channel whose every sample is `value`."""
+
+    value: int
+
+
+@dataclass(frozen=True)
+class Clip:
+    """A flat top at full scale over `frames` stream frames from `at`."""
+
+    at: int
+    frames: int
+
+
+type Content = Silent | Constant | Clip
+
+
+@dataclass(frozen=True)
+class Gap:
+    """A gap the recorder reported at capture frame `at_frame`."""
+
+    at_frame: int
+    frames: int | None
+    cause: str = "overrun"
+
+
+@dataclass(frozen=True)
+class Account:
+    """The recorder's record of a capture in the results."""
+
+    ended: str
+    frames: int | None
+    gaps_reported: int | None
+    gaps: tuple[Gap, ...]
+    late: int = 0
+    failure: JsonObject | None = None
+
+
+@dataclass(frozen=True)
 class Capture:
     """A capture of `frames` stream frames at `rate_hz`, one channel per name
     in `layout` with the gain in `gains` (1 for each when empty), noise of rms
-    `noise` of full scale, and `losses`. `refuse` makes the reader refuse it
-    with that message.
+    `noise` of full scale, and `losses`. `content`, by channel, replaces a
+    channel's sound or adds to it. `refuse` makes the reader exit with
+    `status` and that message. `tail` is the reader's verdict. `account` is
+    the recorder's record (None: the one the losses make, every measured or
+    unmeasured hole a gap); `recorded` False leaves the capture without one.
     """
 
     role: str = "mic"
@@ -97,6 +160,12 @@ class Capture:
     noise: float = 0.001
     losses: tuple[Loss, ...] = ()
     refuse: str | None = None
+    status: int = 1
+    tail: str = "ended"
+    content: tuple[Content | None, ...] = ()
+    account: Account | None = None
+    recorded: bool = True
+    in_run: bool = True
 
     def capture_frame(self, x: float) -> float:
         """The capture frame of stream frame `x`: losses across which the
@@ -135,29 +204,50 @@ def build(
     captures: Sequence[Capture] = (Capture(),),
     extras: Sequence[Extra] = (),
     results: bool = True,
+    outcome: str = "completed",
+    failure: JsonObject | None = None,
+    roles: JsonObject | None = None,
 ) -> Built:
-    """Write the run directory `run` for the scene."""
+    """Write the run directory `run` for the scene. The results say the run
+    ended `outcome` with `failure`; `roles` are added to the manifest's.
+    """
     run.mkdir()
     built = Built(run)
-    roles: dict[str, JsonObject] = {}
+    sections: dict[str, JsonObject] = {}
     records: list[JsonValue] = []
+    accounts: list[JsonValue] = []
     for play in plays:
         entry, record = _play(run, play, built)
-        section = roles.setdefault(play.role, {"kind": "playback", "sources": []})
+        section = sections.setdefault(play.role, {"kind": "playback", "sources": []})
         sources = section["sources"]
         assert isinstance(sources, list)
         sources.append(entry)
-        records.append(record)
+        if play.result:
+            records.append(record)
     for c in captures:
-        entry = _capture(run, c, plays, built, extras)
-        section = roles.setdefault(c.role, {"kind": "capture", "captures": []})
+        entry, account = _capture(run, c, plays, built, extras)
+        section = sections.setdefault(c.role, {"kind": "capture", "captures": []})
         entries = section["captures"]
         assert isinstance(entries, list)
         entries.append(entry)
-    manifest: JsonObject = {"layout": 1, "run_id": RUN_ID, "roles": dict(roles)}
+        if c.recorded:
+            accounts.append(account)
+    manifest: JsonObject = {
+        "layout": 1,
+        "run_id": RUN_ID,
+        "roles": {**sections, **(roles or {})},
+    }
     (run / "manifest.json").write_text(json.dumps(manifest) + "\n")
     if results:
-        out: JsonObject = {"schema": 1, "run_id": RUN_ID, "sources": records, "captures": []}
+        out: JsonObject = {
+            "schema": 1,
+            "run_id": RUN_ID,
+            "outcome": outcome,
+            "completed": outcome == "completed",
+            "failure": failure,
+            "sources": records,
+            "captures": accounts,
+        }
         (run / "results.json").write_text(json.dumps(out) + "\n")
     return built
 
@@ -202,22 +292,32 @@ def _play(run: Path, play: Play, built: Built) -> tuple[JsonObject, JsonObject]:
         "role": play.role,
         "play": play.play,
         "marker": encode_value(carried),
+        "ended": play.ended,
+        "stopped_by": play.stopped_by,
         "frames": frames,
         "frames_handed": frames if play.handed is None else play.handed,
+        "unplayed_frames": play.unplayed,
         "underruns": [{"at_frame": u, "at": None, "detail": ""} for u in play.underruns],
+        "as_sent": play.ended == "completed" and not play.underruns,
+        "restored": play.restored,
+        "failure": play.failure,
     }
     return entry, record
 
 
 def _capture(
     run: Path, c: Capture, plays: Sequence[Play], built: Built, extras: Sequence[Extra]
-) -> JsonObject:
+) -> tuple[JsonObject, JsonObject]:
     folder = run / "captures" / c.role
     folder.mkdir(parents=True, exist_ok=True)
     log = folder / f"{c.capture:04d}.framelog"
     entry: JsonObject = {
         "capture": c.capture,
-        "file": {"machine": MACHINE, "path": f"captures/{c.role}/{log.name}", "in_run": True},
+        "file": {
+            "machine": MACHINE,
+            "path": f"captures/{c.role}/{log.name}",
+            "in_run": c.in_run,
+        },
         "granted": {
             "rate_hz": c.rate_hz,
             "channels": len(c.layout),
@@ -228,8 +328,8 @@ def _capture(
         "layout": list(c.layout),
     }
     if c.refuse is not None:
-        log.write_text(json.dumps({"status": 1, "stderr": c.refuse}))
-        return entry
+        log.write_text(json.dumps({"status": c.status, "stderr": c.refuse}))
+        return entry, _account(c, c.account or Account("stopped", c.frames, 0, ()))
     sound = np.zeros(c.frames)
     for play in plays:
         carried = built.carried[(play.role, play.play)]
@@ -240,7 +340,7 @@ def _capture(
             (carried.start_code, carried.start),
             (carried.end_code, carried.end),
         ):
-            if play.handed is None or play.handed >= span.frame + span.frames:
+            if play.sounds(span.frame + span.frames):
                 _sound(sound, code, play.at + r * span.frame, play.rate_hz * r, play.level)
     for extra in extras:
         start, end = marker.codes(extra.member)
@@ -250,13 +350,64 @@ def _capture(
     gains = c.gains or (1.0,) * len(c.layout)
     rng = np.random.default_rng(SEED)
     channels = [g * sound + c.noise * rng.standard_normal(c.frames) for g in gains]
+    for index, content in enumerate(c.content):
+        match content:
+            case Silent():
+                channels[index] = np.zeros(c.frames)
+            case Constant(value):
+                channels[index] = np.full(c.frames, value / 32768)
+            case Clip(at, frames):
+                channels[index][at : at + frames] = 1.0
     stream = np.stack(channels, axis=1)
-    exported, export_map = _export(stream, c.losses)
+    exported, export_map = _export(stream, c.losses, c.tail)
     prepared = folder / f"{c.capture:04d}.prepared.wav"
     scaled = np.clip(np.floor(exported * 32768 + 0.5), -32768, 32767).astype(np.int16)
     _write_wav(prepared, array.array("h", scaled.ravel().tobytes()), c.rate_hz, len(c.layout))
     log.write_text(json.dumps({"wav": prepared.name, "map": export_map}))
-    return entry
+    return entry, _account(c, c.account or _derived(export_map))
+
+
+def _derived(export_map: JsonObject) -> Account:
+    """The recorder's record that agrees with the reader's map: a gap at each
+    measured or unmeasured hole, of the measured hole's length, and the runs'
+    frames with the measured holes' fill.
+    """
+    runs = export_map["runs"]
+    holes = export_map["holes"]
+    assert isinstance(runs, list) and isinstance(holes, list)
+    gaps: list[Gap] = []
+    frames = 0
+    for run in runs:
+        assert isinstance(run, dict) and isinstance(run["frames"], int)
+        frames += run["frames"]
+    for hole in holes:
+        assert isinstance(hole, dict)
+        at, filled, basis = hole["at_frame"], hole["filled_frames"], hole["basis"]
+        assert isinstance(at, int) and isinstance(filled, int)
+        if basis == "measured":
+            gaps.append(Gap(at, filled))
+            frames += filled
+        elif basis in UNMEASURED:
+            gaps.append(Gap(at, None))
+    return Account("stopped", frames, len(gaps), tuple(gaps))
+
+
+def _account(c: Capture, account: Account) -> JsonObject:
+    return {
+        "role": c.role,
+        "capture": c.capture,
+        "ended": account.ended,
+        "stopped_by": "script" if account.ended == "stopped" else None,
+        "frames": account.frames,
+        "gaps_reported": account.gaps_reported,
+        "gaps": [
+            {"cause": g.cause, "at_frame": g.at_frame, "frames": g.frames, "at": None, "detail": ""}
+            for g in account.gaps
+        ],
+        "late": [{"at_frame": 0, "backlog_frames": 1024, "at": None}] * account.late,
+        "loss_free": account.ended == "stopped" and not account.gaps and account.gaps_reported == 0,
+        "failure": account.failure,
+    }
 
 
 def _sound(sound: np.ndarray, code: int, first: float, frames_per_s: float, level: float) -> None:
@@ -270,7 +421,7 @@ def _sound(sound: np.ndarray, code: int, first: float, frames_per_s: float, leve
         sound[n] += level * marker.AMPLITUDE * value.real
 
 
-def _export(stream: np.ndarray, losses: Sequence[Loss]) -> tuple[np.ndarray, JsonObject]:
+def _export(stream: np.ndarray, losses: Sequence[Loss], tail: str) -> tuple[np.ndarray, JsonObject]:
     """The exported file and the reader's map of `stream` with `losses`."""
     pieces: list[np.ndarray] = []
     runs: list[JsonValue] = []
@@ -300,8 +451,10 @@ def _export(stream: np.ndarray, losses: Sequence[Loss]) -> tuple[np.ndarray, Jso
         "runs": runs,
         "holes": holes,
         "resent": [],
-        "tail": {"verdict": "ended", "offset": 0, "reason": "", "open_segment": None},
+        "tail": {"verdict": tail, "offset": 0, "reason": "", "open_segment": None},
     }
+    if not pieces:
+        return np.zeros((0, stream.shape[1])), export_map
     return np.concatenate(pieces), export_map
 
 

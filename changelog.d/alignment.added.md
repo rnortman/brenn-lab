@@ -6,7 +6,7 @@
   has a marker at each end, it also gives the drift between the two
   clocks. When a marker cannot be found, the file says why. Alignment reads
   no timestamps, so captures from any machine or device are handled the
-  same way. It runs only when asked and changes nothing else in the run. A
+  same way. It changes nothing else in the run. A
   run directory that cannot be written to (for example an archived,
   read-only copy) is refused with `not_writable`, and nothing in it
   changes. Captures are read through brenn-pod's pinned `frame-log` reader,

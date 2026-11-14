@@ -98,6 +98,13 @@ py_library(
     deps = [":transcript_files"],
 )
 
+py_library(
+    name = "role_raised",
+    testonly = True,
+    srcs = ["role_raised.py"],
+    visibility = ["//brenn_lab:__subpackages__"],
+)
+
 py_binary(
     name = "export_stand_in",
     testonly = True,

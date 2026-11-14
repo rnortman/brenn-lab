@@ -2,12 +2,14 @@
 and writing a JSON file whole into the run.
 """
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from brenn_lab import rundir
+from brenn_lab.data import JsonObject
 
 
 @pytest.fixture
@@ -100,6 +102,21 @@ def test_replace_json_does_not_follow_a_link_that_appears_after_the_unlink(
         rundir.replace_json(run, "report.json", {"a": 1})
     assert outside.read_bytes() == b"not the run's"
     assert not (run / "report.json").exists()
+
+
+def test_replace_report_returns_the_hash_of_what_it_wrote_and_names_what_it_replaced(
+    run: Path,
+) -> None:
+    first = rundir.replace_report(run, "report.json", {"harness": "h1", "written": "t1"})
+    first_bytes = (run / "report.json").read_bytes()
+    assert first == hashlib.sha256(first_bytes).hexdigest()
+    report: JsonObject = {"harness": "h2", "written": "t2", "name": "é"}
+    second = rundir.replace_report(run, "report.json", report)
+    assert second == hashlib.sha256((run / "report.json").read_bytes()).hexdigest()
+    assert written(run, "report.json") == {
+        **report,
+        "replaces": {"harness": "h1", "written": "t1", "sha256": first},
+    }
 
 
 def test_writing_the_manifest_twice_leaves_one_file_and_no_temporary(tmp_path: Path) -> None:

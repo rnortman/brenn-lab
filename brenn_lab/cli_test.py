@@ -2,6 +2,7 @@
 stand-in recorder: what it prints on stdout and the exit status it gives.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -85,7 +86,20 @@ def test_a_dry_run_and_a_run(tmp_path: Path) -> None:
         "outcome": "completed",
         "completed": True,
         "results": str(out / "results.json"),
+        "usability": {
+            "answer": "findings",
+            "complete": False,
+            "assessment": str(out / "assessment.json"),
+        },
     }
+    assessed = json.loads((out / "assessment.json").read_text())
+    assert (assessed["answer"], assessed["complete"]) == ("findings", False)
+    # The stand-in recorder's file is not a frame log, so the pinned reader
+    # cannot read it.
+    assert [f["finding"] for f in assessed["findings"]] == ["capture_unreadable"]
+    assert assessed["reader"]["pinned"] is True
+    assert (out / "alignment.json").is_file()
+    assert not (out / ".alignment.tmp").exists()
     manifest = json.loads((out / "manifest.json").read_text())
     harness = manifest["harness"]
     assert harness["repository"] == "brenn-lab"
@@ -110,6 +124,57 @@ def test_a_run_that_does_not_complete(tmp_path: Path) -> None:
     pointer = document(done.stdout)
     assert (pointer["outcome"], pointer["completed"]) == ("failed", False)
     assert (out / "results.json").is_file()
+    assert pointer["usability"]["answer"] == "findings"
+    assessed = json.loads((out / "assessment.json").read_text())
+    assert assessed["findings"][0]["finding"] == "run_not_completed"
+
+
+def test_a_run_assessed_with_another_reader(tmp_path: Path) -> None:
+    out = tmp_path / "run"
+    args = run_args(lab_file(tmp_path), script_file(tmp_path), out)
+    done = start([*args, "--frame-log", EXPORT_STAND_IN])
+    assert done.returncode == 0, done.stderr
+    usability = document(done.stdout)["usability"]
+    assert (usability["answer"], usability["complete"]) == ("findings", False)
+    assessed = json.loads((out / "assessment.json").read_text())
+    assert [f["finding"] for f in assessed["findings"]] == ["capture_unreadable"]
+    assert assessed["reader"] == {"program": "frame-log", "pinned": False, "path": EXPORT_STAND_IN}
+
+
+@pytest.mark.parametrize("given", ["absent", "not_executable", "directory"])
+def test_a_run_whose_frame_log_is_not_an_executable_file_is_refused(
+    tmp_path: Path, given: str
+) -> None:
+    reader = tmp_path / "frame-log"
+    if given == "not_executable":
+        reader.write_text("#!/bin/sh\n")
+    elif given == "directory":
+        reader.mkdir()
+    out = tmp_path / "run"
+    args = run_args(lab_file(tmp_path), script_file(tmp_path), out)
+    done = start([*args, "--frame-log", str(reader)])
+    assert done.returncode == 2, done.stderr
+    problem = only_problem(document(done.stdout))
+    assert (problem["where"], problem["reason"]) == ("arguments", "unreadable")
+    assert str(reader) in problem["detail"]
+    assert not out.exists()
+
+
+def test_an_interrupted_run_is_not_assessed(tmp_path: Path) -> None:
+    script = script_file(
+        tmp_path,
+        SHORT + "import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\nlab.wait(30.0)\n",
+    )
+    out = tmp_path / "run"
+    done = start(run_args(lab_file(tmp_path), script, out))
+    assert done.returncode == 1, done.stderr
+    pointer = document(done.stdout)
+    assert pointer["outcome"] == "interrupted"
+    usability = pointer["usability"]
+    assert usability.keys() == {"answer", "reason", "detail"}
+    assert (usability["answer"], usability["reason"]) == ("not_assessed", "interrupted")
+    assert not (out / "assessment.json").exists()
+    assert not (out / "alignment.json").exists()
 
 
 def test_a_dry_run_with_a_problem_reports_it(tmp_path: Path) -> None:
@@ -144,6 +209,9 @@ def test_a_dry_run_whose_script_does_not_exist_is_refused(tmp_path: Path) -> Non
         ["align"],
         ["align", "--run", "r", "--frame", "f"],
         ["align", "--run", "r", "--member", "1"],
+        ["assess"],
+        ["assess", "--run", "r", "--frame", "f"],
+        ["run", "--lab", "a", "--machine", "m", "--script", "s", "--out", "o", "--frame", "f"],
     ],
     ids=[
         "nothing",
@@ -159,6 +227,9 @@ def test_a_dry_run_whose_script_does_not_exist_is_refused(tmp_path: Path) -> Non
         "align_without_run",
         "align_abbreviated_flag",
         "align_with_a_mark_flag",
+        "assess_without_run",
+        "assess_abbreviated_flag",
+        "run_abbreviated_frame_log",
     ],
 )
 def test_a_command_line_the_parser_refuses(tmp_path: Path, args: list[str]) -> None:
@@ -386,4 +457,87 @@ def test_align_refusals_write_no_report(tmp_path: Path, setup: str, reason: str)
     assert "Traceback" not in done.stderr
     problem = only_problem(document(done.stdout))
     assert (problem["where"], problem["reason"]) == ("run", reason)
+    assert not (run / "alignment.json").exists()
+
+
+def assess_args(run: Path) -> list[str]:
+    return ["assess", "--run", str(run), "--frame-log", EXPORT_STAND_IN]
+
+
+@pytest.mark.parametrize(
+    ("plays", "status", "answer", "counts"),
+    [
+        ([Play("speaker", 1, 3, at=5000.0)], 0, "clean", (0, 0)),
+        ([Play("speaker", 1, 1, at=500000.0)], 1, "findings", (1, 0)),
+        ([Play("speaker", 1, 3, at=5000.0, record=False)], 1, "incomplete", (0, 1)),
+    ],
+    ids=["clean", "findings", "incomplete"],
+)
+def test_assess_a_run(
+    tmp_path: Path, plays: list[Play], status: int, answer: str, counts: tuple[int, int]
+) -> None:
+    built = scenes.build(tmp_path / "run", plays)
+    done = start(assess_args(built.run))
+    assert done.returncode == status, done.stderr
+    got = document(done.stdout)
+    assert got == {
+        "run": str(built.run),
+        "assessment": str(built.run / "assessment.json"),
+        "alignment": str(built.run / "alignment.json"),
+        "answer": answer,
+        "complete": counts[1] == 0,
+        "findings": counts[0],
+        "not_assessed": counts[1],
+    }
+    written = json.loads((built.run / "assessment.json").read_text())
+    assert written["answer"] == answer
+    assert written["reader"] == {"program": "frame-log", "pinned": False, "path": EXPORT_STAND_IN}
+    assert written["harness"]["repository"] == "brenn-lab"
+    assert (built.run / "alignment.json").is_file()
+
+
+def test_assess_twice_names_the_report_replaced(tmp_path: Path) -> None:
+    built = scenes.build(tmp_path / "run", [Play("speaker", 1, 3, at=5000.0)])
+    assert start(assess_args(built.run)).returncode == 0
+    first = (built.run / "assessment.json").read_bytes()
+    done = start(assess_args(built.run))
+    assert done.returncode == 0, done.stderr
+    replaces = json.loads((built.run / "assessment.json").read_text())["replaces"]
+    assert replaces["sha256"] == hashlib.sha256(first).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("setup", "reason"),
+    [
+        ("no_manifest", "unreadable"),
+        ("results_without_restored", "unreadable"),
+        ("layout_2", "layout"),
+        ("read_only", "not_writable"),
+    ],
+)
+def test_assess_refusals_write_nothing(tmp_path: Path, setup: str, reason: str) -> None:
+    run = tmp_path / "run"
+    if setup in ("read_only", "results_without_restored"):
+        scenes.build(run, [Play("speaker", 1, 3, at=5000.0)])
+    else:
+        run.mkdir()
+    if setup == "layout_2":
+        (run / "manifest.json").write_text(json.dumps({"layout": 2, "roles": {}}))
+    elif setup == "results_without_restored":
+        results = json.loads((run / "results.json").read_text())
+        del results["sources"][0]["restored"]
+        (run / "results.json").write_text(json.dumps(results))
+    if setup == "read_only":
+        run.chmod(0o555)
+        assert not os.access(run, os.W_OK), "the test's process can write a 0o555 directory"
+    try:
+        done = start(assess_args(run))
+    finally:
+        if setup == "read_only":
+            run.chmod(0o755)
+    assert done.returncode == 2, done.stderr
+    assert "Traceback" not in done.stderr
+    problem = only_problem(document(done.stdout))
+    assert (problem["where"], problem["reason"]) == ("run", reason)
+    assert not (run / "assessment.json").exists()
     assert not (run / "alignment.json").exists()

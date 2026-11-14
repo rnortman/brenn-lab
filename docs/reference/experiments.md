@@ -6,7 +6,9 @@ them. The **dry run** checks a script against a lab without recording
 anything, and the **run** carries it out and leaves a run directory, which
 `run-directory.md` describes. **Marking** a source lets a run's captures be
 **aligned** with what it played afterwards, by the sound alone (*Marking a
-source*, *Aligning a run*).
+source*, *Aligning a run*). Every run that was not interrupted is
+**assessed** at its end, and `lab assess` assesses one again: the run then
+says whether it is usable (*Assessing a run*).
 
 ## The lab configuration
 
@@ -123,7 +125,10 @@ def run(lab: Lab) -> None:
 - `handle.send(command)` sends one command and returns its typed result. A
   failure reply raises `RoleFailure`, which carries the role, the command and
   the failure (`.failure.reason`, `.failure.detail`, `.failure.data`). A
-  script may catch it; the run still does not complete.
+  script may catch it; the run still does not complete. An error a role
+  raises instead of replying reaches the script as that exception, not as a
+  `RoleFailure`, and the run does not complete whether or not the script
+  catches it.
 - `handle.send` refuses `release`, which only the runner sends, by raising
   `RunnerCommand` (a `TypeError`) before anything is sent. Nothing is
   journaled. Uncaught, it is a script error like any other. A script may send
@@ -623,7 +628,7 @@ reports no event.
 | `controls_moved` | during a play a held control changed, or could not be read |
 | `stream_died` | the stream failed beyond recovery: a write failed with anything but an underrun, a recovery failed, eight ran without a successful write, a write took no frames, or the buffer could not be played out |
 | `role_io` | the role could not write or read its kept copy, or another file of its own |
-| `role_error` | the play's thread raised; the play ended, the controls were restored, and the exception was raised on |
+| `role_error` | the play's thread raised; the play ended, the controls were restored, and the exception was raised on. Not the runner's `role_raised`, the run's failure when a role raised instead of replying to a command (see the run-directory reference) |
 | `already_playing` | a play is running |
 | `not_playing` | no play is running, or no dry play preceded a dry stop |
 | `unknown_command` | the command is not one the playback kind has |
@@ -646,27 +651,43 @@ gets `alsa_missing` from `check` and from `playback.play`.
 
 ```
 bazel run //brenn_lab:lab -- dry-run --lab <lab.toml> --machine <name> --script <script.py>
-bazel run //brenn_lab:lab -- run     --lab <lab.toml> --machine <name> --script <script.py> --out <dir> [--notes <file>]
+bazel run //brenn_lab:lab -- run     --lab <lab.toml> --machine <name> --script <script.py> --out <dir> [--notes <file>] [--frame-log <path>]
 ```
 
 `make lab ARGS="dry-run --lab … --machine … --script …"` is the same. Under
 `bazel run` a relative path is taken from the directory `bazel run` was
-started in. The same entry point has two more commands, `mark` and `align`,
-described under *Marking a source* and *Aligning a run*; this section is about
-`dry-run` and `run`.
+started in. The same entry point has three more commands, `mark`, `align` and
+`assess`, described under *Marking a source*, *Aligning a run* and *Assessing
+a run*; this section is about `dry-run` and `run`. `run`'s `--frame-log`
+names the reader its closing assessment runs instead of the pinned one, for a
+lab whose recorder is an installed one newer than the pin. A path that is not
+an executable file is refused before anything is created. A program that is
+not a frame-log reader is found only by the closing assessment, which then
+finds every capture `capture_unreadable`; `lab assess --frame-log` with the
+right reader assesses the run again.
 
 stdout carries one JSON document and nothing else, prose goes to stderr:
 
 - `dry-run`: the dry-run report.
 - `run`: a pointer,
-  `{"run": "<dir>", "outcome": "…", "completed": true, "results": "<dir>/results.json"}`.
+  `{"run": "<dir>", "outcome": "…", "completed": true, "results": "<dir>/results.json", "usability": {…}}`.
+  `usability` is the closing assessment's (*The run*, step 6):
+  `{"answer": "clean", "complete": true, "assessment": "<dir>/assessment.json"}`
+  with the assessment's `answer` (`clean`, `findings` or `incomplete`) and
+  `complete`, or `{"answer": "not_assessed", "reason": "…", "detail": "…"}`
+  when none was made, `reason` being `interrupted` (the run's outcome is
+  `interrupted`; `lab assess` assesses it when wanted), `refused` (the
+  assessment refused the run directory; `detail` gives its reason and
+  detail), `raised` (the assessment raised; the traceback is on stderr and
+  `detail` is `"<Type>: <message>"`) or `assessment_interrupted` (SIGINT or
+  SIGTERM arrived during it).
 - a refusal: `{"ok": false, "problems": […]}`. Nothing was created.
 
 ### Exit statuses
 
 | Status | `dry-run` | `run` |
 |---|---|---|
-| 0 | the report has no problem | the run completed |
+| 0 | the report has no problem | the run completed, whatever its assessment answered |
 | 1 | the report has problems, problems in the configuration or the script included | a run directory was created and the run did not complete |
 | 2 | refused: no report could be made | refused before anything was created |
 | 3 | the runner raised instead of returning | the runner raised instead of returning |
@@ -677,7 +698,7 @@ dry-run problem (below), and `where` is one of:
 | `where` | `reason` | Command |
 |---|---|---|
 | `arguments` | `usage`: the command line was refused, or asked for help with `-h` or `--help` and so ran nothing; the usage or help text is on stderr. A flag cannot be abbreviated | both |
-| `arguments` | `unreadable`: the configuration, the script or the notes file could not be read | both |
+| `arguments` | `unreadable`: the configuration, the script or the notes file could not be read; or, for `run`, `--frame-log` does not name an executable file | both |
 | `arguments` | `unknown_machine`: `--machine` is not in the configuration's `machines` | both |
 | `out` | `out_exists`, `out_parent_missing`, `out_in_workspace` | `run` |
 | `lab` | the loader's | `run` |
@@ -704,12 +725,20 @@ devices. It happens:
   are released (see *Stopping a run*). Every role has then been released.
   The run directory may hold `results.json`, which then says how the run
   ended, or may lack it, with a `.results.json.tmp` left beside the journal.
-  SIGTERM there likewise ends the runner at once;
+  SIGTERM there likewise ends the runner at once. That stretch ends when the
+  closing assessment begins: a signal during the assessment gives the run's
+  own exit status and a pointer whose `usability` says
+  `assessment_interrupted`;
 - when a probe's recorder reader fails in a way the role cannot turn into a
   reply;
 - when a run could not write its own files or a role's release raised. Every
   role the run used has then already been sent its `release`, and the run
-  directory has no `results.json`.
+  directory has no `results.json`. A release raises, among other cases, for
+  a capture whose recorder reader failed, or a play whose thread failed
+  before reporting its end, when no command of the script's has raised that
+  error first: the role's next start, stop or play raises it, as a
+  `RuntimeError` and not a `RoleFailure`, and the run then ends `failed`
+  with exit status 1, whether or not the script catches the error.
 
 ## The dry run
 
@@ -820,6 +849,11 @@ only on a real reading is not checked.
    of its own that the runner cannot write does not keep any role from its
    release.
 5. Write `results.json`.
+6. Unless the run was interrupted, assess it (*Assessing a run*), writing
+   `alignment.json` and `assessment.json`, and put the assessment's answer in
+   the pointer's `usability`. Nothing the assessment does changes the exit
+   status or `results.json`. For the length of the assessment, SIGINT and
+   SIGTERM each end it, and the pointer says `assessment_interrupted`.
 
 Whatever leaves the script's `run`, the run ends under the runner's control,
 writes its results and exits 1: a `KeyboardInterrupt` a script raises, an
@@ -830,7 +864,9 @@ which one thing `failure` names, is in `run-directory.md`, *`results.json`*.
 **Stopping a run.** From just before the script's `run` is called until its
 roles are released, SIGINT (Ctrl-C) or SIGTERM to the runner stops the
 script. A signal that arrives while a role is handling a command takes effect
-once the reply is recorded.
+once the reply is recorded, or once the role's raise is recorded if the role
+raised instead of replying: the script then sees the stop, not the role's
+error, and the role's raise stays in its `failures`.
 The roles are released, results are written with `outcome` `interrupted`, and
 the runner exits 1. Within that stretch neither signal raises
 `KeyboardInterrupt` in the script, and one that arrives while the roles are
@@ -916,8 +952,8 @@ of the kept copy in the capture, and the drift between the two clocks.
 the search can and cannot find. No clock reading is used, so the captures
 may come from any machine or device; the whole of each capture is searched.
 
-Alignment runs only when asked. The runner never aligns at the end of a run.
-`align` changes nothing else in the run, and may be run again: the new report
+A run's closing assessment, and `lab assess`, align the run in the same pass
+(*Assessing a run*). `align` changes nothing else in the run, and may be run again: the new report
 names the one it replaced. It may be run on a run still in progress, and
 then describes the run so far.
 
@@ -945,3 +981,44 @@ verdict on the run.
 align an archived or read-only run, copy it somewhere writable, and make the
 copy's directories writable too: a copy can keep the source's read-only
 modes.
+
+## Assessing a run
+
+```
+bazel run //brenn_lab:lab -- assess --run <dir> [--frame-log <path>]
+```
+
+states whether the run is usable. In alignment's pass it reads every capture
+once, measures every channel (level, offset, silence, a stuck value, samples
+at the edge of the format), states every loss of samples from both the
+recorder's account and the reader's map, reads how each play ended, and
+searches for the plays' markers. It writes `<dir>/alignment.json`, then
+`<dir>/assessment.json`, whose `answer` is `clean`, `findings` or
+`incomplete`. `run-directory.md`, *`assessment.json`*, says what every key,
+finding and `not_assessed` entry means. No finding rests on a threshold: an
+experiment that needs a bar reads the measurements and sets its own.
+
+`lab run` makes the same assessment at the end of every run that was not
+interrupted (*The run*, step 6). `assess` may be run again on any run, an
+older one included; each report names the one it replaced. It may be run on
+a run still in progress, and then describes the run so far. It reads
+captures as `align` does, with the pinned `frame-log` or the one
+`--frame-log` names, loads numpy as `align` does, and needs the same room.
+
+stdout is one JSON document, a pointer:
+
+```json
+{"run": "<dir>", "assessment": "<dir>/assessment.json", "alignment": "<dir>/alignment.json",
+ "answer": "clean", "complete": true, "findings": 0, "not_assessed": 0}
+```
+
+| Status | `assess` |
+|---|---|
+| 0 | both reports were written and `answer` is `clean` |
+| 1 | both reports were written and `answer` is `findings` or `incomplete` |
+| 2 | refused, nothing written: `where` `run`, `reason` `unreadable` (as for `align`, and also a manifest or results with a key the assessment reads of the wrong type, or missing; the detail names the file and the key), `layout` or `not_writable`, as for `align`; or `where` `arguments`, `reason` `usage` |
+| 3 | the command raised; a `.alignment.tmp/` left in the run is cleared by the next `align` or `assess` |
+
+SIGINT to `assess` raises: the exit status is 3, nothing is on stdout, and
+the scratch directory is removed on the way out. SIGTERM ends it at once and
+can leave `.alignment.tmp/`, which the next `align` or `assess` clears.

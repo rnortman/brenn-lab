@@ -11,6 +11,7 @@ import signal
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -556,6 +557,34 @@ def test_a_reader_that_fails_does_not_hang_the_role(tmp_path: Path) -> None:
         bench.send(Start())
         bench.send(Stop())
     assert isinstance(raised.value.__cause__, RuntimeError)
+    assert bench.send(Release()) == Released(stopped=None)
+
+
+@pytest.mark.parametrize("command", ["release", "start"])
+def test_a_reader_that_fails_unseen_is_raised_by_the_next_command(
+    tmp_path: Path, command: str
+) -> None:
+    answered = threading.Event()
+
+    def broken(event: Event) -> None:
+        # Held until the start is answered, so that the error lands on a
+        # running capture that nobody then stops.
+        assert answered.wait(20)
+        raise RuntimeError("the sink failed")
+
+    bench = Bench(tmp_path, "loss", sink=broken)
+    assert isinstance(bench.send(Start()), Started)
+    running = bench.role._running
+    assert running is not None
+    answered.set()
+    deadline = time.monotonic() + 20
+    while not running.ended:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    with pytest.raises(RuntimeError, match="reader failed") as raised:
+        bench.send(Release() if command == "release" else Start())
+    assert str(raised.value.__cause__) == "the sink failed"
+    # Raised once: the next command finds no capture.
     assert bench.send(Release()) == Released(stopped=None)
 
 

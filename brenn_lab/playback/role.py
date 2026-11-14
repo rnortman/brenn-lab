@@ -109,6 +109,8 @@ class _Playing:
     done: threading.Event = field(default_factory=threading.Event)
     stopped: Stopped | None = None
     thread: threading.Thread | None = None
+    # What `_finish` raised in the thread, which then reported no end.
+    error: BaseException | None = None
 
 
 class _Cut(Exception):
@@ -478,9 +480,22 @@ class PlaybackRole:
         level = limits.level_mb(play.volume_mb, self._held_mb())
         return self._started(0, j, None, stream, found, found, level, local_time, None)
 
+    def _settle(self) -> None:
+        """Forget a play whose thread has ended. An error that ended the
+        thread before the play's end was reported is raised here.
+        """
+        p = self._playing
+        if p is not None and p.done.is_set():
+            self._playing = None
+            if p.error is not None:
+                raise RuntimeError("the play's thread failed before reporting its end") from (
+                    p.error
+                )
+
     def _play(self, play: Play) -> Started | Failure:
         if self._live() is not None:
             return Failure("already_playing", "a play is running")
+        self._settle()
         if self._place is None:
             raise RuntimeError(f"role {self._name!r} has no place to keep a copy")
         j = self._judge(play)
@@ -579,10 +594,12 @@ class PlaybackRole:
     def _stop(self) -> Stopped | Failure:
         p = self._live()
         if p is None:
+            self._settle()
             return Failure("not_playing", "no play is running")
         assert p.thread is not None
         p.stop.set()
         p.thread.join()
+        self._settle()
         if p.stopped is None:
             return Failure("not_playing", "the play ended before it was stopped")
         return p.stopped
@@ -609,6 +626,7 @@ class PlaybackRole:
         if dry:
             return Released(stopped=None)
         if self._live() is None:
+            self._settle()
             return Released(stopped=None)
         stopped = self._stop()
         return Released(stopped=None if isinstance(stopped, Failure) else stopped)
@@ -714,6 +732,12 @@ class PlaybackRole:
         finally:
             try:
                 self._finish(p, failure, ended)
+            except BaseException as e:
+                # No end reaches the play's record, which keeps `ended` and
+                # `restored` null.
+                # TODO(errhandling-assessment-refuses-runner-written-null-ended)
+                p.error = e
+                raise
             finally:
                 p.done.set()
 

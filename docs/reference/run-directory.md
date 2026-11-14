@@ -13,7 +13,8 @@ start a run is in `experiments.md`.
   manifest.json        from the start; rewritten whole when a role reports device facts
   journal.jsonl        every command, reply and event, appended as it happens
   results.json         written last; absent when the run did not end under the runner's control
-  alignment.json       written by `lab align`, only when asked; absent until then
+  alignment.json       written by `lab align`, `lab assess` and a run's closing assessment
+  assessment.json      written by `lab assess` and a run's closing assessment
   script/<file name>   the script that ran, byte for byte
   lab/<file name>      the lab configuration as read, byte for byte
   notes/<file name>    the caller's free-form notes, if any were given
@@ -48,14 +49,22 @@ start a run is in `experiments.md`.
   log files.
 - `logs/runner.log` is the runner's own log. It has one line for every
   recorder started, `<role>: capture <n>: pod-capture pid <pid>`. When a script
-  raised, it holds the traceback. When the run was told to stop, it says so.
+  raised, it holds the traceback. When a role raised while handling a
+  command the script sent, it holds that traceback, whether or not the script
+  caught the error. A role that raised at the runner's own `release` is not
+  noted here: the runner reports it on stderr and exits with status 3. When
+  the run was told to stop, it says so.
 - Nothing is written outside the run directory, and the directory must not
   exist before the run. A run never touches another run.
-- `alignment.json` is not written by the run. `lab align` writes it later,
-  on request, and changes nothing else in the directory (see
-  *`alignment.json`*). A `.alignment.tmp/` directory or an
+- `alignment.json` and `assessment.json` are written after `results.json`:
+  both by the run's closing assessment, which `lab run` makes at the end of a
+  run that was not interrupted, and by `lab assess`; `alignment.json` alone by
+  `lab align`. None of them changes anything else in the directory (see
+  *`alignment.json`* and *`assessment.json`*). An `.assessment.json.tmp` file
+  is an assessment left unfinished, and is not part of the record. A
+  `.alignment.tmp/` directory or an
   `.alignment.json.tmp` file is an alignment left unfinished, and is not part
-  of the record. The next `align` removes a leftover `.alignment.tmp`,
+  of the record. The next `align` or `assess` removes a leftover `.alignment.tmp`,
   whatever it is (a directory, a file or a link), and a leftover
   `.alignment.json.tmp` that is a file or a link. It writes through neither
   and follows no link: removing a link removes the link and never its
@@ -81,8 +90,8 @@ reserved the same way.
 
 ### The version rule
 
-`manifest.json`'s `layout` is 1, and `results.json`'s and `alignment.json`'s
-`schema` are each 1. Adding a file or a key changes none of them: a new role
+`manifest.json`'s `layout` is 1, and `results.json`'s, `alignment.json`'s and
+`assessment.json`'s `schema` are each 1. Adding a file or a key changes none of them: a new role
 kind that writes under a reserved name, or adds a section of its own beside
 `captures`, a new key in an entry, a new file beside the others. A reader
 ignores the files, keys and sections of kinds it does not know. Renaming,
@@ -139,8 +148,8 @@ this order, `null` where a key does not apply.
 - `reason`: a word from the vocabularies below.
 - `detail`: prose.
 - `role`: the role, for `where` `role` and for `left_running`.
-- `command`: the command whose reply failed; `null` when an event carried the
-  failure, and for anything that was not a reply.
+- `command`: the command whose reply failed or that the role raised on;
+  `null` when an event carried the failure, and for anything else.
 - `key`: `null` in a run (it names a configuration key in a dry-run report).
 - `data`: what the reason carries (see *Failure data*); `{}` when nothing.
 
@@ -352,6 +361,7 @@ message:
   `result_type` and `result`, or `ok` false with `failure`), or an event.
 - A reply to a role on a machine the runner cannot reach is the runner's own,
   journaled like any other.
+- A command a role raised on, instead of replying, has no reply line.
 - **Order.** Lines are in the order the runner saw them. A role reports events
   from a thread of its own, so an event line may sit between a command's line
   and its reply's, and an event of a capture may come before the reply to the
@@ -383,14 +393,17 @@ them is such a write left unfinished, and is not part of the record.
  "played": {"plays_started": 0, "plays_completed": 0, "plays_marked": 0, "frames_handed": 0},
  "sources": [],
  "roles": {"mic": {"kind": "capture", "commands": 3, "failures": []}},
- "usability": {"assessed": false, "reason": "this harness version makes no usability assessment"}}
+ "usability": {"assessed": false,
+               "reason": "results.json states no usability assessment; the run's assessment, when one was made, is assessment.json",
+               "see": "assessment.json"}}
 ```
 
 - `outcome`: `completed`, `failed` or `interrupted`. `completed` is
   `outcome == "completed"`. A run completed when the script's `run` returned,
-  no reply was a failure, no role reported a failure event, and `release`
-  found nothing running. A script that catches a role's failure and carries
-  on still has a run that did not complete.
+  no reply was a failure, no role reported a failure event, no role raised
+  while handling a command, and `release` found nothing running. A script
+  that catches a role's failure, or an error a role raised, and carries on
+  still has a run that did not complete.
 - `failure`: `null` for a completed run, otherwise a problem (see
   *Problems*) naming one thing:
   - the runner was told to stop (SIGINT or SIGTERM), while the script ran or
@@ -400,6 +413,12 @@ them is such a write left unfinished, and is not part of the record.
     - a failure reply or a failure event: `where` `role`, with the role, its
       reason, detail and data, and `command` the command whose reply failed
       (`null` for an event);
+    - a role that raised while handling a command of the script's, instead
+      of replying: `where` `role`, `reason` `role_raised`, `detail`
+      `"<ExceptionType>: <message>"`, the role, and `command` the command;
+      the traceback is in `logs/runner.log`. The runner gives this reason;
+      it is not the playback role's `role_error`, which the role reports in
+      a `playback.failed` event when a play's thread raised;
     - anything else that left the script's `run`: `where` `script`, `reason`
       `script_error`, `detail` `"<ExceptionType>: <message>"`, `role` `null`;
       the traceback is in `logs/runner.log`;
@@ -465,12 +484,17 @@ them is such a write left unfinished, and is not part of the record.
     included: the number of that role's command lines in the journal.
   - `failures`: every failure of the role, in order, first or not.
     `{"command": "<name>", "reason", "detail", "data"}` for a failure reply,
-    `{"event": "<name>", "reason", "detail", "data"}` for a failure event. A
+    `{"event": "<name>", "reason", "detail", "data"}` for a failure event,
+    `{"command": "<name>", "reason": "role_raised", "detail", "data": {}}`
+    for a command the role raised on. A
     capture that dies unasked and is then stopped by the script has two
     entries: the event's and the stop's reply.
-- `usability`: where a later version states levels, clipping, markers and
-  drift. `assessed` is false and says so, so that no reader takes silence for
-  a pass.
+- `usability`: `assessed` is false: this file states no assessment of the
+  run's usability. `results.json` is the runner's own account, written once.
+  `see` names the file that does, `assessment.json` (*`assessment.json`*),
+  when one was made; no such file means the run was not assessed. A reader
+  written before `see` existed concludes "not assessed", which is the safe
+  error.
 
 ### Failure data
 
@@ -489,7 +513,7 @@ described in `experiments.md`, *Failure reasons*.
 | `role_io` | `{path, errno}`; `path` may be `null` |
 | `unreachable` | `{machine}`: the role's machine |
 | `not_configured`, `kind_mismatch` | empty |
-| `script_error`, `left_running`, `interrupted` | empty |
+| `script_error`, `role_raised`, `left_running`, `interrupted` | empty |
 
 A playback role's reasons carry their own data. Where a name is also one of
 the capture kind's, this table holds for a playback role's failure:
@@ -515,17 +539,19 @@ brenn-pod's `frame-log` tool is the reader that can say more.
 ## `alignment.json`
 
 Where each marked play lies in each capture, found by searching the captures
-for the plays' markers. `lab align --run <dir>` writes it, only when asked
-(`experiments.md`, *Aligning a run*); the run itself never does. It is written
-to `.alignment.json.tmp`, synced and renamed, and it is the only file `align`
-leaves: `manifest.json`, `results.json` and the journal are not touched, so
+for the plays' markers. `lab align --run <dir>` writes it (`experiments.md`,
+*Aligning a run*), and so does the assessment, `lab assess` and the one a run
+makes at its end, in the same pass and through the same writer, before
+`assessment.json`. It is written to `.alignment.json.tmp`, synced and renamed,
+and it is the only file `align` leaves: `manifest.json`, `results.json` and the journal are not touched, so
 none of them becomes untrue. The report is written into the run, so a run
 directory that cannot be written (a read-only filesystem, a directory without
 write permission) is refused with `not_writable`, before any capture is read,
 and nothing in it changes. So is a run whose leftover `.alignment.tmp/`
 cannot be removed; that leftover may then be partly removed, and nothing
 else in the run changes. The report is its own record. It makes no
-statement of usability, and `results.json`'s `usability.assessed` stays false.
+statement of usability; `assessment.json` does, and `results.json`'s
+`usability.assessed` stays false.
 
 No clock reading is used, for anything: not to decide which pairs are tried,
 not to narrow a search, not to attribute a marker. Every capture is searched
@@ -795,6 +821,278 @@ every instant and a capture still being written exports with an
 the harness recorded markers has no `marker` key in its source entries, and
 its plays are `no_marker_record`. A run made before the playback kind has no
 `sources` in its results; its captures are read as in any other run.
+
+## `assessment.json`
+
+Whether the run is usable, stated once for the whole run. `lab assess --run
+<dir>` writes it (`experiments.md`, *Assessing a run*), and so does `lab run`
+at the end of every run that was not interrupted. The assessment is
+alignment's pass with a measurement attached: each capture is exported once,
+every channel is measured while the export stands, the captures are searched
+for the plays' markers, and the pass writes `alignment.json` and then
+`assessment.json`, each to its `.<name>.tmp`, synced and renamed. Nothing else
+in the run changes. No `assessment.json` means the run was not assessed.
+
+The refusals are alignment's (*`alignment.json`*), with one addition:
+`unreadable` also covers a manifest or results holding a key the assessment
+reads with the wrong type, or lacking it. Every key the assessment reads is
+checked before any capture is exported, so on a refusal nothing is written
+and an existing `alignment.json` stays as it was. Such a run can still be
+aligned by `lab align`, which does not read that key.
+
+```json
+{"schema": 1,
+ "run_id": "…",
+ "harness": {"repository": "brenn-lab", "commit": "…", "dirty": false, "source": "git"},
+ "written": "2026-11-14T09:12:00-05:00",
+ "replaces": null,
+ "reader": {"program": "frame-log", "pinned": true, "path": null},
+ "alignment": {"file": "alignment.json", "sha256": "…", "written": "…"},
+ "results_read": true,
+ "clock_readings": "not_used",
+ "answer": "findings",
+ "complete": false,
+ "findings": [{"finding": "channel_silent", "role": "mic", "capture": 1, "play": null,
+               "channel": "raw_mic_2", "at_frame": null, "frames": null,
+               "detail": "every sample is 0", "data": {}}],
+ "not_assessed": [{"what": "markers", "reason": "no_marker_record", "role": "speaker",
+                   "capture": null, "play": 1, "detail": "…"}],
+ "run": {"outcome": "completed", "failure": null},
+ "captures": [{…}],
+ "plays": [{…}],
+ "summary": {"captures": 1, "captures_read": 1, "channels": 6, "plays": 2, "marked": 0,
+             "located": 0, "findings": 1, "not_assessed": 1}}
+```
+
+- `answer`, the key to branch on: `clean` when everything the run holds was
+  assessed and there is no finding; `findings` when there is at least one
+  finding; `incomplete` when there is none in what was assessed and
+  something was not assessed. `clean` never stands beside a `not_assessed`
+  entry. A fourth word, `not_assessed`, is never in the file: it is what
+  `lab run`'s pointer says when no assessment was made.
+- `complete`: `not_assessed` is empty: every part of the run that could hold
+  something was examined.
+- `harness`, `written`, `replaces`: as in `alignment.json`; `replaces` names
+  the `assessment.json` this one replaced.
+- `reader`: as in `alignment.json`.
+- `alignment`: the `alignment.json` written in the same pass, by its SHA-256
+  and its `written`. Markers, offsets and drift are read there; nothing of
+  alignment's is copied here except as each play's `found_in` says.
+- `results_read`: whether the run had a `results.json`.
+- `clock_readings`: `not_used`, as in alignment.
+- `run`: `outcome` and `failure` from `results.json`, both `null` without one.
+- `summary`: counts of what follows; `marked` and `located` are alignment's.
+
+### Findings and what was not assessed
+
+A **finding** states a fact the assessment established about the run: the
+record is not what it claims, nothing was recorded, or a part of the run that
+is here was given to the reader and could not be read. A **`not_assessed`
+entry** states that something the run holds was not examined; it says nothing
+is wrong and nothing is right. A condition is both when the fact established
+is the reason something was not examined (an unreadable capture, an unusable
+kept copy, a missing `results.json`), and neither when there was nothing to
+examine (a play with no marker, a marker the play's record does not show to
+have sounded). No finding rests on a tunable number: no level, no drift and
+no count of late periods is judged. An experiment that needs a bar reads the
+measurements and sets its own.
+
+A finding has exactly the keys `finding`, `role`, `capture`, `play`,
+`channel`, `at_frame`, `frames`, `detail`, `data`, in that order, `null`
+where one does not apply. `at_frame` is a frame of the capture's index for a
+capture's finding and a frame of the kept copy for a play's; `frames` is a
+length, `null` when it is not known, never 0 for unknown.
+
+| Finding | Fires when | `data` |
+|---|---|---|
+| `run_not_completed` | `results.json`'s `outcome` is not `completed`, or there is no `results.json` | `{outcome, where, reason}`, from the results' `failure`; `{outcome: null, reason: "no_results"}` |
+| `role_recorded_nothing` | the manifest has a capture role with no capture entry | `{}` |
+| `capture_failed` | the capture's record says `ended` `failed` | the record's `failure` |
+| `capture_unreadable` | the capture is in the run and the reader was run on it, and no usable export came back: `missing`, `export_refused`, `capture_differs` or `reader_contract` | `{reason}` |
+| `capture_empty` | the capture was read and holds no frame of audio | `{}` |
+| `log_not_ended` | the reader's verdict on the log's tail is not `ended` | `{verdict}`; `frames` is `null` |
+| `loss` | one per loss either witness states (below), at its `at_frame` | the capture's `loss` entry |
+| `loss_witnesses_disagree` | one per difference between the witnesses (below) | `{difference, recorder, reader}` |
+| `channel_silent` | every sample of the channel is 0 | `{}` |
+| `channel_constant` | every sample is one value other than 0 | `{value}` |
+| `channel_at_limit` | a sample is at a limit of the format; `at_frame` and `frames` are the first span's | `{limit_samples, limit_spans, longest_limit_span}` |
+| `play_failed` | the play's record says `ended` `failed` | the record's `failure` |
+| `play_cut_by_runner` | the play ended `stopped` with `stopped_by` `runner` | `{frames_handed, unplayed_frames}` |
+| `play_underrun` | one per underrun, at its frame of the kept copy | `{}` |
+| `controls_not_restored` | the play's `restored` is false | `{}` |
+| `kept_copy_unusable` | alignment's state of the play is `failed` with `copy_missing` or `copy_differs` | `{reason}` |
+| `play_not_located` | the play is marked, a pair with it was tried, its start marker is `expected`, and `found_in` is empty | `{start, end, pairs_tried, outcomes}`: the two markers' words, the pairs tried, and the count of each marker outcome alignment reported for the play |
+
+Not findings: a play the script stopped, which is the script doing what it
+meant to; a marker of any play that is `not_handed` or `unknown` and was not
+found; a marker not found on one channel while the play is found on another
+(a processed channel may remove the played sound); any level, drift or count
+of `late`; and a play whose drift alignment could not measure, since each
+reason for that is already a `loss` or a `play_underrun` finding.
+
+A `not_assessed` entry has exactly `what`, `reason`, `role`, `capture`,
+`play`, `detail`:
+
+| `what` | `reason` | When |
+|---|---|---|
+| `role` | `unknown_kind` | the manifest names a role of a kind this harness does not assess; nothing of it is read |
+| `capture` | `not_in_run` | the capture's pointer is not in the run |
+| `capture` | `reader_missing`, `reader_usage` | the reader could not be started, or refused its command line: the log was never read, and there is no finding |
+| `capture` | `missing`, `export_refused`, `capture_differs`, `reader_contract` | the capture could not be read; each is also `capture_unreadable`. `reader_contract` may be the reader's fault or the log's, and the assessment cannot tell which |
+| `recorder_account` | `no_record` | `results.json` holds no record of a capture the manifest names |
+| `results` | `no_results` | the run left no `results.json`: no recorder's account and no play side |
+| `markers` | `no_marker_record` | the play's entry has no `marker` key (a run made before the marker record) |
+| `markers` | `unknown_definition` | the play's marker is one this harness cannot search for |
+| `markers` | `copy_unusable` | the play is marked and its kept copy is missing or differs; also `kept_copy_unusable` |
+| `markers` | `no_capture_searched` | the play is marked and no pair with it was tried: no capture, none readable, or every rate too low |
+
+### Captures
+
+One entry per capture entry of every capture role, in the manifest's order:
+
+```json
+{"role": "mic", "capture": 1, "file": {…pointer…},
+ "rate_hz": 16000, "sample_format": "s16_le", "layout": ["…"],
+ "read": true, "failure": null,
+ "frames": 417600, "tail": "ended",
+ "recorder": {"ended": "stopped", "frames": 417600, "gaps_reported": 0, "late": 0,
+              "loss_free": true, "failure": null},
+ "loss": [],
+ "channels": [{"channel": "raw_mic_0", "frames": 417600, "min": -2457, "max": 2403,
+               "mean": -0.5, "peak_mb": -2250, "rms_mb": -4540,
+               "silent": false, "constant": false,
+               "limit_samples": 0, "limit_spans": 0, "longest_limit_span": 0,
+               "first_limit_spans": []}]}
+```
+
+- `read`, `failure`: alignment's reading of the capture; `failure` is
+  `{reason, detail}` when it failed, and `frames`, `tail` and `channels` are
+  then `null`.
+- `frames`: the frames of audio the log holds, the sum of the reader's runs.
+  `tail`: the reader's verdict on the log's end.
+- `recorder`: the capture's record in `results.json`, `late` as a count;
+  `null` when there is none.
+- `loss`: every loss either witness states, by `at_frame`:
+  `{at_frame, frames, basis, estimated_frames, cause, witnesses}`. `frames`
+  is the length where a witness measured it (the recorder's gap length, else
+  the reader's `measured` or `not_sent` fill), `null` otherwise.
+  `estimated_frames` is the reader's fill for a `clock_estimate` hole, an
+  estimate from clock stamps, and `null` for any other basis. `basis` is the
+  reader's and `cause` the recorder's, each `null` when its witness states no
+  such loss. `witnesses` is `["reader"]`, `["recorder"]` or both.
+- `channels`: one entry per name of the layout, in its order.
+
+**Measuring.** Each channel is measured over the frames of the capture's
+runs and nothing else: the silence the reader writes in place of a hole is
+never measured.
+
+| Key | Definition |
+|---|---|
+| `frames` | samples measured |
+| `min`, `max` | the smallest and largest sample, in the sample format's integers |
+| `mean` | the mean sample, in the same units; the level without the offset is `rms² − mean²` |
+| `peak_mb` | `ceil(2000·log₁₀(max(|min|, |max|) / 2^(bits−1)))`, millibels relative to full scale, the definition of a source's `peak_mb`; `null` when every sample is 0 |
+| `rms_mb` | `round(2000·log₁₀(rms / 2^(bits−1)))` of the samples as they stand, offset included; `null` when every sample is 0. A full-scale square wave is 0, a full-scale sine −301 |
+| `silent` | every sample is 0 |
+| `constant` | every sample is one value other than 0 |
+| `limit_samples` | samples equal to `2^(bits−1) − 1` or `−2^(bits−1)` |
+| `limit_spans`, `longest_limit_span` | maximal runs of consecutive samples at a limit, within one run of the log: how many, and the longest in frames |
+| `first_limit_spans` | the first 16 such spans, each `{at_frame, frames}` in the capture's frames |
+
+A channel of a capture that was read and holds no audio has `frames` 0, the
+three limit counts 0, `first_limit_spans` `[]`, and every other key `null`:
+nothing was there to be silent. Its capture is `capture_empty`, and no
+channel finding fires.
+
+`silent` and `constant` are about every sample, not about level: a beam
+with nobody speaking is quiet, not zero, and quiet is not a finding. No
+device the harness drives has a channel that is zero by design, such as a
+playback reference with nothing played; on such a channel `channel_silent`
+would fire, and no device can yet say that a channel may be silent.
+
+**The two witnesses of loss.** The recorder's witness is the capture's record
+in `results.json`: its `gaps`, `gaps_reported`, `frames` and `ended`. The
+reader's is its map: the holes, the runs and the tail. For a capture the
+recorder reports stopped, each gap and its hole carry the same `at_frame`, a
+gap with a length is a `measured` hole of that length and one without is a
+`clock_estimate` or `unknown` hole, and the record's `frames` is the runs'
+frames plus the `measured` holes' fill. With both witnesses present, each
+difference is one `loss_witnesses_disagree`:
+
+| `difference` | Fires when |
+|---|---|
+| `hole_without_gap` | the reader has a hole at an `at_frame` where the recorder reported no gap |
+| `gap_without_hole` | the recorder reported a gap at an `at_frame` where the reader has no hole |
+| `length` | both state a length for one loss and they differ, or one states a length and the other does not |
+| `gaps_reported` | the recorder's count at the stop is not the number of gaps the record holds |
+| `frames` | the record's `frames` is not the runs' frames plus the `measured` holes' fill |
+| `end` | the record says `stopped` and the tail is not `ended` |
+
+Gaps and holes are matched by `at_frame`, whatever their order. On a capture
+that failed, a gap and its hole can lawfully fail to pair; the difference is
+then reported beside `capture_failed`. With one witness absent nothing is
+compared, and `not_assessed` says which is absent.
+
+### Plays
+
+One entry per source entry of every playback role:
+
+```json
+{"role": "speaker", "play": 1, "file": {…pointer…},
+ "record": {"ended": "completed", "stopped_by": null, "frames": 312000, "frames_handed": 312000,
+            "unplayed_frames": 0, "underruns": 0, "as_sent": true, "restored": true, "failure": null},
+ "marker": {"state": "marked", "start": "expected", "end": "expected", "located": true,
+            "found_in": [{"capture": {"role": "mic", "capture": 1}, "channel": "raw_mic_0",
+                          "offset_frames": 29138.4, "ratio_basis": "measured",
+                          "drift_ppm": 2.1, "drift_unmeasured": null}]}}
+```
+
+- `record`: the play's record in `results.json`, `underruns` as a count;
+  `null` when there is none.
+- `marker.state`: alignment's state of the play. `start`, `end`: whether
+  each marker is expected in a capture, below; `null` unless the state is
+  `marked`. `located`: alignment's rule, both markers found on one channel
+  of some capture; `null` unless `marked`. `found_in`: every capture channel
+  on which the start marker was found and, when the end marker is
+  `expected`, the end marker too, each value copied from that channel in
+  `alignment.json`. For a play cut before its end marker sounded,
+  `drift_ppm` is `null` and `ratio_basis` is `nominal`.
+
+**Which markers a play is expected to show.** A play the script cut is
+healthy, and a marker the cut kept from sounding is in no capture. Each
+marker of a marked play is given one word from the play's record:
+
+| Word | When |
+|---|---|
+| `not_handed` | the frames handed do not reach the marker's last frame; alignment did not search for it |
+| `expected` | the marker was handed whole and the record shows it left the device: the play ended `completed`, or `frames_handed − unplayed_frames` reaches the marker's last frame; also when the run has no record of the play |
+| `unknown` | the marker was handed whole and the play was cut or failed with the marker in the frames discarded, or with `unplayed_frames` `null`. Alignment searches for it, and the run cannot say whether it sounded |
+
+A marker found counts wherever it was found. A marker `not_handed` or
+`unknown` and not found is neither a finding nor a `not_assessed` entry.
+
+### A run still in progress, older runs and broken runs
+
+The assessment locks nothing; on a run still recording it describes the run
+so far, and a capture being written is `log_not_ended`. A run with no
+`results.json`, including one whose runner died while writing it, is
+assessed in part: `run_not_completed` and `results`/`no_results`, every
+capture read and measured, loss stated from the reader alone. A run made
+before the marker record is `incomplete` for its plays' markers. A
+`manifest.json` or `results.json` that is present and damaged is refused, as
+above. One `results.json` the runner writes itself is refused the same way.
+When a capture's recorder reader failed, or a play's thread failed before
+reporting its end, and a command of the script's raised that error, the run
+ends `failed` and the record keeps `ended` `null`, a play's `restored` too;
+the run is not assessed
+(`errhandling-assessment-refuses-runner-written-null-ended` in the tracker).
+
+If `assess` is killed between its two writes, `alignment.json` is new and
+`assessment.json` is the previous one; the new `alignment.json`'s `replaces`
+then holds the hash that `assessment.json`'s `alignment.sha256` names. A
+later `lab align` replaces `alignment.json` the same way, and the assessment
+still says which report it was made with. Two `align` or `assess` commands
+on one run at once share the scratch directory and are not supported.
 
 ## The marker
 

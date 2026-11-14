@@ -23,6 +23,7 @@ from brenn_lab.data import JsonObject, JsonValue
 from brenn_lab.rundir import RunDir
 from brenn_lab.runner import Refused
 from brenn_lab.testing import transcript_files
+from brenn_lab.testing.role_raised import SINK_MESSAGE, check_role_raised
 from brenn_lab.testing.transcript_files import layout_of
 
 STAND_IN = os.path.abspath(os.environ["STAND_IN"])
@@ -219,7 +220,14 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
     assert result["loss_free"] is True
     assert result["end"] == reading(stopped_line)
     assert results["roles"]["mic"] == {"kind": "capture", "commands": 3, "failures": []}
-    assert results["usability"]["assessed"] is False
+    assert results["usability"] == {
+        "assessed": False,
+        "reason": (
+            "results.json states no usability assessment; the run's assessment, "
+            "when one was made, is assessment.json"
+        ),
+        "see": "assessment.json",
+    }
 
     entries = journal(out)
     assert [(e.get("command"), "ok" in e, e.get("by")) for e in entries] == [
@@ -789,6 +797,94 @@ def test_a_release_does_not_wait_on_recording_the_scripts_end(
     assert procs and all(p.poll() is not None for p in procs)
     assert journal(out)[-1]["command"] == "release"
     assert not (out / "results.json").exists()
+
+
+@pytest.mark.parametrize("catches", [True, False])
+def test_a_role_that_raises_on_a_scripts_command_fails_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, catches: bool
+) -> None:
+    """The recorder's reader fails on the gap's event; the script's start or
+    stop raises the reader's error.
+    """
+    refuse_events(monkeypatch)
+    sent = "mic.send(capture.Start())\nmic.send(capture.Stop())\n"
+    body = 'mic = lab.role("mic")\n' + (
+        "try:\n" + textwrap.indent(sent, "    ") + "except Exception:\n    pass\n"
+        if catches
+        else sent
+    )
+    out, _, results = do_run(
+        tmp_path, lab(tmp_path, {"mic": ("loss", MACHINE)}), script(tmp_path, body)
+    )
+    check_role_raised(out, results, "mic", {"capture.start", "capture.stop"})
+
+
+CATCH_AND_GO_ON = """\
+mic = lab.role("mic")
+try:
+    mic.send(capture.Start())
+    mic.send(capture.Stop())
+except Exception:
+    pass
+raise ValueError("the script went on")
+"""
+
+
+def refuse_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ledger's event sink raises, so the recorder's reader fails."""
+
+    def event(self: runner._Ledger, event: Any) -> None:
+        raise RuntimeError(SINK_MESSAGE)
+
+    monkeypatch.setattr(runner._Ledger, "event", event)
+
+
+def test_a_role_raise_is_recorded_when_its_note_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The script catches the note's `OSError` in place of the role's error."""
+    refuse_events(monkeypatch)
+    real_note = RunDir.note
+
+    def note(self: RunDir, text: str) -> None:
+        if " raised on " in text:
+            raise OSError(28, "No space left on device")
+        real_note(self, text)
+
+    monkeypatch.setattr(RunDir, "note", note)
+    out, _, results = do_run(
+        tmp_path, lab(tmp_path, {"mic": ("loss", MACHINE)}), script(tmp_path, CATCH_AND_GO_ON)
+    )
+    assert results["outcome"] == "failed" and results["completed"] is False
+    assert results["failure"]["reason"] == "role_raised"
+    assert results["failure"]["role"] == "mic"
+    assert results["roles"]["mic"]["failures"][0]["reason"] == "role_raised"
+
+
+def test_a_stop_during_a_command_a_role_raised_on_stops_the_script(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SIGTERM arrives while the role is raising; the script, which catches
+    the role's error and goes on, is stopped without a second signal.
+    """
+    refuse_events(monkeypatch)
+    real_role_raised = runner._Ledger.role_raised
+
+    def role_raised(self: runner._Ledger, command: Any, e: BaseException) -> None:
+        real_role_raised(self, command, e)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    monkeypatch.setattr(runner._Ledger, "role_raised", role_raised)
+    out, _, results = do_run(
+        tmp_path, lab(tmp_path, {"mic": ("loss", MACHINE)}), script(tmp_path, CATCH_AND_GO_ON)
+    )
+    assert results["outcome"] == "interrupted" and results["completed"] is False
+    assert results["failure"]["reason"] == "interrupted"
+    assert results["roles"]["mic"]["failures"][0]["reason"] == "role_raised"
+    log = (out / "logs" / "runner.log").read_text()
+    assert "the runner was told to stop" in log
+    assert "the script went on" not in log
+    assert journal(out)[-1]["command"] == "release"
 
 
 def test_a_capture_left_running_is_released(tmp_path: Path) -> None:

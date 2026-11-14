@@ -183,6 +183,9 @@ class Command:
     dry: bool = False
 
     def __post_init__(self) -> None:
+        # TODO(correctness-script-type-error-attributed-to-role): the body's
+        # fields are not checked against their types, so a badly typed field
+        # raises inside the role and the run's failure names the role.
         _name_in(_COMMANDS, self.body, "command")
 
     @property
@@ -389,6 +392,25 @@ def decode_value(tp: object, value: JsonValue, where: str) -> typing.Any:
             return None
         raise DecodeError(f"{where}: expected null")
     raise TypeError(f"{where}: {tp!r} has no JSON decoding")
+
+
+def get[T](obj: JsonValue, key: str, kind: type[T], where: str) -> T:
+    """`obj[key]`, which must be present and of type `kind`, a `bool` never
+    counting as an `int`; `DecodeError` naming `where` otherwise.
+    """
+    if not isinstance(obj, dict) or key not in obj:
+        raise DecodeError(f"{where} has no {key!r}")
+    value = obj[key]
+    if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+        raise DecodeError(f"{where}.{key} is not a {kind.__name__}")
+    return value
+
+
+def get_or_null[T](obj: JsonValue, key: str, kind: type[T], where: str) -> T | None:
+    """`obj[key]`, which must be present and either null or of type `kind`."""
+    if isinstance(obj, dict) and obj.get(key, False) is None:
+        return None
+    return get(obj, key, kind, where)
 
 
 def _check_json(value: object, where: str) -> None:

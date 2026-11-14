@@ -140,9 +140,20 @@ class CaptureRole:
         self._probe = probe
         return probe
 
+    def _settle(self) -> None:
+        """Forget a capture whose recorder has exited. An error that broke its
+        reader is raised here: no stop has raised it, and the capture has
+        reported no end.
+        """
+        running = self._running
+        if running is not None and running.ended:
+            self._running = None
+            running.raise_error()
+
     def _start(self) -> Started | Failure:
         if self._live() is not None:
             return Failure("already_capturing", "a capture is running")
+        self._settle()
         if self._place is None:
             raise RuntimeError(f"role {self._name!r} has no place to write a capture")
         self._count += 1
@@ -200,7 +211,7 @@ class CaptureRole:
             return Released(stopped=probe.stopped)
         self._dry_capturing = False
         if self._live() is None:
-            self._running = None
+            self._settle()
             return Released(stopped=None)
         stopped = self._stop()
         if isinstance(stopped, Failure):

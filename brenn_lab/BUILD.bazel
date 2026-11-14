@@ -59,9 +59,40 @@ py_library(
     ],
 )
 
-# The runner: `bazel run //brenn_lab:lab -- dry-run|run|mark|align ...`. It
-# carries the pinned recorder, which a machine's `pod_capture = { pinned = true }`
-# names, and the pinned reader, which `align` runs.
+# The assessment of a run, made in alignment's pass.
+py_library(
+    name = "assess",
+    srcs = [
+        "assess/__init__.py",
+        "assess/measure.py",
+        "assess/report.py",
+    ],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":align",
+        ":brenn_lab",
+    ],
+)
+
+# The entry point's module, a library so that a test can call its functions in
+# its own process.
+py_library(
+    name = "cli",
+    srcs = ["cli.py"],
+    imports = [".."],
+    deps = [
+        ":align",
+        ":assess",
+        ":brenn_lab",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+# The runner: `bazel run //brenn_lab:lab -- dry-run|run|mark|align|assess ...`.
+# It carries the pinned recorder, which a machine's
+# `pod_capture = { pinned = true }` names, and the pinned reader, which
+# `align`, `assess` and a run's closing assessment run.
 py_binary(
     name = "lab",
     srcs = ["cli.py"],
@@ -74,7 +105,9 @@ py_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":align",
+        ":assess",
         ":brenn_lab",
+        ":cli",
         "@rules_python//python/runfiles",
     ],
 )
@@ -112,6 +145,39 @@ py_pytest_test(
     deps = [
         ":align",
         ":brenn_lab",
+    ],
+)
+
+py_pytest_test(
+    name = "assess_measure_test",
+    size = "small",
+    srcs = ["assess/measure_test.py"],
+    data = ["//brenn_lab/testing:export_stand_in"],
+    env = {
+        "EXPORT_STAND_IN": "$(rootpath //brenn_lab/testing:export_stand_in)",
+    },
+    deps = [
+        ":align",
+        ":assess",
+        ":brenn_lab",
+    ],
+)
+
+# Whole synthetic runs assessed through the stand-in reader.
+py_pytest_test(
+    name = "assess_report_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = ["assess/report_test.py"],
+    data = ["//brenn_lab/testing:export_stand_in"],
+    env = {
+        "EXPORT_STAND_IN": "$(rootpath //brenn_lab/testing:export_stand_in)",
+    },
+    deps = [
+        ":align",
+        ":assess",
+        ":brenn_lab",
+        "//brenn_lab/testing:scenes",
     ],
 )
 
@@ -154,6 +220,16 @@ py_pytest_test(
 )
 
 py_pytest_test(
+    name = "cli_closing_test",
+    size = "small",
+    srcs = ["cli_closing_test.py"],
+    deps = [
+        ":brenn_lab",
+        ":cli",
+    ],
+)
+
+py_pytest_test(
     name = "buildinfo_test",
     size = "small",
     srcs = ["buildinfo_test.py"],
@@ -174,6 +250,7 @@ py_pytest_test(
     },
     deps = [
         ":brenn_lab",
+        "//brenn_lab/testing:role_raised",
         "//brenn_lab/testing:transcript_files",
     ],
 )
@@ -203,6 +280,7 @@ py_pytest_test(
         ":brenn_lab",
         "//brenn_lab/testing:fake_output",
         "//brenn_lab/testing:lab_driver",
+        "//brenn_lab/testing:role_raised",
     ],
 )
 

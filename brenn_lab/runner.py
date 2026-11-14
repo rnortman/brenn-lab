@@ -461,6 +461,19 @@ class _Ledger:
             self._fail(Problem("script", "script_error", _describe(e)))
             return first
 
+    def role_raised(self, command: Command, e: BaseException) -> None:
+        """Record that a role raised `e` instead of replying to `command`,
+        then note its traceback. The failure is recorded first, so a note
+        that cannot be written leaves it recorded.
+        """
+        with self._lock:
+            failure = Failure("role_raised", _describe(e))
+            self._role_failure(command.role, failure, "command", command.name)
+        self._rundir.note(
+            f"role {command.role} raised on {command.name}:\n"
+            + "".join(traceback.format_exception(e))
+        )
+
     def _entries_changed(self, role: str) -> None:
         """Write the manifest with the role's entries and the repositories
         its account has learned that the manifest names in no entry yet.
@@ -497,7 +510,8 @@ class _Ledger:
 class _Stop:
     """SIGINT and SIGTERM. While armed, a signal ends the script by raising
     `Interrupted`, though never inside a role's handling of a command: one
-    that arrives there is raised once the reply is recorded.
+    that arrives there is raised once the command's reply, or the role's
+    raise, is recorded.
     """
 
     def __init__(self) -> None:
@@ -548,7 +562,9 @@ class _Live:
             reply = self.exchange(Command(role=role, body=body), "script")
         finally:
             self._stop.in_call = False
-        self._stop.check()
+            # A stop that arrived during the command is raised whether the
+            # command returned or raised; raised, its error is the context.
+            self._stop.check()
         return reply
 
     def exchange(self, command: Command, by: str) -> Reply:
@@ -557,7 +573,12 @@ class _Live:
         if failure is not None:
             reply = Reply(role=command.role, command=command.name, dry=False, outcome=failure)
         else:
-            reply = self._hosted[command.role].handle(command)
+            try:
+                reply = self._hosted[command.role].handle(command)
+            except BaseException as e:
+                # Whatever the script then does with it, the run has failed.
+                self._ledger.role_raised(command, e)
+                raise
         self._ledger.reply(reply, by)
         return reply
 
@@ -821,7 +842,11 @@ def _run(
         },
         "usability": {
             "assessed": False,
-            "reason": "this harness version makes no usability assessment",
+            "reason": (
+                "results.json states no usability assessment; the run's assessment, "
+                "when one was made, is assessment.json"
+            ),
+            "see": "assessment.json",
         },
     }
     rundir.write_results(results)

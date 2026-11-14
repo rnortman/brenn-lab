@@ -35,13 +35,19 @@ manifest, a journal of every command, reply and event, and results.
   a run's captures for its plays' markers and writes the offsets and drift
   into the run directory. It has been tested on synthetic signals and has not
   yet been measured on a played run.
+- **Assessment** says whether a run is usable. At the end of every run that
+  was not interrupted, and again with `lab assess`, it measures every channel
+  of every capture, states every loss of samples from both the recorder and
+  the capture file, reads how each play ended, takes markers and drift from
+  alignment, and writes `assessment.json`, whose `answer` is `clean`,
+  `findings` or `incomplete`. No finding rests on a threshold.
 
-There is no run-validity checking yet, no output other than an ALSA card, and
-roles on other machines cannot be reached.
+There is no output other than an ALSA card, and roles on other machines
+cannot be reached.
 
 - `docs/reference/experiments.md`: the lab configuration, writing a script,
-  the capture and playback roles, the dry run and the run, marking a source
-  and aligning a run.
+  the capture and playback roles, the dry run and the run, marking a source,
+  aligning a run and assessing one.
 - `docs/reference/run-directory.md`: what a run leaves behind, file by file
   and key by key.
 

@@ -9,20 +9,20 @@ to decide anything. Which instance of a code belongs to which play is decided
 by the attribution rule in `_attribute`.
 """
 
-import hashlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from pathlib import Path
+from typing import Protocol
 
 from brenn_lab import capture as capture_kind
 from brenn_lab import marker, rundir
 from brenn_lab import playback as playback_kind
 from brenn_lab.align import capture, search
 from brenn_lab.align.capture import Exported
-from brenn_lab.data import Failure, JsonObject, JsonValue
+from brenn_lab.data import DecodeError, Failure, JsonObject, JsonValue, get
 from brenn_lab.marker import Carried, Span
 from brenn_lab.playback import source
 from brenn_lab.rundir import LAYOUT
@@ -37,12 +37,43 @@ nothing from the manifest.
 """
 
 
-class _Malformed(Exception):
-    """The manifest or results hold a value of the wrong shape."""
+@dataclass(frozen=True)
+class CaptureRead:
+    """One capture as alignment's pass read it: its identity, pointer and
+    grant from the manifest, and its export or why it has none. The export's
+    file exists until the observer's `capture` returns.
+    """
+
+    role: str
+    capture: int
+    file: JsonValue
+    rate_hz: int
+    sample_format: str
+    layout: tuple[str, ...]
+    read: Exported | Failure
+
+
+class Observer(Protocol):
+    """Whatever rides along alignment's pass."""
+
+    def begin(self, manifest: JsonObject, results: JsonObject | None) -> Failure | None:
+        """Called once, with the run's manifest and its results (None when the
+        run has none), after alignment's own checks and before anything is
+        written; a `Failure` refuses the run with it.
+        """
+        ...
+
+    def capture(self, read: CaptureRead) -> None:
+        """Called once per capture, in the manifest's order, after it was read
+        and searched and before its export is removed.
+        """
+        ...
 
 
 @dataclass
-class _Play:
+class Play:
+    """One play the manifest names, and alignment's state of it."""
+
     role: str
     play: int
     file: JsonValue
@@ -81,7 +112,7 @@ class _Capture:
 
 
 @dataclass
-class _Outcome:
+class Outcome:
     """One marker of one play in one channel of one capture."""
 
     outcome: str
@@ -105,20 +136,50 @@ class _Outcome:
 
 
 @dataclass
-class _Pair:
-    play: _Play
+class Pair:
+    """One play paired with one capture: whether it was tried, and per
+    channel the outcome of each marker.
+    """
+
+    play: Play
     capture: _Capture
     not_tried: str | None
-    channels: dict[str, dict[str, _Outcome]] = field(default_factory=dict)
+    channels: dict[str, dict[str, Outcome]] = field(default_factory=dict)
+    """Per channel, the outcome of the `start` and the `end` marker."""
     measures: dict[str, JsonObject] = field(default_factory=dict)
     """Per channel, what `_measures` made of its two outcomes."""
 
+    def located_on(self, channel: str) -> bool:
+        """Whether the play is located on `channel`: both markers found there."""
+        both = self.channels[channel]
+        return both["start"].outcome == "found" and both["end"].outcome == "found"
 
-def align(run: Path, reader: str, pinned: bool, harness: JsonObject) -> JsonObject | Failure:
+
+@dataclass(frozen=True)
+class Aligned:
+    """The report `align` wrote, the SHA-256 of the bytes it wrote, and the
+    plays and pairs the report states.
+    """
+
+    report: JsonObject
+    sha256: str
+    plays: tuple[Play, ...]
+    pairs: tuple[Pair, ...]
+
+
+def align(
+    run: Path,
+    reader: str,
+    pinned: bool,
+    harness: JsonObject,
+    observer: Observer | None = None,
+) -> Aligned | Failure:
     """Align the run at `run` with the capture reader `reader` and write
     `<run>/alignment.json`; the report, or the refusal with nothing written:
     `unreadable` or `layout` when the run cannot be read, decided first, then
     `not_writable` when the scratch directory cannot be cleared or made in it.
+    `observer`, when given, is shown the run and every capture read, and may
+    refuse the run before anything is written.
     """
     loaded = _load(run)
     if isinstance(loaded, Failure):
@@ -130,14 +191,20 @@ def align(run: Path, reader: str, pinned: bool, harness: JsonObject) -> JsonObje
             _read_results(results, plays)
         for play in plays:
             _judge(run, play)
-    except _Malformed as e:
+    except DecodeError as e:
         return Failure("unreadable", str(e))
-    pairs: list[_Pair] = []
+    if observer is not None:
+        refused = observer.begin(manifest, results)
+        if refused is not None:
+            return refused
+    pairs: list[Pair] = []
     try:
         with capture.scratch(run) as scratch:
             for c in captures:
                 _read_capture(run, scratch, reader, c)
                 pairs.extend(_align_capture(c, plays))
+                if observer is not None:
+                    observer.capture(_read_of(c))
                 if c.exported is not None:
                     c.exported.path.unlink()
     except capture.Unwritable as e:
@@ -148,8 +215,14 @@ def align(run: Path, reader: str, pinned: bool, harness: JsonObject) -> JsonObje
             f"{run} cannot be written: the leftover {e.leftover} cannot be cleared: {e.reason}",
         )
     report = _report(manifest, results is not None, reader, pinned, harness, plays, captures, pairs)
-    _write(run, report)
-    return report
+    sha256 = rundir.replace_report(run, REPORT, report)
+    return Aligned(report, sha256, tuple(plays), tuple(pairs))
+
+
+def _read_of(c: _Capture) -> CaptureRead:
+    read = c.exported if c.failure is None else c.failure
+    assert read is not None
+    return CaptureRead(c.role, c.capture, c.file, c.rate_hz, c.sample_format, c.layout, read)
 
 
 def _load(run: Path) -> tuple[JsonObject, JsonObject | None] | Failure:
@@ -183,77 +256,68 @@ def _json(path: Path) -> JsonObject | Failure:
     return value
 
 
-def _get[T](obj: JsonValue, key: str, kind: type[T], where: str) -> T:
-    if not isinstance(obj, dict) or key not in obj:
-        raise _Malformed(f"{where} has no {key!r}")
-    value = obj[key]
-    if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
-        raise _Malformed(f"{where}.{key} is not a {kind.__name__}")
-    return value
-
-
-def _entries(manifest: JsonObject) -> tuple[list[_Play], list[_Capture]]:
+def _entries(manifest: JsonObject) -> tuple[list[Play], list[_Capture]]:
     """Every play and every capture the manifest names, in its order. A role
     of a kind this code does not know is passed over.
     """
-    plays: list[_Play] = []
+    plays: list[Play] = []
     captures: list[_Capture] = []
-    for name, section in _get(manifest, "roles", dict, "manifest").items():
-        where = f"manifest.roles.{name}"
-        kind = _get(section, "kind", str, where)
+    for name, section in get(manifest, "roles", dict, "manifest.json").items():
+        where = f"manifest.json: roles.{name}"
+        kind = get(section, "kind", str, where)
         if kind == playback_kind.KIND:
-            for entry in _get(section, "sources", list, where):
+            for entry in get(section, "sources", list, where):
                 at = f"{where}.sources"
                 plays.append(
-                    _Play(name, _get(entry, "play", int, at), _get(entry, "file", dict, at), entry)
+                    Play(name, get(entry, "play", int, at), get(entry, "file", dict, at), entry)
                 )
         elif kind == capture_kind.KIND:
-            for entry in _get(section, "captures", list, where):
+            for entry in get(section, "captures", list, where):
                 at = f"{where}.captures"
-                granted = _get(entry, "granted", dict, at)
-                layout = _get(entry, "layout", list, at)
+                granted = get(entry, "granted", dict, at)
+                layout = get(entry, "layout", list, at)
                 if not all(isinstance(n, str) for n in layout):
-                    raise _Malformed(f"{at}.layout is not a list of names")
+                    raise DecodeError(f"{at}.layout is not a list of names")
                 captures.append(
                     _Capture(
                         name,
-                        _get(entry, "capture", int, at),
-                        _get(entry, "file", dict, at),
-                        _get(granted, "rate_hz", int, f"{at}.granted"),
-                        _get(granted, "sample_format", str, f"{at}.granted"),
-                        _get(granted, "channels", int, f"{at}.granted"),
+                        get(entry, "capture", int, at),
+                        get(entry, "file", dict, at),
+                        get(granted, "rate_hz", int, f"{at}.granted"),
+                        get(granted, "sample_format", str, f"{at}.granted"),
+                        get(granted, "channels", int, f"{at}.granted"),
                         tuple(str(n) for n in layout),
                     )
                 )
     return plays, captures
 
 
-def _read_results(results: JsonObject, plays: list[_Play]) -> None:
+def _read_results(results: JsonObject, plays: list[Play]) -> None:
     """Each play's frames handed and underruns, from its results record.
     Results without `sources`, from a harness before the playback kind, hold
     no play records.
     """
     by_key = {(p.role, p.play): p for p in plays}
-    records = _get(results, "sources", list, "results") if "sources" in results else []
-    for record in records:
-        at = "results.sources"
-        play = by_key.get((_get(record, "role", str, at), _get(record, "play", int, at)))
+    records = get(results, "sources", list, "results.json") if "sources" in results else []
+    for i, record in enumerate(records):
+        at = f"results.json: sources[{i}]"
+        play = by_key.get((get(record, "role", str, at), get(record, "play", int, at)))
         if play is None:
             continue
         handed = record.get("frames_handed") if isinstance(record, dict) else None
         if handed is not None and (not isinstance(handed, int) or isinstance(handed, bool)):
-            raise _Malformed(f"{at}.frames_handed is not an integer")
+            raise DecodeError(f"{at}.frames_handed is not an integer")
         play.frames_handed = handed
         play.underruns = tuple(
-            _get(u, "at_frame", int, f"{at}.underruns") for u in _get(record, "underruns", list, at)
+            get(u, "at_frame", int, f"{at}.underruns") for u in get(record, "underruns", list, at)
         )
 
 
-def _judge(run: Path, play: _Play) -> None:
+def _judge(run: Path, play: Play) -> None:
     """The play's state: whether it carries a marker, and whether its kept
     copy bears the record out.
     """
-    described = _get(play.entry, "source", dict, f"play {play.role}/{play.play}")
+    described = get(play.entry, "source", dict, f"play {play.role}/{play.play}")
     if "marker" not in described:
         play.state = "no_marker_record"
         return
@@ -300,14 +364,14 @@ def _carried(record: JsonObject, where: str) -> Carried:
 
     def span(key: str) -> Span:
         at = f"{where}.{key}"
-        found = _get(record, key, dict, where)
-        return Span(_get(found, "frame", int, at), _get(found, "frames", int, at))
+        found = get(record, key, dict, where)
+        return Span(get(found, "frame", int, at), get(found, "frames", int, at))
 
     return Carried(
-        _get(record, "definition", str, where),
-        _get(record, "member", int, where),
-        _get(record, "start_code", int, where),
-        _get(record, "end_code", int, where),
+        get(record, "definition", str, where),
+        get(record, "member", int, where),
+        get(record, "start_code", int, where),
+        get(record, "end_code", int, where),
         span("start"),
         span("end"),
     )
@@ -339,7 +403,7 @@ def _read_capture(run: Path, scratch: Path, reader: str, c: _Capture) -> None:
         c.exported = read
 
 
-def _align_capture(c: _Capture, plays: list[_Play]) -> list[_Pair]:
+def _align_capture(c: _Capture, plays: list[Play]) -> list[Pair]:
     """Every play paired with capture `c`, each marked play searched for in
     every channel when the capture was read.
     """
@@ -353,12 +417,12 @@ def _align_capture(c: _Capture, plays: list[_Play]) -> list[_Pair]:
             not_tried = "capture_rate_too_low"
         else:
             not_tried = None
-        pairs.append(_Pair(play, c, not_tried))
+        pairs.append(Pair(play, c, not_tried))
     tried = [p for p in pairs if p.not_tried is None]
     exported = c.exported
     if not tried or exported is None:
         return pairs
-    markers: dict[int, list[tuple[_Pair, str]]] = {}
+    markers: dict[int, list[tuple[Pair, str]]] = {}
     for pair in tried:
         carried = pair.play.carried
         assert carried is not None
@@ -373,7 +437,7 @@ def _align_capture(c: _Capture, plays: list[_Play]) -> list[_Pair]:
     length = marker.length(c.rate_hz)
     for index, name in enumerate(c.layout):
         outcomes = {
-            (id(pair), which): _Outcome("not_tried", "not_handed")
+            (id(pair), which): Outcome("not_tried", "not_handed")
             for pair in tried
             for which in ("start", "end")
         }
@@ -389,11 +453,11 @@ def _align_capture(c: _Capture, plays: list[_Play]) -> list[_Pair]:
 
 
 def _attribute(
-    tried: list[tuple[_Pair, str]],
+    tried: list[tuple[Pair, str]],
     found: search.Found,
     exported: Exported,
     length: int,
-) -> Iterator[tuple[tuple[_Pair, str], _Outcome]]:
+) -> Iterator[tuple[tuple[Pair, str], Outcome]]:
     """The outcome of each marker in `tried`, all of one code, given that
     code's instances in one channel. Nothing here reads a clock.
     """
@@ -401,11 +465,11 @@ def _attribute(
     count = len(instances)
     best = found.best
 
-    def missing(reason: str, detail: str) -> _Outcome:
-        return _Outcome("not_found", reason, best, count, detail=detail)
+    def missing(reason: str, detail: str) -> Outcome:
+        return Outcome("not_found", reason, best, count, detail=detail)
 
-    def ambiguous(reason: str, detail: str) -> _Outcome:
-        return _Outcome("ambiguous", reason, best, count, detail=detail)
+    def ambiguous(reason: str, detail: str) -> Outcome:
+        return Outcome("ambiguous", reason, best, count, detail=detail)
 
     if count == 0:
         for m in tried:
@@ -428,16 +492,16 @@ def _attribute(
         yield m, ambiguous(reason, f"{count} instances for {len(tried)} plays")
 
 
-def _found(instance: search.Instance, count: int, exported: Exported, length: int) -> _Outcome:
+def _found(instance: search.Instance, count: int, exported: Exported, length: int) -> Outcome:
     if exported.touches_hole(instance.first, length):
-        return _Outcome(
+        return Outcome(
             "not_found",
             "in_hole",
             instance.score,
             count,
             detail=f"the instance at exported frame {instance.first} touches a hole",
         )
-    return _Outcome(
+    return Outcome(
         "found",
         None,
         instance.score,
@@ -447,13 +511,13 @@ def _found(instance: search.Instance, count: int, exported: Exported, length: in
     )
 
 
-def _measures(pair: _Pair, exported: Exported, start: _Outcome, end: _Outcome) -> JsonObject:
+def _measures(pair: Pair, exported: Exported, start: Outcome, end: Outcome) -> JsonObject:
     """`ratio`, `drift_ppm`, `drift_unmeasured`, `offset_frames` and
     `ratio_basis` of one channel of a tried pair.
     """
     carried = pair.play.carried
     assert carried is not None
-    source_rate = _get(pair.play.entry["source"], "rate_hz", int, "source")
+    source_rate = get(pair.play.entry["source"], "rate_hz", int, "source")
     nominal = pair.capture.rate_hz / source_rate
     start_mid = carried.start.frame + _HALF_S * source_rate
     end_mid = carried.end.frame + _HALF_S * source_rate
@@ -490,9 +554,9 @@ def _report(
     reader: str,
     pinned: bool,
     harness: JsonObject,
-    plays: list[_Play],
+    plays: list[Play],
     captures: list[_Capture],
-    pairs: list[_Pair],
+    pairs: list[Pair],
 ) -> JsonObject:
     failures: list[JsonValue] = []
     for play in plays:
@@ -517,7 +581,7 @@ def _report(
         channels: list[JsonValue] = []
         for name, both in pair.channels.items():
             start, end = both["start"], both["end"]
-            if start.outcome == "found" and end.outcome == "found":
+            if pair.located_on(name):
                 located.add((pair.play.role, pair.play.play))
             for which, outcome in both.items():
                 if outcome.outcome in ("not_found", "ambiguous"):
@@ -578,7 +642,7 @@ def _report(
                 "state": p.state,
                 "reason": p.reason,
                 "detail": p.detail,
-                "marker": _get(p.entry, "source", dict, "source").get("marker"),
+                "marker": get(p.entry, "source", dict, "source").get("marker"),
             }
             for p in plays
         ],
@@ -605,12 +669,7 @@ def _encode_capture(c: _Capture) -> JsonObject:
         "rate_hz": c.rate_hz,
         "layout": list(c.layout),
         "exported_frames": None if exported is None else exported.frames,
-        "holes": None
-        if exported is None
-        else [
-            {"at_frame": h.at_frame, "filled_frames": h.filled_frames, "basis": h.basis}
-            for h in exported.holes
-        ],
+        "holes": None if exported is None else [h.encode() for h in exported.holes],
         "tail": None if exported is None else exported.tail,
         "failure": None
         if c.failure is None
@@ -623,24 +682,3 @@ def ok(report: JsonObject) -> bool:
     summary = report["summary"]
     assert isinstance(summary, dict)
     return summary["read_failures"] == 0 and summary["located"] == summary["marked"]
-
-
-def _write(run: Path, report: JsonObject) -> None:
-    """Write the report by a temporary file and a rename, naming the report it
-    replaces.
-    """
-    path = run / REPORT
-    if path.exists():
-        previous = path.read_bytes()
-        try:
-            old = json.loads(previous)
-            harness = old.get("harness") if isinstance(old, dict) else None
-            written = old.get("written") if isinstance(old, dict) else None
-        except json.JSONDecodeError, UnicodeDecodeError:
-            harness = written = None
-        report["replaces"] = {
-            "harness": harness,
-            "written": written,
-            "sha256": hashlib.sha256(previous).hexdigest(),
-        }
-    rundir.replace_json(run, REPORT, report)

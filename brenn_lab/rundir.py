@@ -11,10 +11,16 @@
                           (`captures/<role>/`: what a capture role recorded)
 <run>/logs/runner.log     the runner's own log
 <run>/logs/<role>/        the output of the programs each role calls
-<run>/alignment.json      written by `lab align` after the run, by a temporary
+<run>/alignment.json      written by `lab align`, by `lab assess` and by the
+                          run's closing assessment, by a temporary file and a
+                          rename
+<run>/assessment.json     written by `lab assess` and by the run's closing
+                          assessment, after `alignment.json`, by a temporary
                           file and a rename
 """
 
+import hashlib
+import json
 import os
 import threading
 from pathlib import Path
@@ -26,21 +32,45 @@ LAYOUT = 1
 GITIGNORE = "*\n"
 
 
-def replace_json(run: Path, name: str, value: JsonObject) -> None:
-    """Write `value` as `<run>/<name>` whole: to `.<name>.tmp`, synced, then
-    renamed over it. Whatever stands under the temporary name is unlinked
-    first, a link and never its target, and the temporary file is then
-    created anew; a link that appears under the name in between makes this
-    raise, and no link is followed.
+def replace_json(run: Path, name: str, value: JsonObject) -> str:
+    """Write `value` as `<run>/<name>` whole, in UTF-8: to `.<name>.tmp`,
+    synced, then renamed over it; the SHA-256 of the bytes written. Whatever
+    stands under the temporary name is unlinked first, a link and never its
+    target, and the temporary file is then created anew; a link that appears
+    under the name in between makes this raise, and no link is followed.
     """
+    data = (to_text(value) + "\n").encode()
     temporary = run / f".{name}.tmp"
     temporary.unlink(missing_ok=True)
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
-    with os.fdopen(fd, "w") as f:
-        f.write(to_text(value) + "\n")
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
         f.flush()
         os.fsync(f.fileno())
     temporary.replace(run / name)
+    return hashlib.sha256(data).hexdigest()
+
+
+def replace_report(run: Path, name: str, report: JsonObject) -> str:
+    """Write the report `report` as `<run>/<name>` by `replace_json`, its
+    `replaces` naming the report it replaces by harness, time written and
+    SHA-256; the SHA-256 of what was written.
+    """
+    path = run / name
+    if path.exists():
+        previous = path.read_bytes()
+        try:
+            old = json.loads(previous)
+            harness = old.get("harness") if isinstance(old, dict) else None
+            written = old.get("written") if isinstance(old, dict) else None
+        except json.JSONDecodeError, UnicodeDecodeError:
+            harness = written = None
+        report["replaces"] = {
+            "harness": harness,
+            "written": written,
+            "sha256": hashlib.sha256(previous).hexdigest(),
+        }
+    return replace_json(run, name, report)
 
 
 def resolve(run: Path, path: str) -> Path | None:

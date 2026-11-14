@@ -30,7 +30,8 @@ def align(run: Path) -> dict[str, Any]:
     done = report.align(run, READER, False, HARNESS)
     assert not isinstance(done, Failure), done
     written: dict[str, Any] = json.loads((run / report.REPORT).read_text())
-    assert written == json.loads(json.dumps(done))
+    assert written == json.loads(json.dumps(done.report))
+    assert done.sha256 == hashlib.sha256((run / report.REPORT).read_bytes()).hexdigest()
     assert not (run / ".alignment.tmp").exists()
     assert not (run / ".alignment.json.tmp").exists()
     return written
@@ -463,6 +464,72 @@ def test_a_rerun_names_the_report_it_replaces_and_changes_nothing_else(tmp_path:
     third = align(built.run)
     assert third["replaces"]["harness"] is None
     assert third["replaces"]["written"] is None
+
+
+class Watching:
+    """An observer that keeps what it is shown, and refuses with `refuse`."""
+
+    def __init__(self, refuse: Failure | None = None) -> None:
+        self.refuse = refuse
+        self.begun: list[tuple[JsonObject, JsonObject | None]] = []
+        self.captures: list[report.CaptureRead] = []
+        self.existed: list[bool] = []
+
+    def begin(self, manifest: JsonObject, results: JsonObject | None) -> Failure | None:
+        self.begun.append((manifest, results))
+        return self.refuse
+
+    def capture(self, read: report.CaptureRead) -> None:
+        self.captures.append(read)
+        self.existed.append(isinstance(read.read, capture.Exported) and read.read.path.is_file())
+
+
+@pytest.mark.parametrize("results", [True, False])
+def test_an_observer_is_shown_the_run_and_every_capture_while_its_export_stands(
+    tmp_path: Path, results: bool
+) -> None:
+    captures = [
+        Capture(layout=("raw_mic_0", "asr_beam")),
+        Capture(capture=2, refuse="error: not a frame log"),
+    ]
+    built = scenes.build(
+        tmp_path / "run", [Play("speaker", 1, 1, at=2000.0)], captures, results=results
+    )
+    watching = Watching()
+    done = report.align(built.run, READER, False, HARNESS, watching)
+    assert isinstance(done, report.Aligned), done
+    manifest = json.loads((built.run / "manifest.json").read_text())
+    expected = json.loads((built.run / "results.json").read_text()) if results else None
+    assert watching.begun == [(manifest, expected)]
+    assert [(r.role, r.capture) for r in watching.captures] == [("mic", 1), ("mic", 2)]
+    first, second = watching.captures
+    assert (first.rate_hz, first.sample_format, first.layout) == (
+        16000,
+        "s16_le",
+        ("raw_mic_0", "asr_beam"),
+    )
+    assert first.file == manifest["roles"]["mic"]["captures"][0]["file"]
+    assert isinstance(first.read, capture.Exported)
+    assert isinstance(second.read, Failure) and second.read.reason == "export_refused"
+    assert watching.existed == [True, False]
+    summary = done.report["summary"]
+    assert isinstance(summary, dict) and summary["located"] == 1
+    assert not (built.run / ".alignment.tmp").exists()
+
+
+def test_an_observer_that_refuses_at_the_beginning_stops_the_run_untouched(
+    tmp_path: Path,
+) -> None:
+    built = scenes.build(tmp_path / "run", [Play("speaker", 1, 1, at=2000.0)])
+    (built.run / capture.SCRATCH).mkdir()
+    (built.run / capture.SCRATCH / report.EXPORT).write_bytes(b"left by a killed align")
+    before = listing(built.run)
+    watching = Watching(Failure("unreadable", "results.json: sources[0] has no 'restored'"))
+    refused = report.align(built.run, READER, False, HARNESS, watching)
+    assert refused == watching.refuse
+    assert len(watching.begun) == 1
+    assert watching.captures == []
+    assert listing(built.run) == before
 
 
 def test_a_leftover_scratch_directory_is_cleared(tmp_path: Path) -> None:

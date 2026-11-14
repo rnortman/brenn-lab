@@ -394,11 +394,11 @@ class Running:
         # The reader thread decides the start whatever happens to it, so these
         # waits end.
         self._decided.wait()
-        self._raise_error()
+        self.raise_error()
         if self._started is not None:
             return self
         self._done.wait()
-        self._raise_error()
+        self.raise_error()
         assert isinstance(self._outcome, Failure)
         return self._outcome
 
@@ -421,7 +421,7 @@ class Running:
                     signal.SIGKILL,
                 )
         self._done.wait()
-        self._raise_error()
+        self.raise_error()
         assert self._outcome is not None
         return self._outcome if already is None else _unasked(already)
 
@@ -434,7 +434,8 @@ class Running:
         self._signal(signal.SIGKILL)
         self._done.wait()
 
-    def _raise_error(self) -> None:
+    def raise_error(self) -> None:
+        """Raise the error that broke the recorder's reader, if one did."""
         if self._error is not None:
             raise RuntimeError("the recorder's reader failed") from self._error
 
@@ -592,6 +593,9 @@ class Running:
         try:
             # An end nobody asked for is reported before the capture reads as
             # ended, so that no one can find it ended and not yet reported.
+            # With the reader's error held, no end reaches the capture's
+            # record, which keeps `ended` null.
+            # TODO(errhandling-assessment-refuses-runner-written-null-ended)
             if begun and not asked and self._error is None:
                 self._report(
                     Failed(

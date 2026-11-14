@@ -11,6 +11,7 @@ The clean run is then aligned with `lab align`, and the product search is run
 over its ambient capture, where it must find no marker.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -190,6 +191,8 @@ def same_case(live: Path, case: str) -> None:
             assert a["build"] == b["build"]
 
 
+# TODO(flex-capture-leading-zero-frames): state what the leading zero frames of
+# an ambient recording are, and assert or print them here as the answer warrants.
 def test_clean() -> None:
     tmp = workdir("clean")
     lab = lab_file(tmp)
@@ -199,7 +202,13 @@ def test_clean() -> None:
     done = start(run_args(lab, EXAMPLE, out))
     live = recorder_stdout(out, "clean")
     assert done.returncode == 0, done.stdout
-    assert document(done.stdout)["outcome"] == "completed"
+    pointer = document(done.stdout)
+    assert pointer["outcome"] == "completed"
+    assert pointer["usability"] == {
+        "answer": "clean",
+        "complete": True,
+        "assessment": str(out / "assessment.json"),
+    }
     manifest, results = read_json(out / "manifest.json"), read_json(out / "results.json")
     started, ended = only_capture(manifest, results)
 
@@ -220,8 +229,47 @@ def test_clean() -> None:
 
     same_case(live, "clean")
 
+    check_clean_assessment(read_json(out / "assessment.json"), ended)
+    check_assess_again(out, ended)
     check_align(out, ended)
     check_no_marker_in_ambient(tmp, capture, started)
+
+
+def check_clean_assessment(assessed: Any, ended: Any) -> None:
+    """An ambient run's assessment through the pinned reader: every channel
+    measured over the recorder's frames, none silent, constant or at a limit,
+    no loss, no finding, nothing unassessed. Each channel's level is printed;
+    no level is asserted.
+    """
+    assert (assessed["answer"], assessed["complete"]) == ("clean", True)
+    assert assessed["findings"] == [] and assessed["not_assessed"] == []
+    assert assessed["reader"] == {"program": "frame-log", "pinned": True, "path": None}
+    [captured] = assessed["captures"]
+    assert captured["read"] is True and captured["tail"] == "ended"
+    assert captured["frames"] == ended["frames"]
+    assert captured["loss"] == []
+    assert [c["channel"] for c in captured["channels"]] == LAYOUT
+    for channel in captured["channels"]:
+        name = channel["channel"]
+        assert channel["frames"] == ended["frames"], name
+        assert channel["silent"] is False and channel["constant"] is False, name
+        assert channel["limit_samples"] == 0, (name, channel["first_limit_spans"])
+        print(f"assessed {name}: peak {channel['peak_mb']} mB, rms {channel['rms_mb']} mB")
+
+
+def check_assess_again(out: Path, ended: Any) -> None:
+    """`lab assess` on the run answers as the run's own assessment did and
+    names the report it replaced.
+    """
+    first = (out / "assessment.json").read_bytes()
+    done = start(["assess", "--run", str(out)])
+    assert done.returncode == 0, done.stdout
+    pointer = document(done.stdout)
+    assert (pointer["answer"], pointer["complete"]) == ("clean", True)
+    assessed = read_json(out / "assessment.json")
+    assert assessed["replaces"]["sha256"] == hashlib.sha256(first).hexdigest()
+    check_clean_assessment(assessed, ended)
+    assert not (out / ".alignment.tmp").exists()
 
 
 def check_align(out: Path, ended: Any) -> None:
@@ -323,6 +371,19 @@ def test_loss() -> None:
     )
 
     same_case(live, "loss")
+
+    # Both witnesses state the one loss, through the real recorder and reader.
+    assessed = read_json(out / "assessment.json")
+    assert [f["finding"] for f in assessed["findings"]] == ["loss"]
+    [captured] = assessed["captures"]
+    [loss] = captured["loss"]
+    assert loss["at_frame"] == gap["at_frame"]
+    assert (loss["frames"], loss["cause"], loss["witnesses"]) == (
+        None,
+        "overrun",
+        ["reader", "recorder"],
+    )
+    assert document(stdout)["usability"]["answer"] == "findings"
 
 
 def recorder_pid(log: Path, run: subprocess.Popen[str]) -> int:

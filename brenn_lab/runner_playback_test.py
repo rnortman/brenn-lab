@@ -6,6 +6,7 @@ import array
 import json
 import os
 import textwrap
+import threading
 import wave
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from brenn_lab.playback import output
 from brenn_lab.playback.output import ControlName
 from brenn_lab.testing.fake_output import CARD, LIBRARY, FakeControl, FakeOutput
 from brenn_lab.testing.lab_driver import lab_toml, speaker_toml
+from brenn_lab.testing.role_raised import SINK_MESSAGE, check_role_raised
 
 STAND_IN = os.path.abspath(os.environ["STAND_IN"])
 EXAMPLE = Path(os.path.abspath(os.environ["EXAMPLE"]))
@@ -96,6 +98,8 @@ def do_run(tmp_path: Path, lab_path: Path, script_path: Path) -> tuple[Path, Any
     assert isinstance(pointer, dict), pointer
     manifest = json.loads((out / "manifest.json").read_text())
     results = json.loads((out / "results.json").read_text())
+    assert pointer["outcome"] == results["outcome"]
+    assert pointer["completed"] == results["completed"]
     return out, manifest, results
 
 
@@ -191,6 +195,47 @@ def test_play_and_record(tmp_path: Path, outputs: list[FakeOutput]) -> None:
     assert not live.attached
 
 
+@pytest.mark.parametrize("catches", [True, False])
+def test_a_role_that_raises_on_a_scripts_command_fails_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outputs: list[FakeOutput], catches: bool
+) -> None:
+    """The play's end cannot be reported; the script's stop, held until then,
+    raises the play thread's error. A stop that reached a live play would get
+    its `Stopped` and no end would be reported.
+    """
+    real_event = runner._Ledger.event
+    real_command = runner._Ledger.command
+    refused = threading.Event()
+
+    def event(self: runner._Ledger, event: Any) -> None:
+        if event.name == "playback.ended":
+            refused.set()
+            raise RuntimeError(SINK_MESSAGE)
+        real_event(self, event)
+
+    def command(self: runner._Ledger, command: Any, by: str) -> None:
+        if command.name == "playback.stop":
+            assert refused.wait(20)
+        real_command(self, command, by)
+
+    monkeypatch.setattr(runner._Ledger, "event", event)
+    monkeypatch.setattr(runner._Ledger, "command", command)
+    # The play's thread raises the sink's error on its way out.
+    monkeypatch.setattr(threading, "excepthook", lambda args: None)
+    clip(tmp_path / "sources", "clip.wav", 0.2)
+    play = 'speaker.send(playback.Play(source="clip.wav", volume_mb=-3000))\n'
+    stop = "speaker.send(playback.Stop())\n"
+    body = play + ("try:\n    " + stop + "except Exception:\n    pass\n" if catches else stop)
+    out, _, results = do_run(tmp_path, lab(tmp_path), script(tmp_path, body))
+    check_role_raised(out, results, "speaker", {"playback.stop"})
+    # The play was answered; the stop, held until the end was refused, raised.
+    assert [p for p in names(out) if p[0] != "event" and p[1].startswith("playback.")] == [
+        ("command", "playback.play"),
+        ("reply", "playback.play"),
+        ("command", "playback.stop"),
+    ]
+
+
 MARKED = """\
 started = speaker.send(playback.Play(source="marked.wav", volume_mb=-3000))
 assert started.source.marker is not None and started.source.marker.member == 12
@@ -220,6 +265,7 @@ def test_a_marked_play_and_an_unmarked_one(tmp_path: Path, outputs: list[FakeOut
     assert results["played"]["plays_marked"] == 1
     assert results["played"]["plays_started"] == 2
     assert results["usability"]["assessed"] is False
+    assert results["usability"]["see"] == "assessment.json"
 
 
 LEFT = """\
