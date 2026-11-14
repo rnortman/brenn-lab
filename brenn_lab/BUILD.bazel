@@ -29,6 +29,7 @@ py_library(
         "playback/limits.py",
         "playback/messages.py",
         "playback/output.py",
+        "playback/pulse.py",
         "playback/role.py",
         "playback/source.py",
         "roles.py",
@@ -91,12 +92,14 @@ py_library(
 
 # The runner: `bazel run //brenn_lab:lab -- dry-run|run|mark|align|assess ...`.
 # It carries the pinned recorder, which a machine's
-# `pod_capture = { pinned = true }` names, and the pinned reader, which
+# `pod_capture = { pinned = true }` names, the sink client, which
+# `pulse_client = { pinned = true }` names, and the pinned reader, which
 # `align`, `assess` and a run's closing assessment run.
 py_binary(
     name = "lab",
     srcs = ["cli.py"],
     data = [
+        "//brenn_lab/playback/pulse_client:pulse-client",
         "//tools/brenn_pod:frame-log",
         "//tools/brenn_pod:pod-capture",
         "//tools/buildinfo:build_info",
@@ -117,6 +120,7 @@ py_pytest_test(
     size = "small",
     srcs = ["pinned_test.py"],
     data = [
+        "//brenn_lab/playback/pulse_client:pulse-client",
         "//tools/brenn_pod:frame-log",
         "//tools/brenn_pod:pod-capture",
     ],
@@ -285,6 +289,32 @@ py_pytest_test(
 )
 
 py_pytest_test(
+    name = "runner_scenario_test",
+    size = "small",
+    srcs = ["runner_scenario_test.py"],
+    data = [
+        "//brenn_lab/testing:export_stand_in",
+        "//brenn_lab/testing:speech/arctic_a0001.wav",
+        "//brenn_lab/testing:stand_in",
+        "//examples:anchoring_scenario.py",
+    ],
+    env = {
+        "EXAMPLE": "$(rootpath //examples:anchoring_scenario.py)",
+        "EXPORT_STAND_IN": "$(rootpath //brenn_lab/testing:export_stand_in)",
+        "SPEECH": "$(rootpath //brenn_lab/testing:speech/arctic_a0001.wav)",
+        "STAND_IN": "$(rootpath //brenn_lab/testing:stand_in)",
+    },
+    deps = [
+        ":assess",
+        ":brenn_lab",
+        "//brenn_lab/testing:fake_output",
+        "//brenn_lab/testing:lab_driver",
+        "//brenn_lab/testing:pulse_stand_in",
+        "//brenn_lab/testing:sink_client",
+    ],
+)
+
+py_pytest_test(
     name = "capture_role_test",
     size = "small",
     srcs = ["capture/role_test.py"],
@@ -420,6 +450,38 @@ py_pytest_test(
     size = "small",
     srcs = ["playback/device_test.py"],
     deps = [":brenn_lab"],
+)
+
+py_pytest_test(
+    name = "playback_pulse_test",
+    size = "small",
+    srcs = ["playback/pulse_test.py"],
+    deps = [":brenn_lab"],
+)
+
+py_pytest_test(
+    name = "playback_pulse_role_test",
+    size = "small",
+    srcs = ["playback/pulse_role_test.py"],
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:pulse_stand_in",
+        "//brenn_lab/testing:sink_client",
+    ],
+)
+
+py_pytest_test(
+    name = "playback_pulse_hardware_test",
+    size = "small",
+    srcs = ["playback/pulse_hardware_test.py"],
+    tags = [
+        "external",
+        "hardware",
+    ],
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:sink_client",
+    ],
 )
 
 py_pytest_test(

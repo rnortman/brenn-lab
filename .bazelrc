@@ -47,10 +47,18 @@ common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 # turns it on.
 build:lint --aspects=//tools/mypy:aspects.bzl%mypy_aspect
 build:lint --output_groups=+mypy
+# clippy over the repository's own Rust, every warning an error. The aspect
+# skips targets in external repositories, so the pinned tools are not linted.
+# The flag is set for every build, not only under the config, so moving
+# between `make test` and `make check` keeps Bazel's analysis cache.
+build:lint --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:lint --output_groups=+clippy_checks
+build --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 
 # --- Test lanes ---
-# Tests that need a device attached (`hardware`) or that play sound or move a
-# robot (`audible`) never run in an ordinary `bazel test`, whoever types it.
+# Tests that need a device attached or the desktop's sound server (`hardware`)
+# or that play sound or move a robot (`audible`) never run in an ordinary
+# `bazel test`, whoever types it.
 # `make hardware-test` and `make audible-test` replace this filter.
 test --test_tag_filters=-hardware,-audible
 

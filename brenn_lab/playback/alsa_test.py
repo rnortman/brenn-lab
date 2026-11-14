@@ -51,7 +51,7 @@ def test_usb_id_is_the_kernels_file_or_none(tmp_path: Path) -> None:
 
 
 def test_the_alsa_output_kind_is_made_without_loading_the_library() -> None:
-    output = OUTPUTS["alsa"]("Flex")
+    output = OUTPUTS["alsa"]("Flex", {})
     assert isinstance(output, alsa.AlsaOutput)
     assert output.kind == "alsa"
 

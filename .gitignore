@@ -64,6 +64,8 @@ __pycache__/
 !/brenn_lab/testing/transcripts/recorded/clean.jsonl
 !/brenn_lab/testing/transcripts/recorded/loss.jsonl
 !/brenn_lab/testing/transcripts/recorded/no_card.jsonl
+# A speech clip whose licence allows redistribution; README.md beside it.
+!/brenn_lab/testing/speech/arctic_a0001.wav
 
 # Per-machine tool configuration that names local paths.
 *.local.toml

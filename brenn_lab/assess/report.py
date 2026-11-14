@@ -12,7 +12,7 @@ examined. No finding rests on a tunable number.
 """
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +24,7 @@ from brenn_lab.align.capture import Exported, Hole
 from brenn_lab.assess.measure import Measured, measure
 from brenn_lab.data import DecodeError, Failure, JsonObject, JsonValue, get, get_or_null
 from brenn_lab.marker import Span
+from brenn_lab.playback.output import OUTPUTS, PLAYS_ON_AFTER_UNDERRUN
 
 REPORT = "assessment.json"
 SCHEMA = 1
@@ -87,6 +88,11 @@ class _Run:
     failure: JsonObject | None
     captures: dict[tuple[str, int], _CaptureRecord]
     plays: dict[tuple[str, int], _PlayRecord]
+    outputs: dict[tuple[str, int], str]
+    """The output kind of each play, known to this harness or not. A play of a
+    kind that is no key of `OUTPUTS` has its `unplayed_frames` read as null:
+    the figure is by its output's own account, which this harness cannot read.
+    """
 
 
 @dataclass(frozen=True)
@@ -101,6 +107,7 @@ def _parse(manifest: JsonObject, results: JsonObject | None) -> _Run:
     `DecodeError` naming the file and the key.
     """
     roles: list[_Role] = []
+    outputs: dict[tuple[str, int], str] = {}
     for name, section in get(manifest, "roles", dict, "manifest.json").items():
         where = f"manifest.json: roles.{name}"
         kind = get(section, "kind", str, where)
@@ -110,11 +117,14 @@ def _parse(manifest: JsonObject, results: JsonObject | None) -> _Run:
         elif kind == playback_kind.KIND:
             entries = get(section, "sources", list, where)
             numbers = tuple(get(e, "play", int, f"{where}.sources") for e in entries)
+            for n, e in zip(numbers, entries, strict=True):
+                at = f"{where}.sources[play {n}]"
+                outputs[(name, n)] = get(get(e, "output", dict, at), "kind", str, f"{at}.output")
         else:
             numbers = ()
         roles.append(_Role(name, kind, numbers))
     if results is None:
-        return _Run(tuple(roles), False, None, None, {}, {})
+        return _Run(tuple(roles), False, None, None, {}, {}, outputs)
     captures: dict[tuple[str, int], _CaptureRecord] = {}
     for i, record in enumerate(get(results, "captures", list, "results.json")):
         where = f"results.json: captures[{i}]"
@@ -126,6 +136,8 @@ def _parse(manifest: JsonObject, results: JsonObject | None) -> _Run:
             where = f"results.json: sources[{i}]"
             key = (get(record, "role", str, where), get(record, "play", int, where))
             plays[key] = _play_record(record, where)
+            if key in outputs and outputs[key] not in OUTPUTS:
+                plays[key] = replace(plays[key], unplayed_frames=None)
     return _Run(
         tuple(roles),
         True,
@@ -133,6 +145,7 @@ def _parse(manifest: JsonObject, results: JsonObject | None) -> _Run:
         get_or_null(results, "failure", dict, "results.json"),
         captures,
         plays,
+        outputs,
     )
 
 
@@ -563,6 +576,16 @@ class _Report:
 
     def play(self, role: str, n: int) -> JsonObject:
         [aligned] = [p for p in self.aligned.plays if p.role == role and p.play == n]
+        output = self.run.outputs[(role, n)]
+        if output not in OUTPUTS:
+            self.unexamined(
+                "play_account",
+                "unknown_output_kind",
+                f"play {n} of {role} is on an output of kind {output!r}, which this "
+                "harness does not know: its unplayed_frames is not read",
+                role=role,
+                play=n,
+            )
         record = self.run.plays.get((role, n))
         if record is not None:
             self.play_record(role, n, record)
@@ -653,8 +676,9 @@ class _Report:
             return unmarked
         carried = aligned.carried
         assert carried is not None
-        start = _word(aligned, carried.start, record)
-        end = _word(aligned, carried.end, record)
+        kind = self.run.outputs[(role, n)]
+        start = _word(aligned, carried.start, record, kind)
+        end = _word(aligned, carried.end, record, kind)
         # TODO(alignment-not-measured-on-a-played-run)
         tried = [p for p in self.aligned.pairs if p.play is aligned and p.not_tried is None]
         outcomes: Counter[str] = Counter()
@@ -709,13 +733,18 @@ class _Report:
         }
 
 
-def _word(play: alignment.Play, span: Span, record: _PlayRecord | None) -> str:
+def _word(play: alignment.Play, span: Span, record: _PlayRecord | None, kind: str) -> str:
     """Whether the marker at `span` of the kept copy is expected in a capture:
     `not_handed` when alignment does not count it handed whole, else
-    `expected` or `unknown` from the play's record.
+    `expected` or `unknown` from the play's record and its output kind. Every
+    marker of a play with an underrun on a kind that may skip frames after one
+    is `unknown`: where the skipped frames lie is not known, and a sink's
+    report of an underrun can trail the server's running out by one write.
     """
     if not play.handed(span):
         return "not_handed"
+    if record is not None and record.underruns and kind not in PLAYS_ON_AFTER_UNDERRUN:
+        return "unknown"
     if record is None or record.ended == "completed":
         return "expected"
     handed, unplayed = record.frames_handed, record.unplayed_frames

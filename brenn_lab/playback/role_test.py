@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from brenn_lab import marker
-from brenn_lab.data import Check, Command, Event, Failure, Release, Reply
+from brenn_lab.data import Check, ClockReading, Command, Event, Failure, Release, Reply, now
 from brenn_lab.place import Place
 from brenn_lab.playback import role as role_module
 from brenn_lab.playback import source
@@ -30,7 +30,7 @@ from brenn_lab.playback.messages import (
 )
 from brenn_lab.playback.output import Attached, ControlName
 from brenn_lab.playback.role import PlaybackRole
-from brenn_lab.testing.fake_output import CARD, LIBRARY, FakeControl, FakeOutput
+from brenn_lab.testing.fake_output import CARD, LIBRARY, Armable, FakeControl, FakeOutput
 
 LEVEL = ControlName("PCM", 1)
 HELD = ControlName("PCM", 0)
@@ -76,10 +76,12 @@ class Bench:
         self.ended = threading.Event()
         # The sink raises on a play's end instead of taking it.
         self.refuse_end = False
+        # The role's clock raises instead of answering.
+        self.clock_broken = False
         self.local = NOON
         device = PlaybackDevice(
             output="alsa",
-            card="Fake",
+            selector="Fake",
             source_dir=str(self.sources),
             cap_mb=cap_mb,
             quiet_hours=quiet,
@@ -93,11 +95,17 @@ class Bench:
             self.output,
             self._sink,
             Place(self.data, tmp / "logs" / name, lambda _: None),
+            clock=self._clock,
             local_now=lambda: self.local,
         )
         self.dry_role = PlaybackRole(
             name, "bench", device, self.output, self._sink, None, local_now=lambda: self.local
         )
+
+    def _clock(self) -> ClockReading:
+        if self.clock_broken:
+            raise Unexpected("clock broke")
+        return now("bench")
 
     def _sink(self, event: Event) -> None:
         if self.refuse_end and isinstance(event.body, Ended | Failed):
@@ -582,6 +590,50 @@ def test_a_write_that_takes_nothing_at_first_fails_the_play(tmp_path: Path) -> N
     assert b.output.open_streams == 0 and not b.output.attached
 
 
+def test_a_buffer_that_never_plays_out_ends_the_play(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(role_module, "PLAY_OUT_GRACE_SECONDS", 0.2)
+    b = Bench(tmp_path, FakeOutput(fake_controls(), speed=1.0))
+    b.output.stuck = True
+    b.clip("a.wav", 0.3)
+    begun = time.monotonic()
+    started(b.play())
+    failed = b.wait_end()
+    waited = time.monotonic() - begun
+    assert isinstance(failed, Failed)
+    assert failed.failure.reason == "stream_died"
+    assert failed.failure.data == {"delay_frames": 4800}
+    assert "4800 frames left" in failed.failure.detail
+    # The deadline is the first delay read at the play's rate, plus the grace.
+    assert 0.5 <= waited < 5
+    assert (failed.frames_handed, failed.unplayed_frames) == (4800, 4800)
+    assert failed.restored
+    assert b.output.controls[LEVEL].values == list(channels(0))
+    stream = b.output.streams[0]
+    assert stream.dropped and stream.closed and not stream.drained
+    assert not b.output.attached
+    assert b.events == [Event("speaker", failed)]
+
+
+def test_a_stop_while_a_stuck_buffer_is_waited_on_is_stopped(tmp_path: Path) -> None:
+    b = Bench(tmp_path, FakeOutput(fake_controls(), speed=1.0))
+    b.output.stuck = True
+    b.clip("a.wav", 0.3)
+    started(b.play())
+    stream = b.output.streams[0]
+    deadline = time.monotonic() + 5
+    while stream.handed < 4800:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    stopped = b.send(Stop())
+    assert isinstance(stopped, Stopped)
+    assert (stopped.frames_handed, stopped.unplayed_frames) == (4800, 4800)
+    assert stopped.restored
+    assert stream.dropped and stream.closed
+    assert b.events == []
+
+
 def test_the_machine_zone_is_not_moved_by_tz(monkeypatch: pytest.MonkeyPatch) -> None:
     offsets = []
     try:
@@ -719,11 +771,26 @@ def test_an_error_on_the_first_write_closes_and_restores(tmp_path: Path) -> None
     assert not b.output.attached and b.events == []
 
 
+class Unexpected(Exception):
+    """An exception no output answers with."""
+
+
+def thread_raised(monkeypatch: pytest.MonkeyPatch) -> list[BaseException | None]:
+    raised: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: raised.append(args.exc_value))
+    return raised
+
+
+def join_play(b: Bench) -> None:
+    p = b.role._playing
+    assert p is not None and p.thread is not None
+    p.thread.join()
+
+
 def test_an_error_in_the_plays_thread_ends_it_and_restores(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    raised: list[BaseException | None] = []
-    monkeypatch.setattr(threading, "excepthook", lambda args: raised.append(args.exc_value))
+    raised = thread_raised(monkeypatch)
     b = Bench(tmp_path, FakeOutput(fake_controls(), speed=1.0))
     b.clip("a.wav", 5.0)
     raise_at_write(b, 3)
@@ -734,7 +801,7 @@ def test_an_error_in_the_plays_thread_ends_it_and_restores(
     assert failed.frames_handed == 2 * 1600 and failed.restored
     assert b.output.controls[LEVEL].values == list(channels(0))
     assert b.output.open_streams == 0 and not b.output.attached
-    b.role._playing.thread.join()  # type: ignore[union-attr]
+    join_play(b)
     assert [str(e) for e in raised] == ["the output broke"]
     assert reason(b.send(Stop())) == "not_playing"
 
@@ -743,14 +810,13 @@ def test_an_error_in_the_plays_thread_ends_it_and_restores(
 def test_an_end_that_could_not_be_reported_is_raised_by_the_next_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
-    raised: list[BaseException | None] = []
-    monkeypatch.setattr(threading, "excepthook", lambda args: raised.append(args.exc_value))
+    raised = thread_raised(monkeypatch)
     b = Bench(tmp_path)
     b.clip("a.wav", 0.2)
     b.refuse_end = True
     started(b.play())
     assert b.ended.wait(10)
-    b.role._playing.thread.join()  # type: ignore[union-attr]
+    join_play(b)
     assert [str(e) for e in raised] == ["the sink failed"]
     with pytest.raises(RuntimeError, match="before reporting its end") as error:
         b.send(
@@ -762,6 +828,323 @@ def test_an_end_that_could_not_be_reported_is_raised_by_the_next_command(
     assert b.output.open_streams == 0 and not b.output.attached
     # Raised once: the next command finds no play.
     assert b.send(Release()) == Released(stopped=None)
+
+
+def raised_once(raised: list[BaseException | None], call: Armable) -> None:
+    [error] = raised
+    assert isinstance(error, Unexpected) and str(error) == f"{call} broke"
+
+
+def plays_again(b: Bench) -> None:
+    """The role answers its next `check`, and its next play runs to its end."""
+    assert isinstance(b.send(Check()), Checked)
+    b.ended.clear()
+    b.clip("b.wav", 0.2)
+    started(b.play("b.wav"))
+    assert isinstance(b.wait_end(), Ended)
+
+
+@pytest.mark.parametrize("call", ["delay", "drop", "close", "read", "set", "detach"])
+def test_a_raise_while_a_cut_play_ends_still_ends_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, call: Armable
+) -> None:
+    raised = thread_raised(monkeypatch)
+    b = Bench(tmp_path, FakeOutput(fake_controls(), speed=1.0))
+    b.clip("a.wav", 5.0)
+
+    # The failed write cuts the play at once: the role's next call of any of
+    # the six is the one in the play's end.
+    def on_write(n: int) -> None:
+        if n == 3:
+            b.output.errors = 1
+            b.output.raises[call] = Unexpected(f"{call} broke")
+
+    b.output.on_write = on_write
+    started(b.play())
+    failed = b.wait_end()
+    assert isinstance(failed, Failed)
+    assert failed.failure.reason == "stream_died"
+    assert (
+        failed.failure.detail == f"write error; ending the play raised Unexpected('{call} broke')"
+    )
+    assert b.output.raised == [call]
+    restores = call not in ("read", "set")
+    assert failed.restored is restores
+    if restores:
+        assert b.output.controls[LEVEL].values == list(channels(0))
+    else:
+        assert b.output.controls[LEVEL].values == list(channels(-1800))
+    assert (failed.unplayed_frames is None) is (call == "delay")
+    assert not b.output.attached
+    join_play(b)
+    raised_once(raised, call)
+    plays_again(b)
+
+
+def cut_and_arm(b: Bench, *calls: Armable, clock: bool = False) -> None:
+    """Fail the third write and arm `calls`, and the clock when `clock`, in
+    the same `on_write`: their next occurrences are in the play's end.
+    """
+
+    def on_write(n: int) -> None:
+        if n == 3:
+            b.output.errors = 1
+            for call in calls:
+                b.output.raises[call] = Unexpected(f"{call} broke")
+            b.clock_broken = clock
+
+    b.output.on_write = on_write
+
+
+def test_every_raise_while_a_play_ends_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raised = thread_raised(monkeypatch)
+    b = Bench(tmp_path, FakeOutput(fake_controls(), speed=1.0))
+    b.clip("a.wav", 5.0)
+    cut_and_arm(b, "delay", "set")
+    started(b.play())
+    failed = b.wait_end()
+    assert isinstance(failed, Failed)
+    assert failed.failure == Failure(
+        "stream_died",
+        "write error; ending the play raised Unexpected('delay broke'), Unexpected('set broke')",
+    )
+    assert not failed.restored and failed.unplayed_frames is None
+    join_play(b)
+    raised_once(raised, "delay")
+    assert raised[0] is not None
+    assert raised[0].__notes__ == ["ending the play also raised Unexpected('set broke')"]
+    plays_again(b)
+
+
+def test_a_clock_that_raises_after_an_earlier_step_is_named_by_the_next_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raised = thread_raised(monkeypatch)
+    b = Bench(tmp_path, FakeOutput(fake_controls(), speed=1.0))
+    b.clip("a.wav", 5.0)
+    cut_and_arm(b, "close", clock=True)
+    started(b.play())
+    p = b.role._playing
+    assert p is not None
+    assert p.done.wait(10)
+    join_play(b)
+    b.clock_broken = False
+    raised_once(raised, "close")
+    assert not any(isinstance(e.body, Ended | Failed) for e in b.events)
+    assert b.output.controls[LEVEL].values == list(channels(0))
+    assert not b.output.attached
+    with pytest.raises(RuntimeError, match="before reporting its end") as error:
+        b.send(Release())
+    assert error.value.__cause__ is raised[0]
+    assert raised[0] is not None
+    assert raised[0].__notes__ == ["ending the play also raised Unexpected('clock broke')"]
+    plays_again(b)
+
+
+def test_a_play_that_drained_and_whose_restoration_raised_is_role_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raised = thread_raised(monkeypatch)
+    b = Bench(tmp_path, FakeOutput(fake_controls(), speed=1.0))
+    b.clip("a.wav", 0.5)
+    started(b.play())
+    # The play's thread makes no set before the restoration.
+    b.output.raises["set"] = Unexpected("set broke")
+    failed = b.wait_end()
+    assert isinstance(failed, Failed)
+    assert failed.failure == Failure("role_error", "ending the play raised Unexpected('set broke')")
+    assert failed.unplayed_frames == 0 and not failed.restored
+    assert b.output.streams[0].drained and not b.output.attached
+    join_play(b)
+    raised_once(raised, "set")
+    plays_again(b)
+
+
+def test_a_stop_whose_end_raised_is_not_playing_and_the_end_is_the_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raised = thread_raised(monkeypatch)
+    b = Bench(tmp_path, FakeOutput(fake_controls(), speed=1.0))
+    b.clip("a.wav", 5.0)
+    # Only the end of a play drops.
+    b.output.raises["drop"] = Unexpected("drop broke")
+    started(b.play())
+    assert reason(b.send(Stop())) == "not_playing"
+    failed = b.wait_end()
+    assert isinstance(failed, Failed)
+    assert failed.failure.reason == "role_error" and failed.restored
+    assert b.output.controls[LEVEL].values == list(channels(0))
+    assert not b.output.attached
+    raised_once(raised, "drop")
+    plays_again(b)
+
+
+def test_a_raise_ending_a_play_that_did_not_begin_is_raised_from_the_command(
+    tmp_path: Path,
+) -> None:
+    output = Stubborn(fake_controls())
+    output.extra_mb = 10
+    b = Bench(tmp_path, output)
+    b.clip("a.wav", 0.2)
+    # The stream is closed, and the output detached, nowhere else on the way
+    # to a refused read-back.
+    output.raises["close"] = Unexpected("close broke")
+    output.raises["detach"] = Unexpected("detach broke")
+    with pytest.raises(Unexpected, match="close broke") as error:
+        b.play()
+    also, began = error.value.__notes__
+    assert also == "ending the play also raised Unexpected('detach broke')"
+    assert began.startswith("the play did not begin: controls: ")
+    assert output.raised == ["close", "detach"]
+    assert output.controls[LEVEL].values == list(channels(0))
+    assert not output.attached and output.writes == 0 and b.events == []
+    assert isinstance(b.send(Check()), Checked)
+
+
+def test_a_raise_in_the_first_move_restores_what_it_wrote(tmp_path: Path) -> None:
+    # Found below the play's level: the move raises the level, then raises
+    # in the held control's write.
+    b = Bench(tmp_path, FakeOutput(fake_controls(values=list(channels(-3000)))))
+    b.clip("a.wav", 0.2)
+    armed = False
+
+    def arm(control: ControlName, _: tuple[Channel, ...]) -> bool:
+        nonlocal armed
+        if control == LEVEL and not armed:
+            armed = True
+            b.output.raises["set"] = Unexpected("set broke")
+        return False
+
+    b.output.refuse = arm
+    with pytest.raises(Unexpected, match="set broke"):
+        b.play()
+    assert b.output.raised == ["set"]
+    assert b.output.states[0][LEVEL] == channels(-1800)
+    assert b.output.controls[LEVEL].values == list(channels(-3000))
+    assert b.output.controls[HELD].values == list(channels(0))
+    assert b.output.open_streams == 0 and b.output.writes == 0
+    assert not b.output.attached and b.events == []
+    assert isinstance(b.send(Check()), Checked)
+
+
+def test_a_raise_in_the_first_write_carries_what_ending_the_play_raised(
+    tmp_path: Path,
+) -> None:
+    b = Bench(tmp_path)
+    b.clip("a.wav", 0.2)
+    raise_at_write(b, 1)
+    # The stream is closed nowhere before the play's end.
+    b.output.raises["close"] = Unexpected("close broke")
+    with pytest.raises(RuntimeError, match="the output broke") as error:
+        b.play()
+    assert error.value.__notes__ == ["ending the play also raised Unexpected('close broke')"]
+    assert b.output.controls[LEVEL].values == list(channels(0))
+    assert not b.output.attached and b.events == []
+    b.output.on_write = None
+    plays_again(b)
+
+
+def test_a_thread_that_cannot_start_ends_the_play(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = Bench(tmp_path)
+    b.clip("a.wav", 0.2)
+
+    def refuse(_: threading.Thread) -> None:
+        raise Unexpected("start broke")
+
+    with monkeypatch.context() as m:
+        m.setattr(threading.Thread, "start", refuse)
+        with pytest.raises(Unexpected, match="start broke"):
+            b.play()
+    assert b.output.controls[LEVEL].values == list(channels(0))
+    assert b.output.open_streams == 0 and b.output.streams[0].dropped
+    assert not b.output.attached and b.events == []
+    plays_again(b)
+
+
+class Unprintable(Exception):
+    """An exception whose `repr` raises."""
+
+    def __repr__(self) -> str:
+        raise ValueError("no repr")
+
+
+class UnprintableOSError(OSError):
+    """An `OSError` whose `str` raises."""
+
+    def __str__(self) -> str:
+        raise ValueError("no str")
+
+
+@pytest.mark.parametrize("kind", [Unprintable, UnprintableOSError])
+def test_an_exception_that_cannot_be_named_still_ends_the_play(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: type[Exception]
+) -> None:
+    raised = thread_raised(monkeypatch)
+    b = Bench(tmp_path, FakeOutput(fake_controls(), speed=1.0))
+    b.clip("a.wav", 5.0)
+
+    def on_write(n: int) -> None:
+        if n == 3:
+            b.output.raises["close"] = Unprintable()
+            raise kind()
+
+    b.output.on_write = on_write
+    started(b.play())
+    failed = b.wait_end()
+    assert isinstance(failed, Failed)
+    assert failed.failure.reason == "role_error"
+    assert "ending the play raised <Unprintable whose repr raised>" in failed.failure.detail
+    assert failed.restored and b.output.controls[LEVEL].values == list(channels(0))
+    assert not b.output.attached
+    join_play(b)
+    assert len(raised) == 1
+    plays_again(b)
+
+
+@pytest.mark.parametrize("refuse_end", [False, True])
+def test_a_thread_error_carries_what_ending_the_play_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refuse_end: bool
+) -> None:
+    raised = thread_raised(monkeypatch)
+    b = Bench(tmp_path, FakeOutput(fake_controls(), speed=1.0))
+    b.clip("a.wav", 5.0)
+    b.refuse_end = refuse_end
+    thread_error = Unexpected("thread broke")
+
+    def on_write(n: int) -> None:
+        if n == 3:
+            b.output.raises["set"] = Unexpected("set broke")
+            raise thread_error
+
+    b.output.on_write = on_write
+    started(b.play())
+    assert b.ended.wait(10)
+    join_play(b)
+    [error] = raised
+    assert error is not None
+    if not refuse_end:
+        failed = b.wait_end()
+        assert isinstance(failed, Failed)
+        assert failed.failure == Failure(
+            "role_error",
+            "the play's thread raised Unexpected('thread broke'); "
+            "ending the play raised Unexpected('set broke')",
+        )
+        assert error is thread_error
+        assert error.__notes__ == ["ending the play also raised Unexpected('set broke')"]
+        plays_again(b)
+        return
+    # The sink's exception is raised on, from the thread's, carrying the set's.
+    assert str(error) == "the sink failed" and error.__cause__ is thread_error
+    assert error.__notes__ == ["ending the play also raised Unexpected('set broke')"]
+    assert not b.output.attached
+    with pytest.raises(RuntimeError, match="before reporting its end") as next_error:
+        b.send(Release())
+    assert next_error.value.__cause__ is error
 
 
 def test_a_dry_play_and_stop(tmp_path: Path) -> None:

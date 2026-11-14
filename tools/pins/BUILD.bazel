@@ -1,8 +1,9 @@
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
-# Holds two pins: the Python version, which lives in four files, equal; and
+# Holds three pins: the Python version, which lives in four files, equal;
 # every use of the brenn-pod commit, the transcripts' README included, to the
-# one constant in MODULE.bazel.
+# one constant in MODULE.bazel; and the pulseaudio crate's version the sink
+# client reports to the one the crate hub pins.
 sh_test(
     name = "pins_test",
     size = "small",
@@ -11,6 +12,7 @@ sh_test(
         "//:MODULE.bazel",
         "//:mypy.ini",
         "//:ruff.toml",
+        "//brenn_lab/playback/pulse_client:BUILD.bazel",
         "//brenn_lab/testing:transcripts/README.md",
         "//tools/mypy:BUILD.bazel",
     ],
@@ -18,6 +20,7 @@ sh_test(
         "MODULE_BAZEL": "$(rlocationpath //:MODULE.bazel)",
         "MYPY_BUILD": "$(rlocationpath //tools/mypy:BUILD.bazel)",
         "MYPY_INI": "$(rlocationpath //:mypy.ini)",
+        "PULSE_CLIENT_BUILD": "$(rlocationpath //brenn_lab/playback/pulse_client:BUILD.bazel)",
         "RUFF_TOML": "$(rlocationpath //:ruff.toml)",
         "TRANSCRIPTS_README": "$(rlocationpath //brenn_lab/testing:transcripts/README.md)",
     },

@@ -17,6 +17,7 @@ from brenn_lab.playback.device import HeldControl, PlaybackDevice
 from brenn_lab.playback.messages import Channel, Checked
 from brenn_lab.playback.output import ControlName
 from brenn_lab.playback.role import PlaybackRole
+from brenn_lab.sound import CardIdentity
 
 CARD = "Flex XVF3800 L16K6Ch"
 USB_ID = "2886:0022"
@@ -110,7 +111,7 @@ def mixer_now() -> dict[ControlName, tuple[Channel, ...]]:
 def test_check_on_the_flex_names_it_reads_its_controls_and_touches_nothing() -> None:
     device = PlaybackDevice(
         output="alsa",
-        card=CARD,
+        selector=CARD,
         source_dir="/",
         cap_mb=-2400,
         quiet_hours=(),
@@ -128,6 +129,7 @@ def test_check_on_the_flex_names_it_reads_its_controls_and_touches_nothing() -> 
     assert output.touched == [] and events == []
 
     d = checked.device
+    assert isinstance(d, CardIdentity), d
     assert d.usb_id == USB_ID
     assert CARD.lower() in d.card_name.lower() or CARD.lower() in d.card_long_name.lower()
     assert d.pcm == f"hw:{d.card_index},0"

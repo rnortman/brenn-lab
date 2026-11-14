@@ -11,6 +11,9 @@ from brenn_lab.config_table import Table
 from brenn_lab.playback.limits import QuietMinutes, parse_clock
 from brenn_lab.playback.output import OUTPUTS, ControlName
 
+SINK_LEVEL = ControlName("sink", 0)
+"""The one control of a sound server's sink: its volume and mute."""
+
 
 @dataclass(frozen=True)
 class HeldControl:
@@ -24,12 +27,13 @@ class HeldControl:
 
 @dataclass(frozen=True)
 class PlaybackDevice:
-    """Which output and card to play through, where sources are read from,
-    the cap and quiet hours, the control a play sets and the controls held.
+    """Which output to play through and the selector of its device (`card`
+    for `alsa`, `sink` for `pulse`), where sources are read from, the cap and
+    quiet hours, the control a play sets and the controls held.
     """
 
     output: str
-    card: str
+    selector: str
     source_dir: str
     cap_mb: int
     quiet_hours: tuple[QuietMinutes, ...]
@@ -38,35 +42,54 @@ class PlaybackDevice:
 
 
 def read_device(table: Table) -> PlaybackDevice | None:
-    """The parameters in `table`, or None with every problem recorded in it."""
+    """The parameters in `table`, or None with every problem recorded in it.
+    `alsa` reads `card`, `level` and `held`; `pulse` reads `sink`, its level
+    is the sink's control and it holds none. A key of the other kind is
+    `unknown_key`; with no known `output`, no key is judged unknown.
+    """
     before = len(table.problems)
     output = table.string("output")
     if output is not None and output not in OUTPUTS:
         table.problem("output", "bad_value", f"known outputs: {list(OUTPUTS)}")
-    card = table.string("card")
-    if card == "":
-        table.problem("card", "bad_value", "must not be empty")
+    selector = None
+    level: ControlName | None = None
+    held: tuple[HeldControl, ...] | None = None
+    if output == "alsa":
+        selector = _selector(table, "card")
+        level_table = table.table("level")
+        level = None if level_table is None else _control(level_table)
+        if level_table is not None:
+            level_table.done()
+        held = _held(table)
+        if level is not None and held is not None:
+            names = [level, *(h.control for h in held)]
+            if len(set(names)) != len(names):
+                table.problem("held", "bad_value", "a control is named more than once")
+    elif output == "pulse":
+        selector = _selector(table, "sink")
+        level, held = SINK_LEVEL, ()
     source_dir = table.string("source_dir")
     if source_dir is not None and not posixpath.isabs(source_dir):
         table.problem("source_dir", "bad_value", "must be an absolute path")
     cap_mb = table.integer("cap_mb")
     quiet_hours = _quiet_hours(table)
-    level_table = table.table("level")
-    level = None if level_table is None else _control(level_table)
-    if level_table is not None:
-        level_table.done()
-    held = _held(table)
-    if level is not None and held is not None:
-        names = [level, *(h.control for h in held)]
-        if len(set(names)) != len(names):
-            table.problem("held", "bad_value", "a control is named more than once")
-    table.done()
+    if output in OUTPUTS:
+        # Which other keys are unknown depends on the kind.
+        table.done()
     if len(table.problems) != before:
         return None
-    assert output is not None and card is not None and source_dir is not None
+    assert output is not None and selector is not None and source_dir is not None
     assert cap_mb is not None and quiet_hours is not None
     assert level is not None and held is not None
-    return PlaybackDevice(output, card, source_dir, cap_mb, quiet_hours, level, held)
+    return PlaybackDevice(output, selector, source_dir, cap_mb, quiet_hours, level, held)
+
+
+def _selector(table: Table, key: str) -> str | None:
+    value = table.string(key)
+    if value == "":
+        table.problem(key, "bad_value", "must not be empty")
+        return None
+    return value
 
 
 def _quiet_hours(table: Table) -> tuple[QuietMinutes, ...] | None:

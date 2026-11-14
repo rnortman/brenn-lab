@@ -9,6 +9,7 @@ it was asked to stop, if a control it holds moved or if quiet hours began.
 
 import datetime
 import threading
+import time
 import wave
 import zoneinfo
 from collections.abc import Callable
@@ -66,6 +67,9 @@ PERIOD_SECONDS = 0.02
 BUFFER_SECONDS = 0.5
 MAX_RECOVERIES = 8
 """Consecutive recoveries without a successful write after which a play ends."""
+PLAY_OUT_GRACE_SECONDS = 2.0
+"""How long past the time its first reading of the delay gave a play's
+buffer may take to play out before the play ends."""
 
 
 @dataclass(frozen=True)
@@ -109,7 +113,7 @@ class _Playing:
     done: threading.Event = field(default_factory=threading.Event)
     stopped: Stopped | None = None
     thread: threading.Thread | None = None
-    # What `_finish` raised in the thread, which then reported no end.
+    # What `_finish` raised in the thread when it could report no end.
     error: BaseException | None = None
 
 
@@ -321,6 +325,12 @@ class PlaybackRole:
         read = self._read_all()
         if isinstance(read, Failure):
             return None, read
+        return read, self._write(read, targets)
+
+    def _write(
+        self, read: tuple[Control, ...], targets: tuple[tuple[Channel, ...], ...]
+    ) -> Failure | None:
+        """`_move`'s writes, from the controls as `read`: the first failure met."""
         failure: Failure | None = None
         for control, target in zip(read, targets, strict=True):
             lowering = _lowering(control.channels, target)
@@ -329,12 +339,12 @@ class PlaybackRole:
                 if failure is None:
                     failure = refused
         if failure is not None:
-            return read, failure
+            return failure
         for n, target in zip(self._named, targets, strict=True):
             refused = self._output.set(n.control, target)
             if failure is None:
                 failure = refused
-        return read, failure
+        return failure
 
     def _targets(self, j: _Judged, volume_mb: int) -> tuple[tuple[Channel, ...], ...]:
         """What a play sets: the level control to `volume_mb`, each held
@@ -507,7 +517,9 @@ class PlaybackRole:
         """Keep the copy, open, set the controls, hand the first chunk over and
         start the thread that hands over the rest. Every way out before the
         stream is open detaches; every way out after it, short of the thread
-        taking the play over, goes through `_finish`.
+        taking the play over, goes through `_finish`. What ending such a play
+        raised is raised on, unless something is already being raised, which
+        then carries it as a note.
         """
         try:
             p = self._prepare(j, place)
@@ -520,18 +532,25 @@ class PlaybackRole:
         thread = threading.Thread(
             target=self._run, args=(p,), name=f"playback-{self._name}-{p.n}", daemon=True
         )
-        handed = False
         try:
             started = self._first(p, j, play.volume_mb)
-            if isinstance(started, Failure):
-                return started
-            p.thread = thread
+        except BaseException as e:
+            _carrying(e, self._finish(p, None))
+            raise
+        if isinstance(started, Failure):
+            kept = self._finish(p, None)
+            if kept:
+                raised = _carrying(kept[0], kept)
+                raised.add_note(f"the play did not begin: {started.reason}: {started.detail}")
+                raise raised
+            return started
+        p.thread = thread
+        try:
             thread.start()
-            handed = True
-        finally:
-            if not handed:
-                p.thread = None
-                self._finish(p, None)
+        except BaseException as e:
+            p.thread = None
+            _carrying(e, self._finish(p, None))
+            raise
         self._playing = p
         return started
 
@@ -570,12 +589,16 @@ class PlaybackRole:
 
     def _first(self, p: _Playing, j: _Judged, volume_mb: int) -> Started | Failure:
         """Set the controls, what the move read being what was found, and
-        hand the first chunk over.
+        hand the first chunk over. What was found is kept before anything is
+        written, so the end of a play whose move raised restores it.
         """
-        p.found, failure = self._move(self._targets(j, volume_mb))
+        found = self._read_all()
+        if isinstance(found, Failure):
+            return found
+        p.found = found
+        failure = self._write(found, self._targets(j, volume_mb))
         if failure is not None:
             return failure
-        assert p.found is not None
         controls = self._read_back(volume_mb)
         if isinstance(controls, Failure):
             return controls
@@ -710,10 +733,15 @@ class PlaybackRole:
     def _run(self, p: _Playing) -> None:
         """Hand the rest of the copy over and play the buffer out. Every way
         out of the thread goes through `_finish`; an exception nothing here
-        names ends the play with `role_error` and is raised on.
+        names ends the play with `role_error` and is raised on, as is the
+        first one ending the play raised; whichever is raised carries every
+        other that ending the play raised as a note.
         """
         failure: Failure | None = None
         ended = False
+        error: BaseException | None = None
+        # The outer handler takes whatever the inner ones raise, and raises
+        # nothing itself, so every way out reaches `_finish`.
         try:
             try:
                 self._play_out(p)
@@ -726,59 +754,114 @@ class PlaybackRole:
                 failure = cut.failure
             except OSError as e:
                 failure = Failure("role_io", f"the kept copy could not be read: {e}")
-            except BaseException as e:
-                failure = Failure("role_error", f"the play's thread raised {e!r}")
-                raise
+        except BaseException as e:
+            failure = Failure("role_error", f"the play's thread raised {_repr(e)}")
+            error = e
+        try:
+            kept = self._finish(p, failure, ended)
+        except BaseException as e:
+            # The role's clock or the event's sink raised, so no end reaches
+            # the play's record, which keeps `ended` and `restored` null. `e`
+            # is the sink's exception or the first that ending the play
+            # raised, and carries every other, the clock's included, as a
+            # note. The controls were restored and the output let go before.
+            # TODO(errhandling-assessment-refuses-runner-written-null-ended)
+            p.error = e
+            if error is not None:
+                raise e from error
+            raise
         finally:
-            try:
-                self._finish(p, failure, ended)
-            except BaseException as e:
-                # No end reaches the play's record, which keeps `ended` and
-                # `restored` null.
-                # TODO(errhandling-assessment-refuses-runner-written-null-ended)
-                p.error = e
-                raise
-            finally:
-                p.done.set()
+            p.done.set()
+        if error is not None:
+            raise _carrying(error, kept)
+        if kept:
+            raise _carrying(kept[0], kept)
 
     def _play_out(self, p: _Playing) -> None:
+        """Hand the rest over, then wait for the output's delay to reach 0.
+        The first delay above 0 sets a deadline, that delay at the play's
+        rate plus `PLAY_OUT_GRACE_SECONDS`, which nothing moves; a delay
+        still above 0 at the deadline ends the play with `stream_died`.
+        """
         chunk = _chunk_frames(p.rate_hz)
         while data := p.reader.readframes(chunk):
             self._between(p)
             self._hand_over(p, data)
+        deadline: float | None = None
+        started = time.monotonic()
         while True:
             self._between(p)
             delay = p.stream.delay()
             if delay is None or delay <= 0:
                 return
-            p.stop.wait(min(CHUNK_SECONDS, delay / p.rate_hz))
+            at = time.monotonic()
+            if deadline is None:
+                deadline = at + delay / p.rate_hz + PLAY_OUT_GRACE_SECONDS
+            elif at >= deadline:
+                raise _Cut(
+                    Failure(
+                        "stream_died",
+                        f"the output did not play its buffer out: {delay} frames left "
+                        f"after {at - started:.1f} s",
+                        {"delay_frames": delay},
+                    )
+                )
+            p.stop.wait(min(CHUNK_SECONDS, delay / p.rate_hz, max(0.0, deadline - at)))
 
-    def _finish(self, p: _Playing, failure: Failure | None, ended: bool = False) -> None:
-        """Close the stream, restore the controls, and report how the play
-        ended: an `Ended` or `Failed` event, or the `Stopped` a stop gets.
+    def _finish(
+        self, p: _Playing, failure: Failure | None, ended: bool = False
+    ) -> list[BaseException]:
+        """Close the stream, restore the controls, let the output go, and
+        report how the play ended: an `Ended` or `Failed` event, or the
+        `Stopped` a stop gets. Each step is made whatever an earlier one
+        raised. A play whose ending raised is reported `Failed`: with the
+        failure that ended it, the exceptions added to its detail, or else
+        `role_error`. Returns every exception a step raised, in order, once
+        the end is reported; a play the thread has not taken over reports
+        nothing. Raises when no end can be reported, the clock or the event's
+        sink having raised: the first exception a step raised, or the sink's,
+        carrying every other as a note.
         """
-        unplayed = 0 if ended else p.stream.delay()
+        kept: list[BaseException] = []
+        unplayed = 0 if ended else _attempt(kept, p.stream.delay)
         if not ended:
-            p.stream.drop()
-        p.stream.close()
-        p.reader.close()
-        end = self._clock()
-        # A play whose first read failed set nothing, so has nothing to restore.
-        restored = p.found is None or self._restore(p.found)
-        self._output.detach()
+            _attempt(kept, p.stream.drop)
+        _attempt(kept, p.stream.close)
+        _attempt(kept, p.reader.close)
+        end = _attempt(kept, self._clock)
+        # A play whose first read failed or raised set nothing, so has nothing
+        # to restore.
+        found = p.found
+        restored = found is None or _attempt(kept, lambda: self._restore(found)) is True
+        _attempt(kept, self._output.detach)
         if p.thread is None:
-            return
+            return kept
+        if end is None:
+            raise _carrying(kept[0], kept)
         last = p.last
         assert last is not None
-        if ended:
-            assert unplayed is not None
-            self._report(Ended(p.n, p.frames_handed, unplayed, p.underruns, last, end, restored))
-        elif failure is None:
-            p.stopped = Stopped(p.n, p.frames_handed, unplayed, p.underruns, last, end, restored)
-        else:
-            self._report(
-                Failed(p.n, failure, p.frames_handed, unplayed, p.underruns, last, end, restored)
-            )
+        if kept:
+            failure = _ended_by(failure, kept)
+        try:
+            if failure is not None:
+                self._report(
+                    Failed(
+                        p.n, failure, p.frames_handed, unplayed, p.underruns, last, end, restored
+                    )
+                )
+            elif ended:
+                assert unplayed is not None
+                self._report(
+                    Ended(p.n, p.frames_handed, unplayed, p.underruns, last, end, restored)
+                )
+            else:
+                p.stopped = Stopped(
+                    p.n, p.frames_handed, unplayed, p.underruns, last, end, restored
+                )
+        except BaseException as e:
+            _carrying(e, kept)
+            raise
+        return kept
 
 
 LOCALTIME = Path("/etc/localtime")
@@ -794,6 +877,42 @@ def machine_zone(path: Path = LOCALTIME) -> datetime.tzinfo:
             return zoneinfo.ZoneInfo.from_file(file, key=str(path))
     except FileNotFoundError:
         return datetime.UTC
+
+
+def _attempt[T](kept: list[BaseException], step: Callable[[], T]) -> T | None:
+    """`step`'s result; None, with the exception added to `kept`, when it raised."""
+    try:
+        return step()
+    except BaseException as e:
+        kept.append(e)
+        return None
+
+
+def _carrying(error: BaseException, kept: list[BaseException]) -> BaseException:
+    """`error`, with a note naming each exception in `kept` other than it."""
+    for e in kept:
+        if e is not error:
+            error.add_note(f"ending the play also raised {_repr(e)}")
+    return error
+
+
+def _repr(e: BaseException) -> str:
+    """`e`'s `repr`, or its type's name when that `repr` raised."""
+    try:
+        return repr(e)
+    except BaseException:
+        return f"<{type(e).__qualname__} whose repr raised>"
+
+
+def _ended_by(failure: Failure | None, kept: list[BaseException]) -> Failure:
+    """The failure of a play whose ending raised the exceptions in `kept`:
+    the one that had ended it, with the exceptions in its detail, or else
+    `role_error`.
+    """
+    raised = f"ending the play raised {', '.join(_repr(e) for e in kept)}"
+    if failure is None:
+        return Failure("role_error", raised)
+    return Failure(failure.reason, f"{failure.detail}; {raised}", failure.data)
 
 
 def _chunk_frames(rate_hz: int) -> int:

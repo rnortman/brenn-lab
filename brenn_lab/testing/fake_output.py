@@ -3,16 +3,21 @@ mixer whose controls tests can move, and a stream that takes frames at its
 rate, sped up by `speed`, keeping every frame it was handed.
 
 Faults are queued by tests: `underruns` and `errors` make the coming writes
-fail, `stalls` makes them take no frames, `read_failure` is what every
+fail, `stalls` makes them take no frames, `stuck` stops the stream playing
+what it holds, `read_failure` is what every
 mixer read returns while it is set, `refuse` chooses mixer writes that fail,
 and `gone` makes every later call fail as a device that went away does. Every
-mixer write is recorded with the controls' values after it.
+mixer write is recorded with the controls' values after it. `raises` names a
+call (the stream's `delay`, `drop` or `close`, the output's `read`, `set` or
+`detach`) and an exception its next occurrence raises, once; `raised` records
+each call that raised one.
 """
 
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
 from brenn_lab.data import Failure
 from brenn_lab.playback.messages import Channel, Library, VolumeRange
@@ -28,6 +33,9 @@ CARD = CardIdentity(
     usb_id=None,
 )
 LIBRARY = Library("fake", "1.0")
+
+# The calls `raises` can name.
+type Armable = Literal["delay", "drop", "close", "read", "set", "detach"]
 
 
 @dataclass
@@ -77,7 +85,7 @@ class FakeStream:
 
     def _advance(self) -> None:
         t = time.monotonic()
-        if self._at is not None:
+        if self._at is not None and not self._output.stuck:
             self.played = min(float(self.handed), self.played + (t - self._at) * self._rate)
         self._at = t
 
@@ -118,6 +126,7 @@ class FakeStream:
         return None
 
     def delay(self) -> int | None:
+        self._output.raise_if_named("delay")
         if self._output.gone:
             return None
         self._advance()
@@ -130,9 +139,11 @@ class FakeStream:
         return None
 
     def drop(self) -> None:
+        self._output.raise_if_named("drop")
         self.dropped = True
 
     def close(self) -> None:
+        self._output.raise_if_named("close")
         self.closed = True
         self._output.open_streams -= 1
 
@@ -160,6 +171,7 @@ class FakeOutput:
         self.underruns = 0
         self.errors = 0
         self.stalls = 0
+        self.stuck = False
         self.read_failure: Failure | None = None
         self.gone = False
         self.busy = False
@@ -177,6 +189,16 @@ class FakeOutput:
         # Every control's values after each `set`, a refused one included.
         self.states: list[dict[ControlName, tuple[Channel, ...]]] = []
         self.streams: list[FakeStream] = []
+        self.raises: dict[Armable, BaseException] = {}
+        self.raised: list[Armable] = []
+
+    def raise_if_named(self, call: Armable) -> None:
+        with self.lock:
+            error = self.raises.pop(call, None)
+            if error is None:
+                return
+            self.raised.append(call)
+        raise error
 
     def attach(self) -> Attached | Failure:
         if self.attach_failure is not None:
@@ -188,6 +210,7 @@ class FakeOutput:
 
     def detach(self) -> None:
         self.attached = False
+        self.raise_if_named("detach")
 
     def elements(self) -> tuple[Element, ...] | Failure:
         assert self.attached
@@ -195,6 +218,7 @@ class FakeOutput:
 
     def read(self, controls: Sequence[ControlName]) -> tuple[tuple[Channel, ...], ...] | Failure:
         assert self.attached
+        self.raise_if_named("read")
         if self.gone:
             return Failure("stream_died", "no such device")
         if self.read_failure is not None:
@@ -204,6 +228,7 @@ class FakeOutput:
 
     def set(self, control: ControlName, channels: tuple[Channel, ...]) -> Failure | None:
         assert self.attached
+        self.raise_if_named("set")
         if self.gone:
             return Failure("stream_died", "no such device")
         self.sets.append((control, channels))

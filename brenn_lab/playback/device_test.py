@@ -3,7 +3,7 @@ import tomllib
 import pytest
 
 from brenn_lab.config_table import ConfigProblem, Table
-from brenn_lab.playback.device import HeldControl, PlaybackDevice, read_device
+from brenn_lab.playback.device import SINK_LEVEL, HeldControl, PlaybackDevice, read_device
 from brenn_lab.playback.limits import QuietMinutes
 from brenn_lab.playback.output import ControlName
 
@@ -47,7 +47,7 @@ def test_a_full_device() -> None:
     assert problems == []
     assert device == PlaybackDevice(
         output="alsa",
-        card="Flex XVF3800",
+        selector="Flex XVF3800",
         source_dir="/data/lab/sources",
         cap_mb=-2400,
         quiet_hours=(QuietMinutes(1320, 420), QuietMinutes(720, 750)),
@@ -87,8 +87,9 @@ def test_no_level_control_is_missing() -> None:
 @pytest.mark.parametrize(
     ("old", "new", "expected"),
     [
-        ('output = "alsa"', 'output = "pulse"', ("output", "bad_value")),
+        ('output = "alsa"', 'output = "jack"', ("output", "bad_value")),
         ('card = "Flex XVF3800"', 'card = ""', ("card", "bad_value")),
+        ('card = "Flex XVF3800"', 'card = "Flex XVF3800"\nsink = "Desk"', ("sink", "unknown_key")),
         ('source_dir = "/data/lab/sources"', 'source_dir = "sources"', ("source_dir", "bad_value")),
         ("cap_mb = -2400", "cap_mb = -24.0", ("cap_mb", "wrong_type")),
         ("cap_mb = -2400", 'cap_mb = "-2400"', ("cap_mb", "wrong_type")),
@@ -132,6 +133,60 @@ def test_a_bad_value(old: str, new: str, expected: tuple[str, str]) -> None:
 def test_held_must_be_tables() -> None:
     text = GOOD.split("[[held]]")[0].replace("cap_mb = -2400", 'cap_mb = -2400\nheld = ["PCM"]')
     assert problems_of(text) == {("held", "wrong_type")}
+
+
+PULSE = """
+output = "pulse"
+sink = "Desk Speaker"
+source_dir = "/data/lab/sources"
+cap_mb = -2400
+quiet_hours = [["22:00", "07:00"]]
+"""
+
+
+def test_a_sink_device() -> None:
+    device, problems = read(PULSE)
+    assert problems == []
+    assert device == PlaybackDevice(
+        output="pulse",
+        selector="Desk Speaker",
+        source_dir="/data/lab/sources",
+        cap_mb=-2400,
+        quiet_hours=(QuietMinutes(1320, 420),),
+        level=SINK_LEVEL,
+        held=(),
+    )
+    assert SINK_LEVEL == ControlName("sink", 0)
+
+
+@pytest.mark.parametrize("key", ["sink", "source_dir", "cap_mb", "quiet_hours"])
+def test_a_sink_device_without_a_required_key(key: str) -> None:
+    text = "\n".join(line for line in PULSE.splitlines() if not line.startswith(f"{key} ="))
+    assert problems_of(text) == {(key, "missing_key")}
+
+
+@pytest.mark.parametrize(
+    ("added", "expected"),
+    [
+        ('card = "Flex"', {("card", "unknown_key")}),
+        ('[level]\nelement = "PCM"\nindex = 1', {("level", "unknown_key")}),
+        ('[[held]]\nelement = "PCM"\nindex = 0', {("held", "unknown_key")}),
+    ],
+)
+def test_a_card_key_on_a_sink_is_unknown(added: str, expected: set[tuple[str, str]]) -> None:
+    assert problems_of(PULSE + added + "\n") == expected
+
+
+def test_an_empty_sink_selector() -> None:
+    assert problems_of(PULSE.replace('sink = "Desk Speaker"', 'sink = ""')) == {
+        ("sink", "bad_value")
+    }
+
+
+def test_a_sink_selector_of_the_wrong_type() -> None:
+    assert problems_of(PULSE.replace('sink = "Desk Speaker"', "sink = 3")) == {
+        ("sink", "wrong_type")
+    }
 
 
 def test_every_problem_is_reported() -> None:

@@ -47,7 +47,7 @@ from brenn_lab.roles import KINDS, Role
 from brenn_lab.rundir import LAYOUT, RunDir
 from brenn_lab.script import Lab, RoleFailure
 
-SCHEMA = 1
+SCHEMA = 2
 
 UNREACHABLE = "this build has no transport"
 

@@ -4,6 +4,7 @@ load("@rules_python//python:defs.bzl", "py_library")
 # them; the runner is given a script's path, not a target.
 
 EXAMPLES = [
+    "anchoring_scenario.py",
     "play_and_record.py",
     "ten_seconds.py",
 ]

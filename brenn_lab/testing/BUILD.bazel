@@ -54,10 +54,50 @@ py_library(
     deps = ["//brenn_lab"],
 )
 
+# A known speech clip, the talker the tests play; README.md holds its licence.
+exports_files(
+    ["speech/arctic_a0001.wav"],
+    visibility = ["//brenn_lab:__subpackages__"],
+)
+
+py_pytest_test(
+    name = "speech_test",
+    size = "small",
+    srcs = ["speech_test.py"],
+    data = ["speech/arctic_a0001.wav"],
+    env = {"SPEECH": "$(rootpath speech/arctic_a0001.wav)"},
+    deps = [
+        "//brenn_lab",
+        "//brenn_lab:align",
+        "@pypi_lab//numpy",
+    ],
+)
+
 py_library(
     name = "fake_output",
     testonly = True,
     srcs = ["fake_output.py"],
+    visibility = ["//brenn_lab:__subpackages__"],
+    deps = ["//brenn_lab"],
+)
+
+py_library(
+    name = "pulse_stand_in",
+    testonly = True,
+    srcs = ["pulse_stand_in.py"],
+    data = ["//brenn_lab/playback/pulse_client:pulse-stand-in"],
+    visibility = ["//brenn_lab:__subpackages__"],
+    deps = [
+        ":sink_client",
+        "//brenn_lab",
+    ],
+)
+
+py_library(
+    name = "sink_client",
+    testonly = True,
+    srcs = ["sink_client.py"],
+    data = ["//brenn_lab/playback/pulse_client:pulse-client"],
     visibility = ["//brenn_lab:__subpackages__"],
     deps = ["//brenn_lab"],
 )

@@ -42,7 +42,8 @@ position = "desk, 1 m from the door"
 - `machines.<m>`: a machine of any name. Its optional `programs` table says
   where programs that roles call are **on that machine**, each in one of two
   forms. Only program names some kind uses are read there; the capture kind
-  uses `pod_capture`, brenn-pod's recorder.
+  uses `pod_capture`, brenn-pod's recorder, and the playback kind
+  `pulse_client`, the sink client a role on a sound-server sink runs.
   - A string is an absolute path on that machine where the program is
     installed (`relative_path` otherwise).
   - `{ pinned = true }` is the program this harness's build pins, as carried
@@ -62,7 +63,8 @@ position = "desk, 1 m from the door"
   the run and is the recorded stream's source name.
   - `kind`: the role's kind, `capture` or `playback`.
   - `machine`: a machine in `machines`. A role whose kind needs a program its
-    machine does not name is `missing_program`. The playback kind needs none.
+    machine does not name is `missing_program`. A playback role needs
+    `pulse_client` on a sink (`output = "pulse"`) and nothing on a card.
   - `device`: the kind's parameters. For `capture`: `card`, a non-empty
     string that selects the card; `rate_hz`, a positive integer; `sample_format`,
     a string; `layout`, a non-empty list of distinct non-empty channel names.
@@ -77,6 +79,9 @@ position = "desk, 1 m from the door"
     none shares a clock with nothing. Two streams on one card usually share a
     clock and need not; two cards on one word clock share one that no
     enumeration shows. The manifest records it as `roles.<r>.sample_clock`.
+    A playback role on a sound-server sink states none: the server resamples
+    and remixes its frames on the way to the device, so no frame it keeps is
+    a sample on any device's clock, and a stated one is `bad_value`.
 - **The configuration does not repeat the recorder's limits.** A rate, a
   format or a channel name the recorder's command line refuses is refused by
   the recorder, which exits before it opens anything. The capture role reports
@@ -326,10 +331,14 @@ know ends the capture with `recorder_contract`.
 
 A playback role plays WAV files through one output device, keeps an exact
 copy of what it handed the device, and holds that device under a volume cap
-and quiet hours that only its configuration sets. In this version its one
-output kind is `alsa`: an ALSA card opened directly, written by the runner's
-own interpreter. Every level is an integer number of **millibels** (mB),
-hundredths of a decibel, the unit ALSA reports volumes in.
+and quiet hours that only its configuration sets. It has two output kinds:
+`alsa`, an ALSA card opened directly, written by the runner's own
+interpreter; and `pulse`, a sink of the desktop's sound server, reached
+through the pinned sink client (*On a sound-server sink*). The role applies
+one rule to either. What follows is said of a card where the two differ, and
+*On a sound-server sink* says what differs on a sink. Every level is an
+integer number of **millibels** (mB), hundredths of a decibel, the unit ALSA
+reports volumes in.
 
 ### Configuration
 
@@ -356,7 +365,9 @@ index = 0
 volume_mb = 0
 ```
 
-- `output`: `"alsa"`; any other value is `bad_value`.
+- `output`: `"alsa"` or `"pulse"`; any other value is `bad_value`. The keys
+  below are a card's; a sink's are under *On a sound-server sink*. A key of
+  the other kind is `unknown_key`.
 - `card`: non-empty. Matched case-insensitively as a substring of each card's
   name or long name; exactly one card must match. That is the rule the
   capture kind's recorder applies. The device is `hw:<index>,0`.
@@ -396,9 +407,11 @@ volume_mb = 0
     source entry*, describes it, or `null`; a dry reply carries it too.
   - `copy`: the `Location` of the kept copy; `null` in a dry reply.
   - `output`: `{kind, library: {name, version}}`: `"alsa"`, and the host's
-    ALSA library with the version it reports.
+    ALSA library with the version it reports; or `"pulse"`, and the pinned
+    sink client.
   - `device`, `granted`: the card, and what the open stream granted, in the
-    capture kind's shapes.
+    capture kind's shapes. On a sink `device` is the sink
+    (`run-directory.md`, *A source entry*).
   - `controls`: every control the role holds, read back after setting:
     `{element, index, part, channels}`, `part` `level` or `held`, and one
     `{channel, volume_mb, switch}` per playback channel, `channel` being
@@ -428,9 +441,10 @@ volume_mb = 0
   was running, else `null`. A play cut by `release` is `left_running`.
 
 A **mark** is `{frames_handed, delay_frames, at}`: the frames handed so far,
-the device's delay read then (`null` if the read failed), and the role's clock
-reading taken directly after. By the device's own account, frame
-`frames_handed − delay_frames` of the copy is at its output at `at`.
+the output's delay read then (`null` if the read failed), and the role's clock
+reading taken directly after. By the output's own account, frame
+`frames_handed − delay_frames` of the copy is at its output at `at`: on a card
+by the device's account, on a sink by the sound server's estimate.
 
 There is no command that waits for a play to end. A script passes the time
 with `lab.wait`, which a signal interrupts at once:
@@ -448,9 +462,13 @@ and the run fails with `left_running`.
 
 - `playback.ended`: the source was handed over whole and the device played
   its buffer out. The fields of `playback.stopped`, `unplayed_frames` 0.
-- `playback.underrun`: `{play, at_frame, at, detail}`. The device ran dry
-  before frame `at_frame` of the copy was handed; the stream was recovered
-  and the play goes on. Sound was interrupted there for an unknown length.
+- `playback.underrun`: `{play, at_frame, at, detail}`. The output reported
+  that it had run dry, when `at_frame` frames of the copy had been handed;
+  the stream was recovered and the play goes on. On a card, sound was
+  interrupted there for an unknown length and every frame handed after it
+  plays, late. On a sink, frames handed after the server ran out may be
+  skipped and never sound, and the report can trail the server's running
+  out by one write.
 - `playback.failed`: `{play, failure, …the fields of playback.stopped…}`. The
   play ended and nobody asked: the stream died, a held control moved, quiet
   hours began, the recoveries ran out, or the role's own code failed.
@@ -490,10 +508,19 @@ been played:
 6. **Write.** Hand the first chunk over, take the first mark, reply. The
    thread then hands the copy over in chunks of 100 ms. Before each chunk it
    reads every channel of every control it holds and judges quiet hours.
-   After the last it lets the device play its buffer out, closes the stream,
-   restores the controls and reports `playback.ended`.
+   After the last it lets the output play its buffer out, closes the stream,
+   restores the controls and reports `playback.ended`. That wait is bounded:
+   the first delay above 0 it reads sets a deadline, that delay at the play's
+   rate plus 2 s, never moved. A delay still above 0 at the deadline ends the
+   play with `stream_died`, its `data` the last delay read, the buffer
+   dropped and the controls restored. A stop, a moved control or quiet hours
+   are judged on every turn of the wait, as between chunks.
 
-- An **underrun** is recovered and reported as `playback.underrun`. Eight
+- An **underrun** is recovered and reported as `playback.underrun`. On a card
+  it is a gap, then every frame handed after it, late: the kept copy is what
+  sounded, with a gap. On a sink it is a gap, and frames handed after the
+  server ran out may be skipped and never sound: the kept copy is then longer
+  than what sounded (*On a sound-server sink*). Eight
   consecutive recoveries without a successful write end the play with
   `stream_died`. Any other write error ends the play with `stream_died` and
   is not recovered: a recovery from a suspended stream can discard the
@@ -551,6 +578,9 @@ found, **it lowers before it raises**:
 3. **Raise**, only if the read and every lowering succeeded: every channel to
    its target, every switch to its target. Each write is attempted.
 
+That is said of a write the device refuses; an error raised in the move ends
+it.
+
 A switch going off is a lowering and one going on is a raise. Of the role's
 own writes, on a mixer that takes each write as written, rounded down, or
 refuses it and changes nothing: **after every write the role makes,
@@ -560,14 +590,25 @@ is at or under the cap or no channel is above where the role found it.**
 - The restoration puts back what was found, a setting above the cap
   included: the device's state before the role touched it is its owner's.
 - **`restored` false** means the restoration failed (the device went away,
-  its first read failed, or a mixer write was refused) and was not tried
-  again. If the read failed, nothing was written, and the controls are where
-  the play set them, at or under the cap. If a lowering was refused, nothing
-  was raised: every channel is at or under what the play set. If a raise was
-  refused, no channel is above where it was found. The device may then be
-  quieter than it was found on some channel, and after a refused lowering a
-  channel may stand above where it was found, at what the play set. That is a
-  change to the machine's sound state the role could not undo.
+  its first read failed, a mixer write was refused, or an error was raised
+  in the restoration) and was not tried again. If the read failed, nothing
+  was written, and the controls are where the play set them, at or under the
+  cap. If a lowering was refused, nothing was raised: every channel is at or
+  under what the play set. If a raise was refused, no channel is above where
+  it was found. The device may then be quieter than it was found on some
+  channel, and after a refused lowering a channel may stand above where it
+  was found, at what the play set. That is a change to the machine's sound
+  state the role could not undo. A raise, unlike a refusal, stops the
+  restoration where it is raised: the writes after it were not made, and the
+  controls are as the last write made left them, at or under the cap or no
+  louder on any channel than the role found it.
+- **An error raised while a play is ended** (its stream closed, its controls
+  put back, its output let go) does not stop the rest of the end: every
+  step is still made, and the play ends with a `playback.failed` event. It
+  keeps the reason it ended for, with every exception raised in its detail,
+  or is `role_error` when it had drained or been asked to stop; a stop
+  waiting on it answers `not_playing`. Its `unplayed_frames` is `null` where
+  the delay could not be read.
 - **The runner killed outright mid-play**: the stream closes with the
   process and the sound stops. The controls stay where the role put them,
   their level at or under the cap whatever the source, and possibly lower
@@ -626,9 +667,15 @@ reports no event.
 | `mixer` | a mixer call failed: the mixer could not be opened or loaded, a read or write was refused, or a volume has no dB scale (such a control cannot be held to a cap in millibels) |
 | `controls` | a control read back above what was set, or with a switch off |
 | `controls_moved` | during a play a held control changed, or could not be read |
-| `stream_died` | the stream failed beyond recovery: a write failed with anything but an underrun, a recovery failed, eight ran without a successful write, a write took no frames, or the buffer could not be played out |
+| `stream_died` | the stream failed beyond recovery: a write failed with anything but an underrun, a recovery failed, eight ran without a successful write, a write took no frames, or the buffer could not be played out: the drain failed, or the delay was still above 0 at the end-of-play deadline (*How the role plays*, step 6). On a sink, also: the server killed, moved or suspended the stream during a write, or the client failed during a write or a drain |
+| `no_server` | on a sink: `XDG_RUNTIME_DIR` is unset, or no sound server answered at `$XDG_RUNTIME_DIR/pulse/native`, within 4 s for the whole start |
+| `client_missing` | on a sink: the configured `pulse_client` could not be run |
+| `client` | on a sink: the client died, did not answer within its bound (5 s; a write and a drain, the buffer's length plus 7 s), answered a line it could not have meant, or refused a request for a reason with no name of its own, such as a server that did not answer it within 4 s; the detail carries its last lines of stderr |
+| `no_sink`, `ambiguous_sink` | on a sink: no sink, or more than one, matches `sink`; or the sink vanished |
+| `sink_volume` | on a sink: the sink has flat volume, under which the server raises it to its loudest stream, or no decibel volume; refused before any stream exists |
+| `stream_moved` | on a sink: the play's stream is not on the named sink, not at 0 dB on every channel, or muted, or the client could not read it. During a play the role reports it as `controls_moved` |
 | `role_io` | the role could not write or read its kept copy, or another file of its own |
-| `role_error` | the play's thread raised; the play ended, the controls were restored, and the exception was raised on. Not the runner's `role_raised`, the run's failure when a role raised instead of replying to a command (see the run-directory reference) |
+| `role_error` | the play's thread raised, while it handed frames over or while it ended the play; the play was ended, the restoration attempted (`restored` says how it went), the output let go, and the exception raised on. Not the runner's `role_raised`, the run's failure when a role raised instead of replying to a command (see the run-directory reference) |
 | `already_playing` | a play is running |
 | `not_playing` | no play is running, or no dry play preceded a dry stop |
 | `unknown_command` | the command is not one the playback kind has |
@@ -645,7 +692,220 @@ them (`script-shares-the-playback-roles-process`).
 
 The playback role loads the host's ALSA runtime library, `libasound.so.2`,
 the first time it resolves a card, and at no other time. A host without it
-gets `alsa_missing` from `check` and from `playback.play`.
+gets `alsa_missing` from `check` and from `playback.play`. A role on a
+sound-server sink loads no host library: it runs the pinned sink client,
+which speaks the server's protocol itself.
+
+### On a sound-server sink
+
+A playback role with `output = "pulse"` plays on one sink of the desktop's
+sound server: any server that speaks the PulseAudio native protocol,
+PulseAudio itself or PipeWire's pulse server. The role is the same role; what
+it holds and how it reaches the device differ.
+
+```toml
+[machines.bench.programs]
+pulse_client = { pinned = true }   # the sink client this harness's build pins
+
+[roles.talker]
+kind = "playback"
+machine = "bench"
+# no sample_clock: a sink refuses one
+
+[roles.talker.device]
+output = "pulse"
+sink = "desk speaker"
+source_dir = "/data/lab/sources"
+cap_mb = -2400
+quiet_hours = [["22:00", "07:00"]]
+```
+
+- `sink`: non-empty. Matched case-insensitively as a substring of each sink's
+  name or description; exactly one sink must match (`no_sink`,
+  `ambiguous_sink`, each naming the sinks there are). A Bluetooth speaker can
+  then be named by its description, and its address kept out of the
+  configuration; the record keeps the name the server gave.
+- `source_dir`, `cap_mb` and `quiet_hours` are as on a card. `level` and
+  `held` are not stated: a sink has one control. `card`, `level` or `held`
+  under `pulse` is `unknown_key`.
+- The machine names `pulse_client` (`missing_program` otherwise). The role
+  starts it as a child for each attach, with the socket
+  `$XDG_RUNTIME_DIR/pulse/native` and no other: `PULSE_SERVER` and
+  `PULSE_RUNTIME_PATH` are not read, so no variable sends a role to another
+  server. It authenticates with the cookie at `$HOME/.config/pulse/cookie`
+  when there is one. A fault in the client ends one play with `client`, and
+  the runner and every other role go on.
+
+**The control.** A sink's volume and mute are one control, `sink` index 0,
+a channel per sink channel named by its position (`front-left`, …; a
+repeated position gets `#<n>`). A play's `volume_mb` sets it, lowering before
+raising, every channel to one volume and unmuted; it is read back, read
+again before every chunk, and restored after the stream is closed, exactly
+as a card's level control. A balance across the sink's channels is flattened
+for the play and restored, each channel to the raw volume found. The server's
+volume is a cubic scale of raw integers; the role reads one in millibels
+rounded up, so a reading never understates, and sets the largest raw volume
+that reads at or under what was asked. Restoration writes the raw volume
+first found, not the largest of its reading. A sink refuses a set that does
+not name every channel with one switch (`mixer`), and a control other than
+`sink` 0 is `no_control`. The sink is found by its name at every read, so a
+sink that comes back under that name with other channels reads as `mixer`:
+during a play that ends it `controls_moved`, and the restoration fails.
+
+**The stream.** The role makes its own stream on the sink for each play,
+made at exactly 0 dB on every channel, unmuted, pinned to the sink, with the
+source's rate, channel count and format exactly (`params` otherwise), no
+pre-buffer, and corked until its first frames have been sent. It is not a
+second control: the output checks it, with the sink, at every read, and a
+stream that is not on the sink, not at 0 dB or muted is `stream_moved`. A
+server that restores a saved stream volume, or ignores the one asked for, is
+caught at the read-back before the first frame. During a play the role
+reports a moved stream as `controls_moved`.
+
+**The cap on a sink** covers the sink's volume and mute, the stream's volume
+and mute, and the stream's sink. It cannot see a knob on the speaker, a
+Bluetooth speaker's own mapping of the volume it is sent, any filter or
+effect in the server, the server's remix gains, or what the server does with
+a channel that has no place on the sink. A Bluetooth speaker's own buttons
+move the sink's volume, and end the play, only when the speaker uses absolute
+volume; otherwise they are invisible to the role.
+
+- **A sink's level is relative to the sink's full volume**, 0 mB. The device
+  entry's `base_volume_mb` is the server's base volume for the sink: where it
+  is under 0 (a hardware sink whose mixer goes above 0 dB), the device's own
+  gain at 0 mB is above its unamplified level by `−base_volume_mb`, and a
+  level on the sink reads lower by that much than the same loudness reads on
+  the card opened directly. The cap is each role's own and in its output's
+  scale: **it does not carry between a `pulse` role and an `alsa` role on one
+  piece of hardware.** Whether a base volume under full marks the mixer's
+  0 dB on a real sink is unmeasured.
+- A sink with flat volume, under which the server raises the sink to its
+  loudest stream, or with no decibel volume, is refused with `sink_volume`
+  before any stream exists.
+- **A play changes the desktop's volume on that sink** for its length, so
+  every other stream on the sink changes loudness, and restores it after. A
+  runner killed mid-play leaves the sink at the play's setting, as it leaves
+  a card's mixer. Two roles on one sink each hold its volume, so the second
+  play's set ends the first with `controls_moved`.
+
+**Channels.** The stream's channel map for a source of `n` channels is the
+one PulseAudio's own client library gives a stream that states none: the
+default map of the largest count at or under `n` that has one, then `aux0`,
+`aux1`, … for the rest.
+
+| Channels | Positions |
+|---|---|
+| 1 | mono |
+| 2 | front-left, front-right |
+| 3 | the 2-channel map, then aux0 |
+| 4 | the 2-channel map, then rear-left, rear-right |
+| 5 | the 4-channel map, then front-center |
+| 6 | the 5-channel map, then lfe |
+| 7 | the 6-channel map, then aux0 |
+| 8 | the 6-channel map, then side-left, side-right |
+| 9 to 32 | the 8-channel map, then aux0, aux1, … |
+
+A source of more than 32 channels is `params`. The server remixes by
+position onto the sink, and what it does with a channel that has no place
+there (an `aux` one on a stereo sink) is the server's: it may drop it.
+Dropped is quieter than the cap judged, never louder. The role addresses no
+channel of the sink.
+
+**The kept copy** is what the role handed to the sink. The server converts
+and remixes it on the way to the device, so it is not a copy of any device's
+samples. After an underrun the server may skip frames handed after it ran
+out, so the kept copy of a play with an underrun is longer than what
+sounded. The first frames are sent before the stream is uncorked, so a
+play's head is not skipped. A sink's underrun is reported at the role's next
+write: one that happens as the play's last write is sent is not on the play's
+record, and such a play can end `completed` with no underrun, having lost
+frames of its last tenth of a second. That is read in one server's source and
+measured on none.
+
+**Marks and delay.** A mark's `delay_frames` on a sink is **by the sound
+server's estimate**: the frames in the stream's buffer plus the server's
+latency to the sink, as the server reports them. Once the buffer is seen
+empty, the latency is counted down in real time, so the figure reaches 0 at
+the end of a play. What the figure is worth on a real sink is unmeasured.
+`unplayed_frames` is that figure too.
+
+**The end of a play** is bounded as on a card (*How the role plays*, step 6).
+A server that stops reading the stream and says nothing, a sink suspended by
+hand for one, ends the play with `stream_died` within the buffer's remaining
+length plus 2 s, the sink's volume restored. A server that announces the
+suspension ends it at the role's next read, `controls_moved`.
+
+**The dry run on a sink.** `check` lists the server's sinks, selects one and
+reads its volume; it makes no stream and sets nothing. A dry `playback.play`
+makes one corked stream on the sink, reads its grant and deletes it, writing
+no frame and setting nothing. Whether a corked stream leaves a suspended sink
+silent is unmeasured, so this dry run too is made only inside an agreed
+window.
+
+#### The anchoring scenario
+
+`examples/anchoring_scenario.py` records on `mic` while a talker plays on
+`talker` and the robot's own sound, one second later, on `speaker`; it stops
+the capture a second after the later of the two plays has ended. Both
+sources are marked with `lab mark`, one member each, so that `lab assess`
+can locate each play in the capture. Roles are named, no device: a lab
+configuration for it, with invented names:
+
+```toml
+schema = 1
+
+[machines.bench.programs]
+pod_capture = { pinned = true }
+pulse_client = { pinned = true }
+
+[roles.mic]
+kind = "capture"
+machine = "bench"
+sample_clock = "flex"
+
+[roles.mic.device]
+card = "Flex XVF3800 L16K6Ch"
+rate_hz = 16000
+sample_format = "s16_le"
+layout = ["conference_beam", "asr_beam", "raw_mic_0", "raw_mic_1", "raw_mic_2", "raw_mic_3"]
+
+[roles.speaker]
+kind = "playback"
+machine = "bench"
+sample_clock = "flex"
+
+[roles.speaker.device]
+output = "alsa"
+card = "Flex XVF3800 L16K6Ch"
+source_dir = "/data/lab/sources"
+cap_mb = -2400
+quiet_hours = [["22:00", "07:00"]]
+
+[roles.speaker.device.level]
+element = "PCM"
+index = 1
+
+[[roles.speaker.device.held]]
+element = "PCM"
+index = 0
+volume_mb = 0
+
+[roles.talker]
+kind = "playback"
+machine = "bench"
+
+[roles.talker.device]
+output = "pulse"
+sink = "desk speaker"
+source_dir = "/data/lab/sources"
+cap_mb = -2400
+quiet_hours = [["22:00", "07:00"]]
+```
+
+`source_dir` holds `talker.wav` and `own.wav`, each made by `lab mark` from a
+source of the experimenter's choosing, with different members. The tree's
+known speech clip, `brenn_lab/testing/speech/arctic_a0001.wav`, is one
+talker; its README says where it comes from and under what licence.
 
 ## Starting the runner
 
@@ -734,8 +994,8 @@ devices. It happens:
 - when a run could not write its own files or a role's release raised. Every
   role the run used has then already been sent its `release`, and the run
   directory has no `results.json`. A release raises, among other cases, for
-  a capture whose recorder reader failed, or a play whose thread failed
-  before reporting its end, when no command of the script's has raised that
+  a capture whose recorder reader failed, or a play whose end could not be
+  reported, when no command of the script's has raised that
   error first: the role's next start, stop or play raises it, as a
   `RuntimeError` and not a `RoleFailure`, and the run then ends `failed`
   with exit status 1, whether or not the script catches the error.
@@ -788,7 +1048,7 @@ only on a real reading is not checked.
 ### The report
 
 ```json
-{"schema": 1, "ok": false,
+{"schema": 2, "ok": false,
  "problems": [{"where": "role", "reason": "no_card", "detail": "…", "role": "mic",
                "command": "check", "key": null, "data": {"at_frame": null, "at": {…}, "cards": […]}}],
  "roles": {"mic": {"kind": "capture", "machine": "bench", "check": {…the whole reply…}}},
@@ -815,7 +1075,7 @@ only on a real reading is not checked.
   runner answered itself included; `stopped_at`, `null` when complete,
   otherwise `"<ExceptionType>: <message> at <script file>:<line>"`.
 - When step 1 or step 2 found a problem, the report is
-  `{"schema": 1, "ok": false, "problems": […], "roles": {}, "trace": null}`.
+  `{"schema": 2, "ok": false, "problems": […], "roles": {}, "trace": null}`.
 
 | `where` | Found by | `reason` |
 |---|---|---|
@@ -974,7 +1234,7 @@ verdict on the run.
 |---|---|
 | 0 | a report was written; every capture and play was read and every marked play located in some capture. A run with no marked play aligns with 0 |
 | 1 | a report was written that says otherwise |
-| 2 | refused, no report written: `where` `run`, `reason` `unreadable` (no directory, no `manifest.json` or `results.json` that is JSON of the expected shape), `layout` (not layout 1) or `not_writable` (the run directory cannot be written: a read-only disk, a directory without write permission, or a leftover `.alignment.tmp/` that cannot be removed, which the detail names; decided after the run is read and before any capture is read); or `where` `arguments`, `reason` `usage` |
+| 2 | refused, no report written: `where` `run`, `reason` `unreadable` (no directory, no `manifest.json` or `results.json` that is JSON of the expected shape), `layout` (not layout 2) or `not_writable` (the run directory cannot be written: a read-only disk, a directory without write permission, or a leftover `.alignment.tmp/` that cannot be removed, which the detail names; decided after the run is read and before any capture is read); or `where` `arguments`, `reason` `usage` |
 | 3 | the command raised; a `.alignment.tmp/` left in the run is not part of the record, and the next `align` clears it, or refuses with `not_writable` if it cannot |
 
 `align` writes its report and its scratch into the run and nowhere else. To

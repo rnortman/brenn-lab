@@ -27,6 +27,7 @@ import numpy as np
 from brenn_lab import marker
 from brenn_lab.data import JsonObject, JsonValue, encode_value
 from brenn_lab.marker import Carried
+from brenn_lab.sound import CardIdentity
 
 MACHINE = "bench"
 RUN_ID = "00000000-0000-4000-8000-000000000000"
@@ -46,7 +47,9 @@ class Play:
     the frames that left the device (None: those handed); a marker not inside
     them is not sounded. `ended`, `stopped_by`, `unplayed`, `restored` and
     `failure` are the results record's; `result` False leaves the play
-    without one.
+    without one. `output` is the source entry's `output.kind`, its `device`
+    a card's shape for `alsa` and a shape of no known kind otherwise; None
+    leaves the entry without `output`.
     """
 
     role: str
@@ -67,6 +70,7 @@ class Play:
     restored: bool = True
     failure: JsonObject | None = None
     result: bool = True
+    output: str | None = "alsa"
 
     def sounds(self, last: int) -> bool:
         """Whether a marker ending before kept-copy frame `last` sounded."""
@@ -233,14 +237,14 @@ def build(
         if c.recorded:
             accounts.append(account)
     manifest: JsonObject = {
-        "layout": 1,
+        "layout": 2,
         "run_id": RUN_ID,
         "roles": {**sections, **(roles or {})},
     }
     (run / "manifest.json").write_text(json.dumps(manifest) + "\n")
     if results:
         out: JsonObject = {
-            "schema": 1,
+            "schema": 2,
             "run_id": RUN_ID,
             "outcome": outcome,
             "completed": outcome == "completed",
@@ -288,6 +292,25 @@ def _play(run: Path, play: Play, built: Built) -> tuple[JsonObject, JsonObject]:
         # A clock reading the search must never use, rough by construction.
         "first": {"frame": 0, "at": {"machine": MACHINE, "ns": int(play.at * 62500)}},
     }
+    if play.output is not None:
+        entry["output"] = {
+            "kind": play.output,
+            "library": {"name": f"{play.output}-library", "version": "1"},
+        }
+        entry["device"] = (
+            encode_value(
+                CardIdentity(
+                    selector="Stand",
+                    card_index=1,
+                    card_name="Stand-in",
+                    card_long_name="Stand-in card",
+                    pcm="hw:1,0",
+                    usb_id=None,
+                )
+            )
+            if play.output == "alsa"
+            else {"shape": "of no kind this harness knows"}
+        )
     record: JsonObject = {
         "role": play.role,
         "play": play.play,

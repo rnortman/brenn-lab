@@ -181,23 +181,32 @@ def _role(
     if machine_name is not None and machines_table is not None:
         if machine_name not in machines_table.value:
             table.problem("machine", "unknown_machine", f"{machine_name!r} is not in machines")
-        elif kind is not None and machine_name in machines:
-            for program in sorted(kind.programs - machines[machine_name].programs.keys()):
-                table.problem(
-                    "machine",
-                    "missing_program",
-                    f"a {kind.name} role needs machines.{machine_name}.programs.{program}",
-                )
 
     device_table = table.table("device")
     device = None if device_table is None else device_table.as_json()
     parameters = None
     if device_table is not None and device is not None and kind is not None:
         parameters = kind.read_device(device_table)
+    if (
+        kind is not None
+        and parameters is not None
+        and machine_name is not None
+        and machine_name in machines
+    ):
+        for program in sorted(kind.needs(parameters) - machines[machine_name].programs.keys()):
+            table.problem(
+                "machine",
+                "missing_program",
+                f"this {kind.name} role needs machines.{machine_name}.programs.{program}",
+            )
     stated = table.json_table("stated", required=False)
     sample_clock = table.string("sample_clock", required=False)
     if sample_clock is not None and not _is_name(sample_clock):
         table.problem("sample_clock", "bad_value", f"a clock's name {_NAME_RULE}")
+    elif sample_clock is not None and kind is not None and parameters is not None:
+        refusal = kind.clock_refusal(parameters)
+        if refusal is not None:
+            table.problem("sample_clock", "bad_value", refusal)
     table.done()
 
     if len(table.problems) != before:

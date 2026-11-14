@@ -1,22 +1,22 @@
 """The interface between the playback role and an output: the output, which
-resolves a card and holds its mixer, and the stream it opens; and the table of
-output kinds a configuration may name.
+resolves a device and holds its playback controls, and the stream it opens;
+and the table of output kinds a configuration may name.
 
 Every level is an integer number of millibels.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
 from brenn_lab.data import Failure
-from brenn_lab.playback.messages import Channel, Library, VolumeRange
+from brenn_lab.playback.messages import Channel, Library, SinkIdentity, VolumeRange
 from brenn_lab.sound import CardIdentity, Granted
 
 
 @dataclass(frozen=True)
 class ControlName:
-    """A simple mixer element of the card, by name and index."""
+    """A playback control of the device, by name and index."""
 
     element: str
     index: int
@@ -24,17 +24,17 @@ class ControlName:
 
 @dataclass(frozen=True)
 class Attached:
-    """The card an output resolved, and the library it plays with."""
+    """The device an output resolved, and the library it plays with."""
 
-    device: CardIdentity
+    device: CardIdentity | SinkIdentity
     library: Library
 
 
 @dataclass(frozen=True)
 class Element:
-    """A mixer control of the card with a playback volume or a playback
-    switch: its playback channels by the output's names for them, its volume
-    range (None for a control with no volume) and whether it has a switch.
+    """A control of the device with a playback volume or a playback switch:
+    its playback channels by the output's names for them, its volume range
+    (None for a control with no volume) and whether it has a switch.
     """
 
     control: ControlName
@@ -68,7 +68,7 @@ class Stream(Protocol):
         ...
 
     def delay(self) -> int | None:
-        """The frames handed and not yet at the output, by the device's own
+        """The frames handed and not yet at the output, by the output's own
         account; None if it cannot be read.
         """
         ...
@@ -85,8 +85,8 @@ class Stream(Protocol):
 
 
 class Output(Protocol):
-    """One role's output. `attach` resolves the card and opens its mixer;
-    every other call but `detach` needs it attached.
+    """One role's output. `attach` resolves the device and reaches its
+    controls; every other call but `detach` needs it attached.
     """
 
     @property
@@ -94,15 +94,19 @@ class Output(Protocol):
 
     def attach(self) -> Attached | Failure: ...
 
-    def detach(self) -> None: ...
+    def detach(self) -> None:
+        """Let the device go. After it the output can be attached again,
+        whatever `detach` raised.
+        """
+        ...
 
     def elements(self) -> tuple[Element, ...] | Failure:
-        """Every control of the card with a playback volume or switch."""
+        """Every control of the device with a playback volume or switch."""
         ...
 
     def read(self, controls: Sequence[ControlName]) -> tuple[tuple[Channel, ...], ...] | Failure:
         """Each of `controls`' values on each of its playback channels, in
-        order, as the mixer has them now: changes made by other programs are
+        order, as the device has them now: changes made by other programs are
         taken in once, before any is read.
         """
         ...
@@ -121,22 +125,43 @@ class Output(Protocol):
         period_frames: int,
         buffer_frames: int,
     ) -> Stream | Failure:
-        """Open the card's stream demanding the rate, channels and format
+        """Open the device's stream demanding the rate, channels and format
         exactly, and the period and buffer at the nearest the device has.
         """
         ...
 
 
-def _alsa(card: str) -> Output:
+type Factory = Callable[[str, Mapping[str, str]], Output]
+"""Makes an output from the configuration's selector of its device and the
+path of each program the role's machine names.
+"""
+
+
+def _alsa(card: str, programs: Mapping[str, str]) -> Output:
     # Imported here: the ALSA module imports this module's types.
     from brenn_lab.playback import alsa
 
     return alsa.AlsaOutput(card)
 
 
-# TODO(playback-through-sound-server-sink): an output behind a sound server is
-# another entry here.
-OUTPUTS: dict[str, Callable[[str], Output]] = {"alsa": _alsa}
+def _pulse(sink: str, programs: Mapping[str, str]) -> Output:
+    # Imported here: the binding imports this module's types.
+    from brenn_lab.playback import pulse
+
+    return pulse.PulseOutput(sink, programs["pulse_client"])
+
+
+# TODO(quality-output-kind-facts-split-across-modules): a kind's program,
+# clock refusal and underrun behaviour are answered in `roles.py` and below,
+# apart from this table.
+OUTPUTS: dict[str, Factory] = {"alsa": _alsa, "pulse": _pulse}
 """Each output kind a configuration may name, and how an output of that kind
-is made from the configuration's `card`.
+is made. Importing this module loads no library.
+"""
+
+PLAYS_ON_AFTER_UNDERRUN: frozenset[str] = frozenset({"alsa"})
+"""The output kinds on which an underrun is a gap and every frame handed after
+it is played. On any other kind, frames handed after an underrun may never
+sound: a sound server reads on past what it was given and skips what arrives
+behind its read position.
 """

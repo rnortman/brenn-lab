@@ -1,4 +1,4 @@
-# The run directory, layout 1
+# The run directory, layout 2
 
 A run directory is what one run of an experiment script leaves behind. This
 document says what every file and key in it means, so that a reader with the
@@ -84,19 +84,56 @@ the file.
 ### Reserved names
 
 `streams/` (other recorded streams such as pose, status and faults, per role)
-is **reserved**. Its name and meaning are fixed by layout 1, and no code in
+is **reserved**. Its name and meaning are fixed by layout 2, and no code in
 this version creates it. The manifest's and the results' key `streams` is
 reserved the same way.
 
 ### The version rule
 
-`manifest.json`'s `layout` is 1, and `results.json`'s, `alignment.json`'s and
-`assessment.json`'s `schema` are each 1. Adding a file or a key changes none of them: a new role
-kind that writes under a reserved name, or adds a section of its own beside
-`captures`, a new key in an entry, a new file beside the others. A reader
-ignores the files, keys and sections of kinds it does not know. Renaming,
-removing or changing the meaning of anything changes the number of the file
-it is in, and of the layout when it is in the layout.
+`manifest.json`'s `layout` is 2 and `results.json`'s `schema` is 2;
+`alignment.json`'s and `assessment.json`'s `schema` are each 1. Adding a file
+or a key changes none of them: a new role kind that writes under a reserved
+name, or adds a section of its own beside `captures`, a new key in an entry,
+a new file beside the others. A reader ignores the files, keys and sections
+of kinds it does not know. Renaming, removing or changing the meaning of
+anything changes the number of the file it is in, and of the layout when it
+is in the layout.
+
+**Keys defined by the output kind.** Four keys of a play are defined by its
+output kind, the `output.kind` of the play's source entry in the manifest:
+`device`, `output.library`, the `delay_frames` of every mark (`first` in the
+manifest; `first` and `last` in the results) and the results record's
+`unplayed_frames`. A results record carries no `output`; its kind is that of
+the source entry with its `role` and `play`. Each keeps one meaning in every
+kind: `device` is the device the output resolved; `output.library` is the
+code through which the role reached it, as that code names and versions
+itself; `delay_frames` and `unplayed_frames` are frames by the output's own
+account. *A source entry* and *`results.json`* say, per kind, what shape
+`device` has and whose account the frames are. A new `output.kind`, with its
+own `device` shape and its own account of delay, is an addition under the
+rule and changes no number. What an output does after an underrun is
+behaviour of its kind, stated per kind where `underruns` is defined
+(*`results.json`*), and not a meaning of `underruns`, which in every kind says
+that the output reported, at that point of the play, that it had run out of
+frames.
+
+**A reader that meets an `output.kind` it does not know** reads every other
+key of the entry and of its results record as in any kind (the kept copy,
+`source` and its `marker`, `granted`, `controls`, `found`, `level_mb`,
+`cap_mb`, `frames`, `frames_handed`, `ended`, `stopped_by`, `underruns`,
+`as_sent`, `restored`, `failure`: all the role's own, whatever the output)
+and does not read the four. It never takes one of them in the sense of a
+kind it knows, and it does not take frames handed after an underrun to have
+sounded. This harness's two readers: `lab align` reads none of the four, of
+any kind, and aligns such a play as any other; `lab assess` reads
+`unplayed_frames` only, takes it as `null` for such a play, lists the play
+under `not_assessed`, and calls every marker of such a play with an underrun
+`unknown`, as it does on a sink (*`assessment.json`*).
+
+**Older runs.** Layout 1 is the run directory before the four keys were
+defined by the output kind. `lab align` and `lab assess` refuse a layout-1
+run by its number, as they refuse any layout but their own; a layout-1 run is
+read by the harness revision that wrote it.
 
 ## Common shapes
 
@@ -176,7 +213,7 @@ Written when the run directory is created, and rewritten whole (to a
 temporary file, then a rename) each time a capture or a play starts.
 
 ```json
-{"layout": 1,
+{"layout": 2,
  "run_id": "<uuid4>",
  "created": {…clock reading, runner's machine…},
  "runner": {"machine": "bench"},
@@ -314,8 +351,7 @@ says what each field means.
   each marker lies in the kept copy (`frame`, its first frame, and `frames`,
   its length). `null` when the file carries none, which refuses nothing: an
   unmarked file, or a marked one altered since (normalised, resampled,
-  trimmed). An entry written before the harness recorded markers has no
-  `marker` key. *The marker* below defines each identifier.
+  trimmed). *The marker* below defines each identifier.
 - `level_mb` is the level at which a full-scale sample is played: the level
   control's volume plus the held controls', from the values read back. It is
   what the cap bounds. **The play's own peak level** is
@@ -324,12 +360,38 @@ says what each field means.
 - `controls` are the controls as the role set and read them back, on every
   channel; `found` is how they stood before the role moved them, which is
   what the role restores.
-- `output.library` is the host's ALSA library, which the build does not pin,
-  with the version it reported.
-- `first` is a **mark**: the frames handed so far, the device's own delay
-  reading then, and the role's clock reading directly after. Frame
-  `frames_handed − delay_frames` of the kept copy is, by the device's
-  account, at its output at `at`.
+- `device`, `output.library` and `first.delay_frames` are defined by
+  `output.kind` (*The version rule*).
+  - `alsa`: `device` is the card as ALSA and USB name it, as in a capture
+    entry; `output.library` is the host's ALSA library, which the build does
+    not pin, with the version it reported; `delay_frames` is the device's own
+    delay reading.
+  - `pulse`: `device` is the sound server's sink, `{selector, sink_name,
+    description, server_name, server_version, rate_hz, channels,
+    server_sample_format, hardware_volume, base_volume_mb}`: the configured
+    selector; the sink's name and description as the server gave them
+    (`description` `null` when it has none); the server's name and version;
+    the sink's own rate and channel count; `server_sample_format`, the
+    server's string for the sink's own format (`s32le`, `float32le`, …), kept
+    unparsed and **not** in the vocabulary of `granted.sample_format`;
+    whether the server reports the sink's volume as a hardware one; and the
+    server's base volume for the sink in millibels, read as a sink volume is
+    read, 0 when the base is the sink's full volume. `output.library` is the
+    pinned sink client, `pulseaudio-rs` with its version. `delay_frames` is
+    **the sound server's estimate**: the frames in the stream's buffer plus
+    the server's latency to the sink, as the server reports them.
+- `first` is a **mark**: the frames handed so far, the output's delay reading
+  then, and the role's clock reading directly after. Frame
+  `frames_handed − delay_frames` of the kept copy is, by the output's own
+  account, at its output at `at`: on a card by the device's, on a sink by the
+  sound server's estimate.
+- On a sink, `controls` and `found` hold one control, `sink` index 0, a
+  channel per sink channel named by its position. `level_mb` is relative to
+  the sink's full volume, not to the device's unamplified level: where
+  `base_volume_mb` is under 0, the device's own gain at 0 mB is above its
+  unamplified level by `−base_volume_mb`, and the same loudness reads lower
+  on the sink by that much than on the card opened directly. A cap does not
+  carry between the two (`experiments.md`, *On a sound-server sink*).
 
 ### The harness's revision
 
@@ -379,7 +441,7 @@ manifest still stand. A `.results.json.tmp` or `.manifest.json.tmp` beside
 them is such a write left unfinished, and is not part of the record.
 
 ```json
-{"schema": 1, "run_id": "…",
+{"schema": 2, "run_id": "…",
  "outcome": "completed", "completed": true, "failure": null,
  "started": {…}, "ended": {…},
  "recorded": {"captures_started": 1, "captures_stopped": 1, "frames": 159680},
@@ -467,13 +529,32 @@ them is such a write left unfinished, and is not part of the record.
   - `stopped_by`: `script`, or `runner` when the runner cut the play at
     `release`; `null` otherwise.
   - `frames`: the kept copy's frames. `frames_handed`: how many of them were
-    handed to the device. `unplayed_frames`: the device's delay read just
-    before a cut, the handed frames that were discarded; 0 for a completed
-    play, `null` when it could not be read.
-  - `underruns`: every underrun, `{at_frame, at, detail}`. Sound was
-    interrupted at `at_frame` for an unknown length.
+    handed to the device. `unplayed_frames`: the delay read just before a
+    cut, the handed frames that were discarded; 0 for a completed play,
+    `null` when it could not be read. It and the marks' `delay_frames` are
+    defined by the play's `output.kind` in its source entry (*The version
+    rule*); for `alsa` they are the device's own account, for `pulse` the
+    sound server's estimate.
+  - `underruns`: every underrun, `{at_frame, at, detail}`: the output
+    reported, at that point of the play, that it had run out of frames;
+    `at_frame` is the count of frames handed when the report reached the
+    role. What follows is the output's behaviour:
+    - `alsa`: a gap of unknown length, then every frame handed after it,
+      late. The kept copy is what sounded, with a gap.
+    - `pulse`: a gap, and frames handed over after the server ran out may be
+      skipped by the server and never sound. The kept copy of such a play is
+      what the role handed to the sink and is **longer than what sounded**.
+      The report can trail the server's running out by one write, so the
+      skipped frames can begin shortly before `at_frame`. A sink's underrun
+      is reported at the role's next write, so one that happens as the play's
+      last write is sent is not on the record: such a play can end
+      `completed` with no underrun, having lost frames of its last tenth of a
+      second. Read in one server's source; measured on none.
   - `as_sent`: true only when the play ended `completed` with no underrun:
-    the device took every frame of the copy as given.
+    the device took every frame of the copy as given. On a sink a play with
+    an underrun may also have frames that never sounded, and `as_sent` is
+    subject to the limit just stated: a sink that ran out as the last write
+    was sent leaves it true.
   - `first`, `last`: the marks after the first and the last write. `end`: the
     role's reading once the stream was closed.
   - `restored`: whether the role put every control back as found
@@ -531,7 +612,19 @@ the capture kind's, this table holds for a playback role's failure:
 | `controls_moved` | `{control}`, the control that moved; empty when the controls could not be read |
 | `source_changed` | `{sha256}`: the hash the source had when it was judged |
 | `unknown_command` | `{command}` |
-| `source_outside`, `source_missing`, `source_format`, `alsa_missing`, `mixer`, `stream_died`, `role_io`, `role_error`, `already_playing`, `not_playing` | empty |
+| `source_outside`, `source_missing`, `source_format`, `alsa_missing`, `mixer`, `role_io`, `role_error`, `already_playing`, `not_playing` | empty |
+| `stream_died` | `{delay_frames}`, the last delay read, when the output did not play its buffer out by the end-of-play bound; empty otherwise |
+
+On a sink (`output = "pulse"`) the reasons the sink output names carry:
+
+| Reason | `data` |
+|---|---|
+| `no_sink` | at the resolve, `{selector, sinks}`: the configured `sink` and each sink present, `{name, description}`; later, `{sink}`, the sink's name, when it vanished |
+| `ambiguous_sink` | `{selector, sinks, matched}`: as `no_sink`, and the matching sinks' names |
+| `sink_volume` | `{sink}` |
+| `stream_moved` | `{sink, volumes, muted}`: where the stream was and its raw volumes and mute, when it was off the sink, not at 0 dB or muted; `{sink}`, the play's sink, when the client refused to read the stream |
+| `params`, `open` | `{rate_hz, channels, sample_format}`: what was asked |
+| `no_server`, `client`, `client_missing`, `no_control`, `mixer`, `stream_died` | empty, `stream_died` at the end-of-play bound as above |
 
 After `write_stalled` the frame log's completeness was not established;
 brenn-pod's `frame-log` tool is the reader that can say more.
@@ -705,7 +798,7 @@ And for the pair on that channel:
   both markers were found: `capture_hole` (a `clock_estimate` or `unknown`
   hole lies between the midpoints, so the capture's index skipped time) or
   `underrun` (the play's results record an underrun between the markers, so
-  the source skipped time).
+  the play did not run evenly between them).
 - `offset_frames`: the capture frame at which frame 0 of the kept copy lies,
   fractional: `start midpoint − r · (the start marker's midpoint in the kept
   copy)`, `r` being `ratio` when it was measured and the nominal
@@ -817,10 +910,10 @@ the largest capture's export, in the run's `.alignment.tmp/`.
 
 `align` locks nothing. On a run still recording, the manifest is whole at
 every instant and a capture still being written exports with an
-`unterminated` tail; the report describes the run so far. A run made before
-the harness recorded markers has no `marker` key in its source entries, and
-its plays are `no_marker_record`. A run made before the playback kind has no
-`sources` in its results; its captures are read as in any other run.
+`unterminated` tail; the report describes the run so far. A source entry
+with no `marker` key is `no_marker_record`, and results with no `sources`
+are read as a run with no play. A layout-1 run is refused (*The version
+rule*).
 
 ## `assessment.json`
 
@@ -941,7 +1034,8 @@ A `not_assessed` entry has exactly `what`, `reason`, `role`, `capture`,
 | `capture` | `missing`, `export_refused`, `capture_differs`, `reader_contract` | the capture could not be read; each is also `capture_unreadable`. `reader_contract` may be the reader's fault or the log's, and the assessment cannot tell which |
 | `recorder_account` | `no_record` | `results.json` holds no record of a capture the manifest names |
 | `results` | `no_results` | the run left no `results.json`: no recorder's account and no play side |
-| `markers` | `no_marker_record` | the play's entry has no `marker` key (a run made before the marker record) |
+| `play_account` | `unknown_output_kind` | the play's `output.kind` is not one this harness knows: its `unplayed_frames` is not read and is `null` in the play's `record` and in `play_cut_by_runner`'s data; the detail names the role, the play and the kind. Listed for every such play, a completed one too |
+| `markers` | `no_marker_record` | the play's entry has no `marker` key |
 | `markers` | `unknown_definition` | the play's marker is one this harness cannot search for |
 | `markers` | `copy_unusable` | the play is marked and its kept copy is missing or differs; also `kept_copy_unusable` |
 | `markers` | `no_capture_searched` | the play is marked and no pair with it was tried: no capture, none readable, or every rate too low |
@@ -1048,7 +1142,9 @@ One entry per source entry of every playback role:
 ```
 
 - `record`: the play's record in `results.json`, `underruns` as a count;
-  `null` when there is none.
+  `null` when there is none. Its `unplayed_frames` means what the results say
+  it means for the play's output kind, and is `null` for a kind this harness
+  does not know.
 - `marker.state`: alignment's state of the play. `start`, `end`: whether
   each marker is expected in a capture, below; `null` unless the state is
   `marked`. `located`: alignment's rule, both markers found on one channel
@@ -1065,8 +1161,8 @@ marker of a marked play is given one word from the play's record:
 | Word | When |
 |---|---|
 | `not_handed` | the frames handed do not reach the marker's last frame; alignment did not search for it |
-| `expected` | the marker was handed whole and the record shows it left the device: the play ended `completed`, or `frames_handed − unplayed_frames` reaches the marker's last frame; also when the run has no record of the play |
-| `unknown` | the marker was handed whole and the play was cut or failed with the marker in the frames discarded, or with `unplayed_frames` `null`. Alignment searches for it, and the run cannot say whether it sounded |
+| `expected` | the marker was handed whole and the record shows it left the device: the play ended `completed` (with no underrun, on an output that may skip after one), or `frames_handed − unplayed_frames` reaches the marker's last frame; also when the run has no record of the play. On a sink the record cannot show an underrun as the play's last write was sent (*`results.json`*, `underruns`), so an end marker `expected` there rests on that limit |
+| `unknown` | the marker was handed whole and the play was cut or failed with the marker in the frames discarded, or with `unplayed_frames` `null`; or the play's record has an underrun and its output kind is one that may skip frames after one (`pulse`, or a kind this harness does not know), however the play ended, every marker of the play. Alignment searches for it, and the run cannot say whether it sounded |
 
 A marker found counts wherever it was found. A marker `not_handed` or
 `unknown` and not found is neither a finding nor a `not_assessed` entry.
@@ -1077,12 +1173,13 @@ The assessment locks nothing; on a run still recording it describes the run
 so far, and a capture being written is `log_not_ended`. A run with no
 `results.json`, including one whose runner died while writing it, is
 assessed in part: `run_not_completed` and `results`/`no_results`, every
-capture read and measured, loss stated from the reader alone. A run made
-before the marker record is `incomplete` for its plays' markers. A
-`manifest.json` or `results.json` that is present and damaged is refused, as
-above. One `results.json` the runner writes itself is refused the same way.
-When a capture's recorder reader failed, or a play's thread failed before
-reporting its end, and a command of the script's raised that error, the run
+capture read and measured, loss stated from the reader alone. A layout-1
+run is refused by its number (*The version rule*). A `manifest.json` or
+`results.json` that is present and damaged is refused, as above; a source
+entry with no `output.kind` is such damage, refused before any capture is
+read, though `lab align`, which does not read the key, still aligns the run. One `results.json` the runner writes itself is refused the same way.
+When a capture's recorder reader failed, or a play's end could not be
+reported, and a command of the script's raised that error, the run
 ends `failed` and the record keeps `ended` `null`, a play's `restored` too;
 the run is not assessed
 (`errhandling-assessment-refuses-runner-written-null-ended` in the tracker).
@@ -1196,6 +1293,14 @@ one to a frame of the other. On a device that samples both on one clock the
 offset is constant across a play with no underrun; correlation finds it once.
 `lab align` is that correlation for a marked source: it reports the offset
 and the drift between the markers in `alignment.json`, reading no clock.
+
+A play on a sound-server sink is no clock tie at all. The server resamples
+and remixes the role's frames on their way to the device, so no frame of the
+kept copy is a sample on the device's clock, a `pulse` role may state no
+`sample_clock`, and its marks' `delay_frames` are the server's estimate. Its
+marks place the play on the machine's clock to within that estimate and no
+better; correlation of a marked source is the only measure of where it lies
+in a capture.
 
 Not measured by this harness: the offset to the frame by any means but
 correlation; the latency from the capture's trigger to its frame 0; whether

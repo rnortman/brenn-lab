@@ -8,6 +8,7 @@ import os
 import textwrap
 import threading
 import wave
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,7 @@ def outputs(monkeypatch: pytest.MonkeyPatch) -> list[FakeOutput]:
     """
     made: list[FakeOutput] = []
 
-    def make(card: str) -> FakeOutput:
+    def make(card: str, programs: Mapping[str, str]) -> FakeOutput:
         assert card == "Fake"
         fake = FakeOutput([FakeControl(LEVEL), FakeControl(HELD)], speed=4.0)
         made.append(fake)
@@ -324,8 +325,8 @@ def test_a_play_that_fails(tmp_path: Path, outputs: list[FakeOutput]) -> None:
 
     real = output.OUTPUTS["alsa"]
 
-    def moved_at_third_write(card: str) -> output.Output:
-        made = real(card)
+    def moved_at_third_write(card: str, programs: Mapping[str, str]) -> output.Output:
+        made = real(card, programs)
         assert isinstance(made, FakeOutput)
         made.on_write = lambda n: made.move(LEVEL, 0, volume_mb=-1000) if n == 3 else None
         return made

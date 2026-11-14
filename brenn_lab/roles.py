@@ -39,10 +39,12 @@ name, the programs that machine names, its device parameters as the kind's
 
 @dataclass(frozen=True)
 class Kind:
-    """A role kind: the programs a machine hosting one must name in its
+    """A role kind: the programs a machine hosting one may name in its
     `programs` table, the reader of its `device` parameters, which returns
     them or None with every problem recorded in the table it is given, and the
-    factory of its hosted roles.
+    factory of its hosted roles. `needs` gives the programs a role with the
+    parameters read must find on its machine; `clock_refusal` why a role with
+    them can state no `sample_clock`, or None.
 
     What a run records of the kind: `section` names the kind's directory
     under the run, the key of a role's entries in the manifest's role section
@@ -56,6 +58,8 @@ class Kind:
     name: str
     programs: frozenset[str]
     read_device: Callable[[Table], object | None]
+    needs: Callable[[object], frozenset[str]]
+    clock_refusal: Callable[[object], str | None]
     make: Factory
     section: str
     totals_key: str
@@ -85,8 +89,23 @@ def _make_playback(
     place: Place | None,
 ) -> Role:
     assert isinstance(parameters, PlaybackDevice)
-    output = OUTPUTS[parameters.output](parameters.card)
+    output = OUTPUTS[parameters.output](parameters.selector, programs)
     return PlaybackRole(name, machine, parameters, output, sink, place)
+
+
+def _playback_needs(parameters: object) -> frozenset[str]:
+    assert isinstance(parameters, PlaybackDevice)
+    return frozenset({"pulse_client"}) if parameters.output == "pulse" else frozenset()
+
+
+def _playback_clock_refusal(parameters: object) -> str | None:
+    assert isinstance(parameters, PlaybackDevice)
+    if parameters.output == "pulse":
+        return (
+            "a role on a sound server's sink samples on no device's clock: the server "
+            "resamples and remixes its frames on the way to the device"
+        )
+    return None
 
 
 KINDS: dict[str, Kind] = {
@@ -94,6 +113,8 @@ KINDS: dict[str, Kind] = {
         name=capture.KIND,
         programs=frozenset({"pod_capture"}),
         read_device=read_device,
+        needs=lambda parameters: frozenset({"pod_capture"}),
+        clock_refusal=lambda parameters: None,
         make=_make_capture,
         section="captures",
         totals_key="recorded",
@@ -103,8 +124,10 @@ KINDS: dict[str, Kind] = {
     ),
     playback.KIND: Kind(
         name=playback.KIND,
-        programs=frozenset(),
+        programs=frozenset({"pulse_client"}),
         read_device=playback_device.read_device,
+        needs=_playback_needs,
+        clock_refusal=_playback_clock_refusal,
         make=_make_playback,
         section="sources",
         totals_key="played",

@@ -24,11 +24,19 @@ manifest, a journal of every command, reply and event, and results.
   configuration says. The build also pins brenn-pod's reader, `frame-log`.
   Its hardware-lane tests record from an attached reSpeaker Flex through the
   pinned recorder.
-- **Playback** plays WAV files through an ALSA card, keeps an exact copy of
-  every play in the run, and holds the card under a volume cap and quiet
-  hours that only the lab configuration sets. A lab configuration may state
-  that two roles sample on one device clock. Its audible-lane test plays
-  through an attached reSpeaker Flex while the capture role records it.
+- **Playback** plays WAV files through an ALSA card or a sink of the
+  desktop's sound server, keeps an exact copy of every play in the run, and
+  holds the output under a volume cap and quiet hours that only the lab
+  configuration sets. A lab configuration may state that two roles sample on
+  one device clock. Its audible-lane test plays through an attached reSpeaker
+  Flex while the capture role records it. On a sink the role runs a sound
+  server client this repository builds, loads no host sound library, and
+  holds the sink's volume; it has been tested against a stand-in server and,
+  read only, against a real one, and has played on no real sink.
+- **Examples**: `examples/anchoring_scenario.py` plays a talker on one output
+  and the robot's own sound on another, overlapping, while a capture records;
+  the tree carries one known speech clip, from CMU ARCTIC, to use as the
+  talker.
 - **Alignment** finds where each play lies in each capture by the sound
   alone, reading no clock. `lab mark` puts a marker before and after a
   source; a play records the marker its source carries; `lab align` searches
@@ -42,8 +50,7 @@ manifest, a journal of every command, reply and event, and results.
   alignment, and writes `assessment.json`, whose `answer` is `clean`,
   `findings` or `incomplete`. No finding rests on a threshold.
 
-There is no output other than an ALSA card, and roles on other machines
-cannot be reached.
+Roles on other machines cannot be reached.
 
 - `docs/reference/experiments.md`: the lab configuration, writing a script,
   the capture and playback roles, the dry run and the run, marking a source,

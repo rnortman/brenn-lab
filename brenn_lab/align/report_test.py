@@ -137,6 +137,19 @@ def test_two_plays_on_two_roles_overlapping_are_each_attributed(tmp_path: Path) 
     assert again == done
 
 
+def test_a_play_of_an_unknown_output_kind_is_aligned_as_any_other(tmp_path: Path) -> None:
+    def aligned(name: str, output: str) -> dict[str, Any]:
+        play = Play("speaker", 1, 3, at=5000.0, ended="stopped", stopped_by="runner", output=output)
+        done = align(scenes.build(tmp_path / name, [play]).run)
+        for key in ("written", "replaces"):
+            del done[key]
+        return done
+
+    known = aligned("known", "alsa")
+    assert channel(known, "speaker", 1)["start"]["outcome"] == "found"
+    assert aligned("unknown", "invented") == known
+
+
 def twice(member_b: int = 2, role_b: str = "speaker", **b: Any) -> list[Play]:
     """The same marked file, member 2, played twice; the second's settings in `b`."""
     return [
@@ -618,7 +631,7 @@ def test_a_run_that_cannot_be_written_is_refused_and_unchanged(
         ("absent", "unreadable"),
         ("no_manifest", "unreadable"),
         ("not_json", "unreadable"),
-        ("layout_2", "layout"),
+        ("layout_1", "layout"),
         ("malformed", "unreadable"),
     ],
 )
@@ -628,10 +641,10 @@ def test_a_run_that_cannot_be_read_is_refused(tmp_path: Path, setup: str, reason
         run.mkdir()
     if setup == "not_json":
         (run / "manifest.json").write_text("{")
-    elif setup == "layout_2":
-        (run / "manifest.json").write_text(json.dumps({"layout": 2, "roles": {}}))
+    elif setup == "layout_1":
+        (run / "manifest.json").write_text(json.dumps({"layout": 1, "roles": {}}))
     elif setup == "malformed":
-        (run / "manifest.json").write_text(json.dumps({"layout": 1, "roles": {"r": {}}}))
+        (run / "manifest.json").write_text(json.dumps({"layout": 2, "roles": {"r": {}}}))
     refused = report.align(run, READER, True, HARNESS)
     assert isinstance(refused, Failure)
     assert refused.reason == reason

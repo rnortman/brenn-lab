@@ -13,6 +13,7 @@ from python.runfiles import runfiles
 
 PROGRAMS: dict[str, str] = {
     "pod_capture": "_main/tools/brenn_pod/pod-capture",
+    "pulse_client": "_main/brenn_lab/playback/pulse_client/pulse-client",
 }
 """Each pinned program's runfiles path."""
 

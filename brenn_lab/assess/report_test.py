@@ -15,6 +15,7 @@ from brenn_lab.align import report as alignment
 from brenn_lab.assess import report
 from brenn_lab.data import Failure, JsonObject
 from brenn_lab.marker import Carried
+from brenn_lab.playback.output import OUTPUTS
 from brenn_lab.testing import scenes
 from brenn_lab.testing.scenes import (
     Account,
@@ -377,6 +378,121 @@ def test_a_marked_play_cut_with_its_end_marker_discarded(tmp_path: Path, unplaye
     assert len(marker["found_in"]) == 1
 
 
+def cut_by_runner(probe: Carried, output: str, ended: str = "stopped") -> Play:
+    """A marked play of `output`'s kind whose results record says every frame
+    it handed sounded, so that a reader taking the figure calls both markers
+    `expected`.
+    """
+    frames = probe.end.frame + probe.end.frames
+    return Play(
+        "speaker",
+        1,
+        1,
+        at=2000.0,
+        ended=ended,
+        stopped_by="runner" if ended == "stopped" else None,
+        handed=frames,
+        unplayed=0,
+        output=output,
+    )
+
+
+def test_a_play_of_an_unknown_output_kind_does_not_read_its_unplayed_frames(
+    tmp_path: Path,
+) -> None:
+    play = cut_by_runner(carried(tmp_path), "invented")
+    done = assess(scenes.build(tmp_path / "run", [play]).run)
+    assert done["answer"] != "clean"
+    [p] = done["plays"]
+    assert p["record"]["unplayed_frames"] is None
+    assert (p["marker"]["start"], p["marker"]["end"]) == ("unknown", "unknown")
+    [cut] = [f for f in done["findings"] if f["finding"] == "play_cut_by_runner"]
+    assert cut["data"]["unplayed_frames"] is None
+    [entry] = [n for n in done["not_assessed"] if n["what"] == "play_account"]
+    assert (entry["reason"], entry["role"], entry["play"]) == ("unknown_output_kind", "speaker", 1)
+    assert "'invented'" in entry["detail"] and "speaker" in entry["detail"]
+
+
+def test_a_completed_play_of_an_unknown_output_kind_is_still_listed(tmp_path: Path) -> None:
+    play = cut_by_runner(carried(tmp_path), "invented", ended="completed")
+    done = assess(scenes.build(tmp_path / "run", [play]).run)
+    assert done["answer"] == "incomplete"
+    marker = done["plays"][0]["marker"]
+    assert (marker["start"], marker["end"]) == ("expected", "expected")
+    assert unexamined(done) == [("play_account", "unknown_output_kind")]
+
+
+def test_a_play_of_a_known_output_kind_reads_its_unplayed_frames(tmp_path: Path) -> None:
+    probe = carried(tmp_path)
+    for kind in sorted(OUTPUTS):
+        play = cut_by_runner(probe, kind)
+        done = assess(scenes.build(tmp_path / kind, [play]).run)
+        assert names(done) == ["play_cut_by_runner"]
+        assert unexamined(done) == []
+        [p] = done["plays"]
+        assert p["record"]["unplayed_frames"] == 0
+        assert (p["marker"]["start"], p["marker"]["end"]) == ("expected", "expected")
+
+
+@pytest.mark.parametrize("kind", ["alsa", "pulse", "invented"])
+@pytest.mark.parametrize("sounded", ["both", "start", "neither"])
+def test_a_completed_play_with_an_underrun_by_output_kind(
+    tmp_path: Path, kind: str, sounded: str
+) -> None:
+    probe = carried(tmp_path)
+    left = {"both": None, "start": probe.end.frame, "neither": 0}[sounded]
+    play = Play(
+        "speaker",
+        1,
+        1,
+        at=2000.0,
+        underruns=(probe.start.frame + probe.start.frames + 100,),
+        sounded=left,
+        output=kind,
+    )
+    done = assess(scenes.build(tmp_path / "run", [play]).run)
+    assert done["answer"] != "clean"
+    assert "play_underrun" in names(done)
+    marker = done["plays"][0]["marker"]
+    plays_on = kind == "alsa"
+    word = "expected" if plays_on else "unknown"
+    assert (marker["start"], marker["end"]) == (word, word)
+    assert len(marker["found_in"]) == (sounded == "both" or (sounded == "start" and not plays_on))
+    assert ("play_not_located" in names(done)) == (plays_on and sounded != "both")
+    account = [n for n in done["not_assessed"] if n["what"] == "play_account"]
+    assert len(account) == (kind == "invented")
+
+
+def test_a_source_entry_without_its_output_kind_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = scenes.build(tmp_path / "run", [Play("speaker", 1, 1, at=2000.0, output=None)])
+    before = listing(built.run)
+    exports: list[Path] = []
+    monkeypatch.setattr(capture, "read", lambda log, *a: exports.append(log))
+    refused = report.assess(built.run, READER, False, HARNESS)
+    assert isinstance(refused, Failure) and refused.reason == "unreadable"
+    assert "output" in refused.detail and "manifest" in refused.detail, refused.detail
+    assert listing(built.run) == before
+    assert exports == []
+
+
+def test_two_overlapping_marked_plays_on_two_roles_are_both_located(tmp_path: Path) -> None:
+    plays = [
+        Play("speaker", 1, 4, at=4000.0, content_frames=48000),
+        Play("talker", 1, 5, at=8000.0, level=0.316, drift_ppm=150.0, content_frames=48000),
+    ]
+    done = assess(scenes.build(tmp_path / "run", plays, [Capture(frames=7 * 16000)]).run)
+    assert done["answer"] == "clean"
+    assert [(p["role"], p["play"]) for p in done["plays"]] == [("speaker", 1), ("talker", 1)]
+    for p, play in zip(done["plays"], plays, strict=True):
+        marker = p["marker"]
+        assert (marker["start"], marker["end"], marker["located"]) == ("expected", "expected", True)
+        [where] = marker["found_in"]
+        assert where["offset_frames"] == pytest.approx(play.at, abs=0.5)
+    assert (done["summary"]["marked"], done["summary"]["located"]) == (2, 2)
+
+
 def test_plays_whose_markers_were_not_examined(tmp_path: Path) -> None:
     plays = [MARKED, Play("speaker", 2, 2, at=30000.0, record=False)]
     built = scenes.build(tmp_path / "run", plays, [Capture(refuse="usage", status=2)])
@@ -483,7 +599,7 @@ def test_a_missing_manifest_or_another_layout_is_refused(tmp_path: Path) -> None
     run.mkdir()
     refused = report.assess(run, READER, False, HARNESS)
     assert isinstance(refused, Failure) and refused.reason == "unreadable"
-    (run / "manifest.json").write_text(json.dumps({"layout": 2, "roles": {}}))
+    (run / "manifest.json").write_text(json.dumps({"layout": 1, "roles": {}}))
     refused = report.assess(run, READER, False, HARNESS)
     assert isinstance(refused, Failure) and refused.reason == "layout"
     assert listing(run) == {"manifest.json": (run / "manifest.json").read_bytes()}

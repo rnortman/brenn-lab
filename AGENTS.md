@@ -31,7 +31,9 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
   runner's own interpreter when it hosts a playback role, through
   `brenn_lab/playback/alsa.py` and nowhere else. Nothing in `make check`
   loads it (see Test lanes; the owner's question is
-  `lanes-load-host-alsa-runtime`).
+  `lanes-load-host-alsa-runtime`). A playback role on a sound-server sink
+  loads no host library: it runs the pinned sink client, which speaks the
+  server's protocol itself.
 - numpy, pinned in the Python lock, loads two host libraries at run time in
   the process that imports it: the C++ runtime, `libstdc++.so.6`, and zlib,
   `libz.so.1`. Its one importer in product code is the alignment search,
@@ -48,17 +50,20 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
 - Python dependencies are `requirements.in` and its lock,
   `requirements_lock.txt`, hash-pinned for both linux CPUs and resolved by the
   pinned uv with the hermetic interpreter. `make repin` regenerates it and the
-  four crate locks. After any change to `requirements.in`, a tool bump or a
+  five crate locks. After any change to `requirements.in`, a tool bump or a
   move of the brenn-pod pin, run it and commit every lock file that changed.
 - Python tests in BUILD files use `py_pytest_test` from
   `//tools/pytest:defs.bzl`.
 - The Rust and LLVM toolchains build the two gate tools, `//tools/scrub` (the
   secret scanner) and `//tools/allthechanges` (the changelog and TODO fragment
-  tool), and the two programs pinned from brenn-pod,
+  tool), the two programs pinned from brenn-pod,
   `//tools/brenn_pod:pod-capture` (the recorder the runner carries) and
-  `//tools/brenn_pod:frame-log` (the reader), each hub pinned by its own
-  `Cargo.lock` and `cargo-bazel-lock.json`. The repository still has no Rust
-  of its own. `BRENN_POD_COMMIT` in `MODULE.bazel` is the one statement of
+  `//tools/brenn_pod:frame-log` (the reader), and the repository's own Rust,
+  the sink client `//brenn_lab/playback/pulse_client:pulse-client`, each hub
+  pinned by its own `Cargo.lock` and `cargo-bazel-lock.json`. The
+  repository's own Rust is held to rustfmt by a test in the default check and
+  to clippy, every warning an error, under `make check`'s lint config.
+  `BRENN_POD_COMMIT` in `MODULE.bazel` is the one statement of
   brenn-pod's revision, and `//tools/pins:pins_test` holds the file's uses of
   it and the recorded transcripts' README to it.
 - Moving the brenn-pod pin, in order: change `BRENN_POD_COMMIT`, `make repin`,
@@ -73,13 +78,13 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
 
 | Command | What it does |
 |---|---|
-| `make check` | The gate: scrub kit check, fragment lint, build, every default test, ruff, mypy, buildifier, tree scan |
+| `make check` | The gate: scrub kit check, fragment lint, build, every default test, ruff, mypy, rustfmt, clippy, buildifier, tree scan |
 | `make build` | Build every target |
 | `make test` | Every default test, without the lint aspect (the inner loop) |
-| `make hardware-test` | Run the hardware lane: tests that need a device attached |
+| `make hardware-test` | Run the hardware lane: tests that need a device attached or the desktop's sound server; passes `XDG_RUNTIME_DIR` to the tests |
 | `make audible-test WINDOW=...` | Run the audible lane: tests that play sound or move a robot. Refuses without `WINDOW` (see Test lanes) |
-| `make fix` | ruff (format and lint fixes) and buildifier the tree in place |
-| `make repin` | Regenerate the Python lock and the four crate locks |
+| `make fix` | ruff (format and lint fixes), rustfmt and buildifier the tree in place |
+| `make repin` | Regenerate the Python lock and the five crate locks |
 | `make todo-gather` | Fold `todo.d/` fragments into `TODO.md` |
 | `make changes ARGS=...` | Run allthechanges: `ARGS="query"`, `ARGS="todo query"`, `ARGS="gather --version X.Y.Z --dry-run"` |
 | `make lab ARGS=...` | Run the experiment runner: `ARGS="dry-run --lab <lab.toml> --machine <name> --script <script.py>"`, or `run` with `--out <dir>`; `ARGS="mark --source <in.wav> --out <out.wav> --member <n>"` to mark a source; `ARGS="align --run <dir>"` to align a run; `ARGS="assess --run <dir>"` to assess one |
@@ -130,8 +135,9 @@ formatter and fixer output) is not written by hand.
 
 A lane is a Bazel tag. Two lanes exist, and neither runs under `make check`:
 
-- `hardware`: a test that needs a device attached. Recording may happen at any
-  time, so this lane needs no permission to run.
+- `hardware`: a test that needs a device attached or the desktop's sound
+  server. Recording may happen at any time, so this lane needs no permission
+  to run.
 - `audible`: a test that plays sound or moves a robot, a robot's speaker and
   motors included. A test is in one lane: an audible test is tagged `audible`
   only, even when it also needs a device. A test that hands a frame to a
@@ -163,7 +169,12 @@ is never served from cache.
   lane test, `//brenn_lab:playback_flex_audible_test`, needs that Flex with a
   speaker on its output and with no firmware on the board's XIAO ESP32 module
   that configures the XVF3800. With such firmware on the module the board has
-  taken every frame written to it and played nothing.
+  taken every frame written to it and played nothing. The sink output's lane
+  test, `//brenn_lab:playback_pulse_hardware_test`, needs the desktop's sound
+  server, at `$XDG_RUNTIME_DIR/pulse/native`, with at least one sink; without
+  one the lane fails. It loads no host library, creates no stream and sets
+  nothing. On a host whose sound server is started on demand and is not
+  running, the test's connect starts it.
 - Both lanes need the desktop's sound server to leave the Flex's card alone:
   on the maintainer's bench, the card's profile in the sound server is set to
   off. With the card held by the sound server, the lanes fail at the open.

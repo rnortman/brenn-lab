@@ -279,3 +279,56 @@ def test_a_lab_may_hold_several_machines_and_roles() -> None:
     assert isinstance(result, LabConfig)
     assert sorted(result.machines) == ["bench", "robot"]
     assert sorted(result.roles) == ["desk", "mic"]
+
+
+def playback(output: str, sample_clock: str | None = None) -> str:
+    """Role `talker`, a playback on machine `bench` through `output`."""
+    selector = 'card = "Flex"\n[roles.talker.device.level]\nelement = "PCM"\nindex = 1'
+    if output == "pulse":
+        selector = 'sink = "Desk"'
+    clock = "" if sample_clock is None else f'sample_clock = "{sample_clock}"'
+    return f"""
+[roles.talker]
+kind = "playback"
+machine = "bench"
+{clock}
+[roles.talker.device]
+output = "{output}"
+source_dir = "/data/sources"
+cap_mb = -2400
+quiet_hours = []
+{selector}
+"""
+
+
+def test_a_sink_role_needs_the_sink_client_on_its_machine() -> None:
+    assert _reasons(GOOD + playback("pulse")) == {("roles.talker.machine", "missing_program")}
+    [problem] = _problems(GOOD + playback("pulse"))
+    assert "machines.bench.programs.pulse_client" in problem.detail
+
+
+def test_a_card_role_does_not_need_the_sink_client() -> None:
+    assert isinstance(parse((GOOD + playback("alsa")).encode()), LabConfig)
+
+
+def test_the_sink_client_installed_or_pinned() -> None:
+    for form in ('"/opt/lab/pulse-client"', "{ pinned = true }"):
+        text = GOOD.replace(PATH_FORM, f"{PATH_FORM}\npulse_client = {form}") + playback("pulse")
+        result = parse(text.encode())
+        assert isinstance(result, LabConfig), result
+        assert "pulse_client" in result.machines["bench"].programs
+
+
+def test_a_sink_role_states_no_sample_clock() -> None:
+    text = GOOD.replace(PATH_FORM, f'{PATH_FORM}\npulse_client = "/opt/lab/pulse-client"')
+    [problem] = _problems(text + playback("pulse", sample_clock="desk"))
+    assert (problem.key, problem.reason) == ("roles.talker.sample_clock", "bad_value")
+    assert "resamples" in problem.detail
+
+
+def test_a_card_role_and_a_capture_role_still_state_a_sample_clock() -> None:
+    text = GOOD.replace('machine = "bench"\n', 'machine = "bench"\nsample_clock = "flex"\n', 1)
+    result = parse((text + playback("alsa", sample_clock="flex")).encode())
+    assert isinstance(result, LabConfig), result
+    assert result.roles["mic"].sample_clock == "flex"
+    assert result.roles["talker"].sample_clock == "flex"

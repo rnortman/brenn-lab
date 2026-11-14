@@ -22,11 +22,11 @@ help:
 	@echo "  make check          the gate: scrub kit, fragment lint, build, test, ruff, mypy, buildifier, tree scan"
 	@echo "  make build          build every target"
 	@echo "  make test           run every default test, without the lint aspect"
-	@echo "  make hardware-test  run the hardware lane: tests that need a device attached"
+	@echo "  make hardware-test  run the hardware lane: tests that need a device attached or the desktop's sound server"
 	@echo "  make audible-test WINDOW=<agreed window>"
 	@echo "                      run the audible lane: tests that play sound or move a robot"
-	@echo "  make fix            ruff (format and lint fixes) and buildifier the tree in place"
-	@echo "  make repin          regenerate the Python lock and the four crate locks"
+	@echo "  make fix            ruff (format and lint fixes), rustfmt and buildifier the tree in place"
+	@echo "  make repin          regenerate the Python lock and the five crate locks"
 	@echo "  make todo-gather    fold todo.d fragments into TODO.md"
 	@echo "  make changes        run allthechanges (ARGS=\"query\", ARGS=\"todo query\", ...)"
 	@echo "  make lab            run the experiment runner (ARGS=\"dry-run --lab ... --machine ... --script ...\")"
@@ -38,8 +38,8 @@ help:
 # most important, so it runs first. The fragment lint follows: a malformed
 # changelog.d or todo.d fragment fails here rather than at release time. One
 # `bazel test` then carries the build of every target, every default test
-# (pytest, ruff, buildifier, the pins), and (via the config) mypy over every
-# Python target. The tree scan runs last: it is the backstop that sees the
+# (pytest, ruff, buildifier, rustfmt, the pins), and (via the config) mypy over
+# every Python target and clippy over the repository's own Rust. The tree scan runs last: it is the backstop that sees the
 # whole tracked tree. Every tool is pinned in MODULE.bazel and fetched by
 # checksum, so no lane can skip.
 # TODO(dependency-audit-lane): a licence and advisory audit of the dependency graph, through
@@ -66,7 +66,7 @@ test:
 # audible-test and its WINDOW.
 .PHONY: hardware-test
 hardware-test:
-	bazel test --test_tag_filters=hardware,-audible --test_env=LAB_LANE=hardware //...
+	bazel test --test_tag_filters=hardware,-audible --test_env=LAB_LANE=hardware --test_env=XDG_RUNTIME_DIR //...
 
 # Anything audible needs the maintainer's agreement on when. WINDOW is a speed
 # bump, not an enforcement: it keeps the lane off tab completion and puts the
@@ -100,16 +100,19 @@ todo-gather:
 	$(CHANGES) todo gather
 
 # Scoped to what `check` enforces that has a fixer, so `make fix && make check`
-# is a clean cycle: ruff's format and lint fixes, then buildifier. mypy
-# findings are fixed by hand.
+# is a clean cycle: ruff's format and lint fixes, rustfmt over the
+# repository's own Rust, then buildifier. mypy and clippy findings are fixed
+# by hand.
 .PHONY: fix
 fix:
 	bazel run //tools/ruff:fix
+	bazel run @rules_rust//:rustfmt
 	bazel run //:buildifier
 
-# Re-renders the four crate hubs with the pinned cargo: the two gate tools',
-# tools/scrub's and tools/allthechanges's, and the two programs pinned from
-# brenn-pod, under tools/brenn_pod. Then regenerates requirements_lock.txt from
+# Re-renders the five crate hubs with the pinned cargo: the two gate tools',
+# tools/scrub's and tools/allthechanges's, the two programs pinned from
+# brenn-pod, under tools/brenn_pod, and the sink client's, under
+# brenn_lab/playback/pulse_client. Then regenerates requirements_lock.txt from
 # requirements.in with the pinned uv and the hermetic interpreter. The hubs go
 # first: a crate lock that no longer matches MODULE.bazel fails every Bazel
 # command that evaluates the crate extension, and the repin is the repair. A
@@ -118,7 +121,7 @@ fix:
 .PHONY: repin
 repin:
 	CARGO_BAZEL_REPIN=1 bazel fetch --repo=@scrub_crates --repo=@allthechanges_crates \
-	    --repo=@pod_capture_crates --repo=@frame_log_crates
+	    --repo=@pod_capture_crates --repo=@frame_log_crates --repo=@pulse_client_crates
 	bazel run //:requirements.update
 
 # Wire git at the tracked hooks directory through the scrub kit's own init,

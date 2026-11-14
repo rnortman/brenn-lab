@@ -6,10 +6,10 @@ so on linux x86_64 a build needs nothing from the host but bazelisk and git. On
 linux aarch64 the C toolchain has no pinned sysroot and links against the
 host's, the recorder's libasound included. Python dependencies are not declared
 here: `requirements.in` names them and `requirements_lock.txt` pins them with
-hashes; `make repin` regenerates that lock and the four crate locks. The Rust
+hashes; `make repin` regenerates that lock and the five crate locks. The Rust
 and LLVM toolchains build the two gate tools, brenn-scrub and allthechanges,
-and the two programs pinned from brenn-pod, pod-capture and frame-log; the
-repository has no Rust of its own.
+the two programs pinned from brenn-pod, pod-capture and frame-log, and the
+repository's own Rust, the sink client.
 """
 
 module(name = "brenn_lab")
@@ -83,10 +83,10 @@ http_archive(
           "/ruff-aarch64-unknown-linux-musl.tar.gz",
 )
 
-# --- Rust toolchain, for the gate tools and brenn-pod's programs ------------
+# --- Rust toolchain -------------------------------------------------------
 # brenn-scrub publishes no binaries, so the gate builds it from its crate, and
 # allthechanges the same way; brenn-pod's recorder and reader are built from
-# their crates at a pinned commit. Nothing else here is Rust.
+# their crates at a pinned commit; the sink client is this repository's own.
 RUST_VERSION = "1.98.0"
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
@@ -209,7 +209,44 @@ crate.from_specs(
     cargo_lockfile = "//tools/brenn_pod/frame_log:Cargo.lock",
     lockfile = "//tools/brenn_pod/frame_log:cargo-bazel-lock.json",
 )
-use_repo(crate, "allthechanges_crates", "frame_log_crates", "pod_capture_crates", "scrub_crates")
+
+# --- The sink client's crates ---------------------------------------------
+# The PulseAudio native protocol, pure Rust, and the JSON the client speaks to
+# the role, in a hub of their own for the repository's own Rust: the sink
+# client under brenn_lab/playback/pulse_client, pinned by the two files there.
+# PULSEAUDIO_VERSION is restated in that package's BUILD.bazel, which reports
+# it; //tools/pins:pins_test holds the two equal.
+PULSEAUDIO_VERSION = "0.3.2"
+
+crate.spec(
+    package = "pulseaudio",
+    repositories = ["pulse_client_crates"],
+    version = "=" + PULSEAUDIO_VERSION,
+)
+crate.spec(
+    features = ["derive"],
+    package = "serde",
+    repositories = ["pulse_client_crates"],
+    version = "=1.0.229",
+)
+crate.spec(
+    package = "serde_json",
+    repositories = ["pulse_client_crates"],
+    version = "=1.0.154",
+)
+crate.from_specs(
+    name = "pulse_client_crates",
+    cargo_lockfile = "//brenn_lab/playback/pulse_client:Cargo.lock",
+    lockfile = "//brenn_lab/playback/pulse_client:cargo-bazel-lock.json",
+)
+use_repo(
+    crate,
+    "allthechanges_crates",
+    "frame_log_crates",
+    "pod_capture_crates",
+    "pulse_client_crates",
+    "scrub_crates",
+)
 
 # --- gitleaks -------------------------------------------------------------
 # The release brenn-scrub 0.2.0 pins. brenn-scrub refuses any other gitleaks

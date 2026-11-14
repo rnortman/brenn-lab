@@ -13,16 +13,21 @@ from brenn_lab.testing.transcript_files import layout_of
 MACHINE = "bench"
 
 
-def lab_toml(program: str, card: str, sample_clock: str | None = None) -> str:
-    """Machine `bench`, whose `pod_capture` is `program` as TOML, and role
-    `mic`, a capture on `card` at 16 kHz, `s16_le`, with the six-name layout
-    of the clean transcript, stating `sample_clock` when one is given.
+def lab_toml(
+    program: str, card: str, sample_clock: str | None = None, pulse_client: str | None = None
+) -> str:
+    """Machine `bench`, whose `pod_capture` is `program` as TOML, and whose
+    `pulse_client` is that one when given, and role `mic`, a capture on
+    `card` at 16 kHz, `s16_le`, with the six-name layout of the clean
+    transcript, stating `sample_clock` when one is given.
     """
     clock = "" if sample_clock is None else f"sample_clock = {json.dumps(sample_clock)}"
+    client = "" if pulse_client is None else f"pulse_client = {pulse_client}"
     return textwrap.dedent(f"""\
         schema = 1
         [machines.{MACHINE}.programs]
         pod_capture = {program}
+        {client}
         [roles.mic]
         kind = "capture"
         machine = "{MACHINE}"
@@ -59,6 +64,25 @@ def speaker_toml(card: str, source_dir: Path, cap_mb: int) -> str:
         element = "PCM"
         index = 0
         volume_mb = 0
+        """)
+
+
+def talker_toml(sink: str, source_dir: Path, cap_mb: int) -> str:
+    """Role `talker`, a playback on the sound server's sink `sink` on machine
+    `bench`, playing from `source_dir` under `cap_mb` with no quiet hours. It
+    states no sample clock: a sink refuses one. Appended to `lab_toml`'s text
+    given a `pulse_client`.
+    """
+    return textwrap.dedent(f"""\
+        [roles.talker]
+        kind = "playback"
+        machine = "{MACHINE}"
+        [roles.talker.device]
+        output = "pulse"
+        sink = {json.dumps(sink)}
+        source_dir = {json.dumps(str(source_dir))}
+        cap_mb = {cap_mb}
+        quiet_hours = []
         """)
 
 

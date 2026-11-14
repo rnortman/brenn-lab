@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Holds two pins.
+# Holds three pins.
 #
 # The Python version, stated in four files that cannot share a constant, is the
 # same in all of them:
@@ -16,6 +16,10 @@
 #   3. exactly one "HIL_BUILD_COMMIT" line, whose value is BRENN_POD_COMMIT;
 #   4. the commit the recorded transcripts' README names is BRENN_POD_COMMIT,
 #      so a pin moved without retaking the transcripts fails here.
+#
+# The pulseaudio crate's version, which the sink client reports, is the one
+# the crate hub pins: PULSEAUDIO_VERSION in MODULE.bazel, used by the crate's
+# spec, equals PULSEAUDIO_VERSION in brenn_lab/playback/pulse_client/BUILD.bazel.
 set -euo pipefail
 
 # --- begin runfiles.bash initialization v3 ---
@@ -35,6 +39,7 @@ mypy_build="$(rlocation "$MYPY_BUILD")"
 mypy_ini="$(rlocation "$MYPY_INI")"
 ruff_toml="$(rlocation "$RUFF_TOML")"
 transcripts_readme="$(rlocation "$TRANSCRIPTS_README")"
+pulse_client_build="$(rlocation "$PULSE_CLIENT_BUILD")"
 
 # Prints the one value a sed script extracts from a file; fails unless there
 # is exactly one.
@@ -117,7 +122,25 @@ if [[ "$readme_commit" != "$brenn_pod_commit" ]]; then
     status=1
 fi
 
+pulseaudio_version="$(extract PULSEAUDIO_VERSION "$module_bazel" \
+    's/^PULSEAUDIO_VERSION = "\([^"]*\)"$/\1/p')"
+client_pulseaudio_version="$(extract PULSEAUDIO_VERSION "$pulse_client_build" \
+    's/^PULSEAUDIO_VERSION = "\([^"]*\)"$/\1/p')"
+pulseaudio_spec="$(extract "pulseaudio version spec" "$module_bazel" \
+    's/^ *version = "=" + \(PULSEAUDIO_VERSION\),$/\1/p')"
+if [[ "$client_pulseaudio_version" != "$pulseaudio_version" ]]; then
+    echo "FAIL: PULSEAUDIO_VERSION in brenn_lab/playback/pulse_client/BUILD.bazel" \
+        "is $client_pulseaudio_version but in MODULE.bazel is $pulseaudio_version" >&2
+    status=1
+fi
+if [[ "$pulseaudio_spec" != "PULSEAUDIO_VERSION" ]]; then
+    echo "FAIL: the pulseaudio crate's spec in MODULE.bazel does not pin" \
+        "PULSEAUDIO_VERSION" >&2
+    status=1
+fi
+
 if [[ "$status" -eq 0 ]]; then
-    echo "pins agree: python $python_version, brenn-pod $brenn_pod_commit"
+    echo "pins agree: python $python_version, brenn-pod $brenn_pod_commit," \
+        "pulseaudio $pulseaudio_version"
 fi
 exit "$status"

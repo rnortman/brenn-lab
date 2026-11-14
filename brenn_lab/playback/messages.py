@@ -31,10 +31,35 @@ class Source:
 
 @dataclass(frozen=True)
 class Library:
-    """A library the role loaded, with the version it reports."""
+    """The code through which the role reaches its device, a library it
+    loaded or a program it runs, as that code names and versions itself.
+    """
 
     name: str
     version: str
+
+
+@dataclass(frozen=True)
+class SinkIdentity:
+    """A sound server's sink as the server names it, and the server.
+
+    `description` is null for a sink the server describes not at all.
+    `server_sample_format` is the server's own string for the sink's format,
+    unparsed. `hardware_volume` says the server reports the sink's volume as
+    the device's own. `base_volume_mb` is the server's base volume for the
+    sink, read as a sink volume is; 0 when it is the sink's full volume.
+    """
+
+    selector: str
+    sink_name: str
+    description: str | None
+    server_name: str
+    server_version: str
+    rate_hz: int
+    channels: int
+    server_sample_format: str
+    hardware_volume: bool
+    base_volume_mb: int
 
 
 @dataclass(frozen=True)
@@ -130,7 +155,7 @@ class Started:
     source: Source
     copy: Location | None
     output: Output
-    device: CardIdentity
+    device: CardIdentity | SinkIdentity
     granted: Granted
     controls: tuple[Control, ...]
     found: tuple[Control, ...]
@@ -164,10 +189,12 @@ class Stopped:
 @result("playback.checked")
 @dataclass(frozen=True)
 class Checked:
-    """The card, its controls as found, and the limits in force. Nothing set, no stream opened."""
+    """The device, its controls as found, and the limits in force. Nothing
+    set, no stream opened.
+    """
 
     output: Output
-    device: CardIdentity
+    device: CardIdentity | SinkIdentity
     controls: tuple[CheckedControl, ...]
     cap_mb: int
     quiet_hours: tuple[QuietSpan, ...]

@@ -120,6 +120,50 @@ RESULT_BODIES: list[object] = [
     m.Released(stopped=STOPPED),
     m.Released(stopped=None),
 ]
+SINK = m.SinkIdentity(
+    selector="desk",
+    sink_name="alsa_output.usb-Desk_Speaker-00.analog-stereo",
+    description="Desk Speaker Analog Stereo",
+    server_name="PulseAudio (on PipeWire 1.6.9)",
+    server_version="15.0.0",
+    rate_hz=48000,
+    channels=2,
+    server_sample_format="s32le",
+    hardware_volume=True,
+    base_volume_mb=-1200,
+)
+SINK_OUTPUT = m.Output(kind="pulse", library=m.Library(name="pulseaudio-rs", version="0.3.2"))
+SINK_LEVEL = m.Control(
+    element="sink",
+    index=0,
+    part="level",
+    channels=(m.Channel("front-left", -1800, True), m.Channel("front-right", -1800, True)),
+)
+SINK_BODIES: list[object] = [
+    dataclasses.replace(
+        STARTED, output=SINK_OUTPUT, device=SINK, controls=(SINK_LEVEL,), found=(SINK_LEVEL,)
+    ),
+    m.Checked(
+        output=SINK_OUTPUT,
+        device=dataclasses.replace(SINK, description=None),
+        controls=(m.CheckedControl("sink", 0, "level", m.VolumeRange(-28899, 27093), ()),),
+        cap_mb=-2400,
+        quiet_hours=(),
+        local_time="2026-11-13T14:00:00-05:00",
+        quiet_now=False,
+    ),
+]
+RESULT_BODIES += SINK_BODIES
+
+
+def test_a_device_decodes_as_the_identity_whose_keys_it_has() -> None:
+    for body, kind in [(STARTED, CardIdentity), (SINK_BODIES[0], m.SinkIdentity)]:
+        message = Reply(role="speaker", command="playback.play", dry=False, outcome=body)
+        decoded = loads(dumps(message))
+        assert isinstance(decoded, Reply) and isinstance(decoded.outcome, m.Started)
+        assert type(decoded.outcome.device) is kind
+
+
 EVENT_BODIES: list[object] = [
     m.Ended(
         play=1,

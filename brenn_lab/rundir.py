@@ -28,7 +28,7 @@ from typing import IO
 
 from brenn_lab.data import JsonObject, to_text
 
-LAYOUT = 1
+LAYOUT = 2
 GITIGNORE = "*\n"
 
 

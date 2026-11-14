@@ -1,0 +1,91 @@
+"""The sink client, the program a playback role on a sound-server sink runs.
+
+`pulse-client` speaks the PulseAudio native protocol through the pinned
+`pulseaudio` crate, from `@pulse_client_crates`, a hub pinned by the two lock
+files here. In a dependant's runfiles it is
+`_main/brenn_lab/playback/pulse_client/pulse-client`.
+
+`pulse-stand-in` is a sound server for tests, built on the same crate.
+"""
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test", "rustfmt_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# The `pulseaudio` crate's version, as the client reports it. MODULE.bazel's
+# PULSEAUDIO_VERSION pins the crate; //tools/pins:pins_test holds the two equal.
+PULSEAUDIO_VERSION = "0.3.2"
+
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//tools/pins:__pkg__"],
+)
+
+rust_binary(
+    name = "pulse-client",
+    srcs = [
+        "src/conn.rs",
+        "src/main.rs",
+        "src/stand_in_test.rs",
+        "src/wire.rs",
+    ],
+    rustc_env = {"PULSEAUDIO_CRATE_VERSION": PULSEAUDIO_VERSION},
+    visibility = ["//brenn_lab:__subpackages__"],
+    deps = [
+        "@pulse_client_crates//:pulseaudio",
+        "@pulse_client_crates//:serde",
+        "@pulse_client_crates//:serde_json",
+    ],
+)
+
+rust_library(
+    name = "pulse_stand_in",
+    testonly = True,
+    srcs = ["stand_in/lib.rs"],
+    crate_root = "stand_in/lib.rs",
+    deps = [
+        "@pulse_client_crates//:pulseaudio",
+        "@pulse_client_crates//:serde",
+        "@pulse_client_crates//:serde_json",
+    ],
+)
+
+# The stand-in sound server as a program, for the binding's tests. In a
+# dependant's runfiles it is
+# `_main/brenn_lab/playback/pulse_client/pulse-stand-in`.
+rust_binary(
+    name = "pulse-stand-in",
+    testonly = True,
+    srcs = ["stand_in/main.rs"],
+    visibility = ["//brenn_lab:__subpackages__"],
+    deps = [
+        ":pulse_stand_in",
+        "@pulse_client_crates//:serde_json",
+    ],
+)
+
+rust_test(
+    name = "pulse_client_test",
+    size = "small",
+    crate = ":pulse-client",
+    deps = [":pulse_stand_in"],
+)
+
+sh_test(
+    name = "no_server_test",
+    size = "small",
+    srcs = ["no_server_test.sh"],
+    data = [":pulse-client"],
+    env = {"PULSE_CLIENT": "$(rlocationpath :pulse-client)"},
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+rustfmt_test(
+    name = "rustfmt_test",
+    size = "small",
+    targets = [
+        ":pulse-client",
+        ":pulse-stand-in",
+        ":pulse_client_test",
+        ":pulse_stand_in",
+    ],
+)
