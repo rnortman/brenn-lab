@@ -5,6 +5,13 @@ controls, the cap and quiet hours. It then writes the kept copy, opens the
 stream, sets the controls, hands the first chunk over and replies; a thread of
 the role's hands the rest over in chunks and, between chunks, ends the play if
 it was asked to stop, if a control it holds moved or if quiet hours began.
+
+A play with a stated start, a reading on the role's own clock, does all of
+that but the first hand-over and replies; its thread waits for the start,
+checking as between chunks while more than a chunk's time remains, and hands
+the first chunk over when the role's monotonic clock reaches it. From its wake
+to its end the thread reports nothing: its wake and first mark are carried by
+its end.
 """
 
 import datetime
@@ -38,6 +45,8 @@ from brenn_lab.playback.messages import (
     Channel,
     Checked,
     CheckedControl,
+    Clock,
+    ClockRead,
     Control,
     Ended,
     Failed,
@@ -70,6 +79,9 @@ MAX_RECOVERIES = 8
 PLAY_OUT_GRACE_SECONDS = 2.0
 """How long past the time its first reading of the delay gave a play's
 buffer may take to play out before the play ends."""
+LATE_SECONDS = 0.02
+"""How far past its stated start a play's thread may wake and still play;
+later than this the play fails `start_passed` with no frame handed."""
 
 
 @dataclass(frozen=True)
@@ -103,12 +115,17 @@ class _Playing:
     rate_hz: int
     # The local time of the last judgement of quiet hours, made just before the open.
     local_time: str
+    # The stated start; None for a play that stated none.
+    start: ClockReading | None = None
     # The controls as the first move read them; None until it has read them.
     found: tuple[Control, ...] | None = None
     set_to: tuple[Control, ...] = ()
     frames_handed: int = 0
     underruns: int = 0
     last: Mark | None = None
+    # A timed play's reading when its wait ended, and its mark after the first write.
+    woke: ClockReading | None = None
+    first: Mark | None = None
     stop: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     stopped: Stopped | None = None
@@ -181,6 +198,8 @@ class PlaybackRole:
         match body:
             case Check():
                 return self._check()
+            case Clock():
+                return ClockRead(self._clock())
             case Play():
                 return self._dry_play(body) if dry else self._play(body)
             case Stop():
@@ -247,7 +266,7 @@ class PlaybackRole:
         if isinstance(attached, Failure):
             return attached
         try:
-            outcome = self._limits(judged, attached, play.volume_mb)
+            outcome = self._limits(judged, attached, play.volume_mb, play.start)
         except BaseException:
             self._output.detach()
             raise
@@ -255,7 +274,9 @@ class PlaybackRole:
             self._output.detach()
         return outcome
 
-    def _limits(self, judged: Judged, attached: Attached, volume_mb: int) -> _Judged | Failure:
+    def _limits(
+        self, judged: Judged, attached: Attached, volume_mb: int, start: ClockReading | None
+    ) -> _Judged | Failure:
         elements = self._output.elements()
         if isinstance(elements, Failure):
             return elements
@@ -269,19 +290,44 @@ class PlaybackRole:
         failure = limits.over_cap(volume_mb, self._held_mb(), self._device.cap_mb)
         if failure is not None:
             return failure
-        local_time = self._quiet_hours(judged)
+        local_time = self._quiet_hours(judged, start)
         if isinstance(local_time, Failure):
             return local_time
         return _Judged(judged, attached, by_name)
 
-    def _quiet_hours(self, judged: Judged) -> str | Failure:
-        """`quiet_hours` if any instant from now to now plus the source's
-        length is in a quiet span; else the local time it was judged at.
+    def _quiet_hours(self, judged: Judged, start: ClockReading | None) -> str | Failure:
+        """`quiet_hours` if any instant from now to the play's end is in a
+        quiet span; else the local time it was judged at. The play's end is
+        the source's length after now, or after `start` when one is stated
+        and still ahead of the role's clock.
         """
         s = judged.source
+        hold = 0.0
+        if start is not None:
+            hold = max(0, start.monotonic.us - self._clock().monotonic.us) / 1_000_000
         local = self._local_now()
-        failure = limits.quiet_hours(self._device.quiet_hours, local, s.frames / s.rate_hz)
+        failure = limits.quiet_hours(self._device.quiet_hours, local, hold + s.frames / s.rate_hz)
         return failure if failure is not None else limits.local_time(local)
+
+    def _own_clock(self, start: ClockReading | None) -> Failure | None:
+        """`start_clock` unless `start` is null or a reading on this role's
+        machine and on the monotonic clock of its own readings.
+        """
+        if start is None:
+            return None
+        clock = self._clock().monotonic.clock
+        if start.machine == self._machine and start.monotonic.clock == clock:
+            return None
+        return Failure(
+            "start_clock",
+            f"the start is a reading of {start.monotonic.clock} on {start.machine!r}; "
+            f"this role plays by {clock} on {self._machine!r}",
+            {
+                "machine": start.machine,
+                "clock": start.monotonic.clock,
+                "role_machine": self._machine,
+            },
+        )
 
     def _held_mb(self) -> list[int]:
         """The configured volume of each held control that has one."""
@@ -445,6 +491,7 @@ class PlaybackRole:
         found: tuple[Control, ...],
         level_mb: int,
         local_time: str,
+        asked_start: ClockReading | None,
         first: Mark | None,
     ) -> Started:
         return Started(
@@ -459,6 +506,7 @@ class PlaybackRole:
             level_mb=level_mb,
             cap_mb=self._device.cap_mb,
             local_time=local_time,
+            asked_start=asked_start,
             first=first,
         )
 
@@ -466,8 +514,13 @@ class PlaybackRole:
         """Never `already_playing`: a trace passes no time, so whether an
         earlier play has played out cannot be known. Reports the controls as
         read before the open, and the level of the asked and configured
-        volumes.
+        volumes. A stated start is held to the role's clock and quiet hours
+        judged up to its end; whether it has passed is not judged, and
+        nothing is held for it.
         """
+        failure = self._own_clock(play.start)
+        if failure is not None:
+            return failure
         j = self._judge(play)
         if isinstance(j, Failure):
             return j
@@ -475,7 +528,7 @@ class PlaybackRole:
             found = self._read_all()
             if isinstance(found, Failure):
                 return found
-            local_time = self._quiet_hours(j.judged)
+            local_time = self._quiet_hours(j.judged, play.start)
             if isinstance(local_time, Failure):
                 return local_time
             # TODO(output-open-not-listened-to): whether this open, with no
@@ -488,7 +541,7 @@ class PlaybackRole:
             self._output.detach()
         self._dry_played = True
         level = limits.level_mb(play.volume_mb, self._held_mb())
-        return self._started(0, j, None, stream, found, found, level, local_time, None)
+        return self._started(0, j, None, stream, found, found, level, local_time, play.start, None)
 
     def _settle(self) -> None:
         """Forget a play whose thread has ended. An error that ended the
@@ -508,21 +561,24 @@ class PlaybackRole:
         self._settle()
         if self._place is None:
             raise RuntimeError(f"role {self._name!r} has no place to keep a copy")
+        failure = self._own_clock(play.start)
+        if failure is not None:
+            return failure
         j = self._judge(play)
         if isinstance(j, Failure):
             return j
         return self._begin(play, j, self._place)
 
     def _begin(self, play: Play, j: _Judged, place: Place) -> Started | Failure:
-        """Keep the copy, open, set the controls, hand the first chunk over and
-        start the thread that hands over the rest. Every way out before the
-        stream is open detaches; every way out after it, short of the thread
-        taking the play over, goes through `_finish`. What ending such a play
-        raised is raised on, unless something is already being raised, which
-        then carries it as a note.
+        """Keep the copy, open, set the controls, hand the first chunk over
+        unless the play states a start, and start the thread that hands over
+        the rest. Every way out before the stream is open detaches; every way
+        out after it, short of the thread taking the play over, goes through
+        `_finish`. What ending such a play raised is raised on, unless
+        something is already being raised, which then carries it as a note.
         """
         try:
-            p = self._prepare(j, place)
+            p = self._prepare(j, place, play.start)
         except BaseException:
             self._output.detach()
             raise
@@ -554,7 +610,7 @@ class PlaybackRole:
         self._playing = p
         return started
 
-    def _prepare(self, j: _Judged, place: Place) -> _Playing | Failure:
+    def _prepare(self, j: _Judged, place: Place, start: ClockReading | None) -> _Playing | Failure:
         """Keep the copy and open the stream. Quiet hours are judged again once
         the copy is written, since writing and syncing it takes unbounded
         time; a play refused then leaves no copy and uses no number.
@@ -565,7 +621,7 @@ class PlaybackRole:
         failure = source.write_copy(j.judged, copy)
         if failure is not None:
             return failure
-        local_time = self._quiet_hours(j.judged)
+        local_time = self._quiet_hours(j.judged, start)
         if isinstance(local_time, Failure):
             copy.unlink()
             return local_time
@@ -584,13 +640,42 @@ class PlaybackRole:
             return stream
         s = j.judged.source
         return _Playing(
-            n, Location(self._machine, str(copy)), stream, reader, s.rate_hz, local_time
+            n, Location(self._machine, str(copy)), stream, reader, s.rate_hz, local_time, start
         )
 
     def _first(self, p: _Playing, j: _Judged, volume_mb: int) -> Started | Failure:
-        """Set the controls, what the move read being what was found, and
-        hand the first chunk over. What was found is kept before anything is
-        written, so the end of a play whose move raised restores it.
+        """Set the controls; then hand the first chunk over, or, for a play
+        with a stated start, refuse it with `start_passed` if the role's
+        clock has reached the start.
+        """
+        controls = self._set_controls(p, j, volume_mb)
+        if isinstance(controls, Failure):
+            return controls
+        assert p.found is not None
+        first: Mark | None = None
+        if p.start is None:
+            try:
+                self._hand_over(p, p.reader.readframes(_chunk_frames(p.rate_hz)))
+            except _Cut as cut:
+                assert cut.failure is not None
+                return cut.failure
+            first = p.last
+            assert first is not None
+        else:
+            late_us = self._clock().monotonic.us - p.start.monotonic.us
+            if late_us >= 0:
+                return _start_passed(late_us, "when its output was ready")
+        level = limits.level_mb(*_volumes(controls))
+        return self._started(
+            p.n, j, p.copy, p.stream, controls, p.found, level, p.local_time, p.start, first
+        )
+
+    def _set_controls(
+        self, p: _Playing, j: _Judged, volume_mb: int
+    ) -> tuple[Control, ...] | Failure:
+        """Set the controls, what the move read being what was found, and read
+        them back. What was found is kept before anything is written, so the
+        end of a play whose move raised restores it.
         """
         found = self._read_all()
         if isinstance(found, Failure):
@@ -603,16 +688,7 @@ class PlaybackRole:
         if isinstance(controls, Failure):
             return controls
         p.set_to = controls
-        try:
-            self._hand_over(p, p.reader.readframes(_chunk_frames(p.rate_hz)))
-        except _Cut as cut:
-            assert cut.failure is not None
-            return cut.failure
-        assert p.last is not None
-        level = limits.level_mb(*_volumes(controls))
-        return self._started(
-            p.n, j, p.copy, p.stream, controls, p.found, level, p.local_time, p.last
-        )
+        return controls
 
     def _stop(self) -> Stopped | Failure:
         p = self._live()
@@ -639,6 +715,8 @@ class PlaybackRole:
             last=None,
             end=self._clock(),
             restored=True,
+            woke=None,
+            first=None,
         )
 
     def _release(self, dry: bool) -> Released | Failure:
@@ -777,13 +855,55 @@ class PlaybackRole:
         if kept:
             raise _carrying(kept[0], kept)
 
+    def _hold(self, p: _Playing, start: ClockReading) -> None:
+        """Wait until the role's monotonic clock reaches `start`, then keep
+        the reading as `p.woke`. While more than a chunk's time remains,
+        check as between chunks, then wait on the stop event for a chunk's
+        time or what remains after the check, whichever is less; inside the
+        last chunk's time make no check and wait on it for what remains,
+        again while the clock still reads before the start. What remains is
+        always the start less a reading taken after any check. `_Cut` when
+        asked to stop, as `_between` cuts, or with `start_passed` when the
+        wake is more than `LATE_SECONDS` late.
+        """
+        # TODO(output-open-not-listened-to): the output is held open with no
+        # frame written until the start; whether that is silent on a real
+        # output has not been heard.
+        chunk_us = round(CHUNK_SECONDS * 1_000_000)
+        while True:
+            remaining_us = start.monotonic.us - self._clock().monotonic.us
+            if remaining_us > chunk_us:
+                self._between(p)
+                remaining_us = min(chunk_us, start.monotonic.us - self._clock().monotonic.us)
+            if remaining_us <= 0:
+                break
+            if p.stop.wait(remaining_us / 1_000_000):
+                raise _Cut(None)
+        p.woke = self._clock()
+        late_us = p.woke.monotonic.us - start.monotonic.us
+        if late_us > LATE_SECONDS * 1_000_000:
+            raise _Cut(_start_passed(late_us, "when the play's thread woke"))
+
     def _play_out(self, p: _Playing) -> None:
-        """Hand the rest over, then wait for the output's delay to reach 0.
+        """Wait for a stated start and hand the first chunk over at it, its
+        mark kept as the first even when the chunk is cut part-way; hand
+        the rest over, then wait for the output's delay to reach 0.
         The first delay above 0 sets a deadline, that delay at the play's
         rate plus `PLAY_OUT_GRACE_SECONDS`, which nothing moves; a delay
         still above 0 at the deadline ends the play with `stream_died`.
         """
         chunk = _chunk_frames(p.rate_hz)
+        if p.start is not None:
+            self._hold(p, p.start)
+            try:
+                self._hand_over(p, p.reader.readframes(chunk))
+            except _Cut:
+                # Frames the device took before the chunk was cut still get a
+                # first mark, so a play with a null mark handed no frame.
+                if p.frames_handed > 0:
+                    p.last = p.first = self._mark(p)
+                raise
+            p.first = p.last
         while data := p.reader.readframes(chunk):
             self._between(p)
             self._hand_over(p, data)
@@ -839,24 +959,50 @@ class PlaybackRole:
         if end is None:
             raise _carrying(kept[0], kept)
         last = p.last
-        assert last is not None
         if kept:
             failure = _ended_by(failure, kept)
         try:
             if failure is not None:
                 self._report(
                     Failed(
-                        p.n, failure, p.frames_handed, unplayed, p.underruns, last, end, restored
+                        p.n,
+                        failure,
+                        p.frames_handed,
+                        unplayed,
+                        p.underruns,
+                        last,
+                        end,
+                        restored,
+                        p.woke,
+                        p.first,
                     )
                 )
             elif ended:
-                assert unplayed is not None
+                assert unplayed is not None and last is not None
                 self._report(
-                    Ended(p.n, p.frames_handed, unplayed, p.underruns, last, end, restored)
+                    Ended(
+                        p.n,
+                        p.frames_handed,
+                        unplayed,
+                        p.underruns,
+                        last,
+                        end,
+                        restored,
+                        p.woke,
+                        p.first,
+                    )
                 )
             else:
                 p.stopped = Stopped(
-                    p.n, p.frames_handed, unplayed, p.underruns, last, end, restored
+                    p.n,
+                    p.frames_handed,
+                    unplayed,
+                    p.underruns,
+                    last,
+                    end,
+                    restored,
+                    p.woke,
+                    p.first,
                 )
         except BaseException as e:
             _carrying(e, kept)
@@ -913,6 +1059,14 @@ def _ended_by(failure: Failure | None, kept: list[BaseException]) -> Failure:
     if failure is None:
         return Failure("role_error", raised)
     return Failure(failure.reason, f"{failure.detail}; {raised}", failure.data)
+
+
+def _start_passed(late_us: int, when: str) -> Failure:
+    return Failure(
+        "start_passed",
+        f"the play's start had passed by {late_us} us {when}; no frame was handed over",
+        {"late_us": late_us},
+    )
 
 
 def _chunk_frames(rate_hz: int) -> int:

@@ -17,8 +17,9 @@ import pytest
 from brenn_lab import marker, runner
 from brenn_lab.buildinfo import Revision
 from brenn_lab.data import encode_object
-from brenn_lab.playback import output
+from brenn_lab.playback import output, role
 from brenn_lab.playback.output import ControlName
+from brenn_lab.rundir import RunDir
 from brenn_lab.testing.fake_output import CARD, LIBRARY, FakeControl, FakeOutput
 from brenn_lab.testing.lab_driver import lab_toml, speaker_toml
 from brenn_lab.testing.role_raised import SINK_MESSAGE, check_role_raised
@@ -31,6 +32,14 @@ PINNED = {"pod_capture": "/nonexistent/pinned/pod-capture"}
 LEVEL = ControlName("PCM", 1)
 HELD = ControlName("PCM", 0)
 RATE = 16000
+
+
+@pytest.fixture(autouse=True)
+def late_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A role hosted by the runner has the machine's clock, so a timed play's
+    thread can wake late on a busy machine; no test here judges how late.
+    """
+    monkeypatch.setattr(role, "LATE_SECONDS", 3600.0)
 
 
 @pytest.fixture
@@ -166,6 +175,9 @@ def test_play_and_record(tmp_path: Path, outputs: list[FakeOutput]) -> None:
     assert record["unplayed_frames"] == 0
     assert record["underruns"] == [] and record["as_sent"] is True
     assert record["first"] == entry["first"]
+    assert entry["asked_start"] is None
+    assert record["asked_start"] is None and record["woke"] is None
+    assert record["started_after_us"] is None
     assert record["last"]["frames_handed"] == RATE // 2
     assert record["restored"] is True and record["failure"] is None
     assert entry["source"]["marker"] is None and record["marker"] is None
@@ -235,6 +247,87 @@ def test_a_role_that_raises_on_a_scripts_command_fails_the_run(
         ("reply", "playback.play"),
         ("command", "playback.stop"),
     ]
+
+
+TIMED = """\
+now = speaker.send(playback.Clock()).at
+speaker.send(playback.Play(source="clip.wav", volume_mb=-3000, start=now.after(2.0)))
+lab.wait(3.0)
+"""
+
+
+def test_a_timed_play_s_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outputs: list[FakeOutput]
+) -> None:
+    clip(tmp_path / "sources", "clip.wav", 0.2)
+    written: list[Any] = []
+    real = RunDir.write_manifest
+
+    def write_manifest(self: RunDir, manifest: Any) -> None:
+        speaker = manifest["roles"]["speaker"]
+        written.append(json.loads(json.dumps(speaker.get("sources", []))))
+        real(self, manifest)
+
+    monkeypatch.setattr(RunDir, "write_manifest", write_manifest)
+    out, manifest, results = do_run(tmp_path, lab(tmp_path), script(tmp_path, TIMED))
+    assert results["outcome"] == "completed", results["failure"]
+
+    [entry] = manifest["roles"]["speaker"]["sources"]
+    assert entry["first"] is None
+    asked = entry["asked_start"]
+    assert asked is not None and asked["machine"] == MACHINE
+    # Once with no play, once at the play's reply; its end rewrites nothing.
+    assert written == [[], [entry]]
+
+    [record] = results["sources"]
+    assert record["ended"] == "completed"
+    assert record["asked_start"] == asked
+    ended = [
+        json.loads(t)
+        for t in (out / "journal.jsonl").read_text().splitlines()
+        if json.loads(t).get("event") == "playback.ended"
+    ]
+    [end] = [e["data"] for e in ended]
+    assert record["woke"] == end["woke"] is not None
+    assert record["first"] == end["first"] is not None
+    assert record["first"]["at"]["monotonic"]["us"] >= asked["monotonic"]["us"]
+    assert record["woke"]["monotonic"]["us"] >= asked["monotonic"]["us"]
+    assert record["started_after_us"] == (
+        record["first"]["at"]["monotonic"]["us"] - asked["monotonic"]["us"]
+    )
+    assert record["started_after_us"] >= 0
+    assert names(out) == [
+        ("command", "playback.clock"),
+        ("reply", "playback.clock"),
+        ("command", "playback.play"),
+        ("reply", "playback.play"),
+        ("event", "playback.ended"),
+        ("command", "release"),
+        ("reply", "release"),
+    ]
+
+
+HELD_AN_HOUR = """\
+now = speaker.send(playback.Clock()).at
+speaker.send(playback.Play(source="clip.wav", volume_mb=-3000, start=now.after(3600.0)))
+lab.wait(0.2)
+speaker.send(playback.Stop())
+"""
+
+
+def test_a_timed_play_stopped_in_its_hold(tmp_path: Path, outputs: list[FakeOutput]) -> None:
+    clip(tmp_path / "sources", "clip.wav", 0.2)
+    _, manifest, results = do_run(tmp_path, lab(tmp_path), script(tmp_path, HELD_AN_HOUR))
+    assert results["outcome"] == "completed", results["failure"]
+    [entry] = manifest["roles"]["speaker"]["sources"]
+    assert entry["first"] is None and entry["asked_start"] is not None
+    [record] = results["sources"]
+    assert record["ended"] == "stopped" and record["stopped_by"] == "script"
+    assert record["frames_handed"] == 0
+    assert record["first"] is None and record["last"] is None and record["woke"] is None
+    assert record["started_after_us"] is None
+    assert record["asked_start"] == entry["asked_start"]
+    assert outputs[-1].writes == 0
 
 
 MARKED = """\

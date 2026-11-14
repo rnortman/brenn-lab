@@ -289,7 +289,7 @@ class FakeOutput:
             channels=int(self.grant.get("channels", channels)),
             sample_format=str(self.grant.get("sample_format", sample_format)),
             period_frames=period_frames,
-            buffer_frames=buffer_frames,
+            buffer_frames=int(self.grant.get("buffer_frames", buffer_frames)),
         )
         stream = FakeStream(self, granted)
         self.open_streams += 1

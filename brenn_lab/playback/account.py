@@ -31,6 +31,8 @@ class _Play:
     frames_handed: int | None = None
     unplayed_frames: int | None = None
     underruns: list[JsonValue] = field(default_factory=list)
+    asked_start: ClockReading | None = None
+    woke: ClockReading | None = None
     first: Mark | None = None
     last: Mark | None = None
     end: ClockReading | None = None
@@ -41,6 +43,15 @@ class _Play:
         self.ended = how
         self.frames_handed, self.unplayed_frames = body.frames_handed, body.unplayed_frames
         self.last, self.end, self.restored = body.last, body.end, body.restored
+        self.woke = body.woke
+        if body.first is not None:
+            self.first = body.first
+
+    def started_after_us(self) -> int | None:
+        """The first mark less the asked start, on the role's monotonic clock."""
+        if self.asked_start is None or self.first is None:
+            return None
+        return self.first.at.monotonic.us - self.asked_start.monotonic.us
 
     def encode(self) -> JsonObject:
         as_sent = self.ended == "completed" and not self.underruns
@@ -57,7 +68,10 @@ class _Play:
             "unplayed_frames": self.unplayed_frames,
             "underruns": self.underruns,
             "as_sent": as_sent,
+            "asked_start": None if self.asked_start is None else encode_value(self.asked_start),
+            "woke": None if self.woke is None else encode_value(self.woke),
             "first": None if self.first is None else encode_value(self.first),
+            "started_after_us": self.started_after_us(),
             "last": None if self.last is None else encode_value(self.last),
             "end": None if self.end is None else encode_value(self.end),
             "restored": self.restored,
@@ -68,8 +82,11 @@ class _Play:
 class PlaybackAccount:
     """A playback role's account: one manifest entry per play started, the
     `Started` result with its kept copy given as the run's pointer, and one
-    results record per such play. No other repository's code plays, so it
-    learns no repository.
+    results record per such play. A play's first mark is its reply's when it
+    stated no start and its end's when it did; each message states it at most
+    once, so the record does not depend on whether a timed play's end arrives
+    before its reply. No other repository's code
+    plays, so it learns no repository.
     """
 
     def __init__(self, role: str, pointer: Pointer):
@@ -99,7 +116,9 @@ class PlaybackAccount:
         record.source = {"name": started.source.name, "sha256": started.source.sha256}
         record.marker = encode_value(started.source.marker)
         record.frames = started.source.frames
-        record.first = started.first
+        record.asked_start = started.asked_start
+        if started.first is not None:
+            record.first = started.first
         entry = encode_object(started)
         del entry["copy"]
         entry["file"] = file

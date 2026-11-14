@@ -49,7 +49,8 @@ class Play:
     `failure` are the results record's; `result` False leaves the play
     without one. `output` is the source entry's `output.kind`, its `device`
     a card's shape for `alsa` and a shape of no known kind otherwise; None
-    leaves the entry without `output`.
+    leaves the entry without `output`. `asked_start` and `started_after_us`
+    are the entry's and the record's (None: an untimed play).
     """
 
     role: str
@@ -71,6 +72,8 @@ class Play:
     failure: JsonObject | None = None
     result: bool = True
     output: str | None = "alsa"
+    asked_start: JsonObject | None = None
+    started_after_us: int | None = None
 
     def sounds(self, last: int) -> bool:
         """Whether a marker ending before kept-copy frame `last` sounded."""
@@ -237,7 +240,7 @@ def build(
         if c.recorded:
             accounts.append(account)
     manifest: JsonObject = {
-        "layout": 2,
+        "layout": 3,
         "run_id": RUN_ID,
         "roles": {**sections, **(roles or {})},
     }
@@ -291,6 +294,7 @@ def _play(run: Path, play: Play, built: Built) -> tuple[JsonObject, JsonObject]:
         "file": {"machine": MACHINE, "path": f"sources/{play.role}/{name}", "in_run": True},
         # A clock reading the search must never use, rough by construction.
         "first": {"frame": 0, "at": {"machine": MACHINE, "ns": int(play.at * 62500)}},
+        "asked_start": play.asked_start,
     }
     if play.output is not None:
         entry["output"] = {
@@ -324,6 +328,9 @@ def _play(run: Path, play: Play, built: Built) -> tuple[JsonObject, JsonObject]:
         "as_sent": play.ended == "completed" and not play.underruns,
         "restored": play.restored,
         "failure": play.failure,
+        "asked_start": play.asked_start,
+        "woke": None,
+        "started_after_us": play.started_after_us,
     }
     return entry, record
 

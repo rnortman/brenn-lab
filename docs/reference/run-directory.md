@@ -1,4 +1,4 @@
-# The run directory, layout 2
+# The run directory, layout 3
 
 A run directory is what one run of an experiment script leaves behind. This
 document says what every file and key in it means, so that a reader with the
@@ -84,13 +84,13 @@ the file.
 ### Reserved names
 
 `streams/` (other recorded streams such as pose, status and faults, per role)
-is **reserved**. Its name and meaning are fixed by layout 2, and no code in
+is **reserved**. Its name and meaning are fixed by layout 3, and no code in
 this version creates it. The manifest's and the results' key `streams` is
 reserved the same way.
 
 ### The version rule
 
-`manifest.json`'s `layout` is 2 and `results.json`'s `schema` is 2;
+`manifest.json`'s `layout` is 3 and `results.json`'s `schema` is 2;
 `alignment.json`'s and `assessment.json`'s `schema` are each 1. Adding a file
 or a key changes none of them: a new role kind that writes under a reserved
 name, or adds a section of its own beside `captures`, a new key in an entry,
@@ -131,8 +131,11 @@ under `not_assessed`, and calls every marker of such a play with an underrun
 `unknown`, as it does on a sink (*`assessment.json`*).
 
 **Older runs.** Layout 1 is the run directory before the four keys were
-defined by the output kind. `lab align` and `lab assess` refuse a layout-1
-run by its number, as they refuse any layout but their own; a layout-1 run is
+defined by the output kind. In layout 2 a source entry's `first` was the
+first mark of every play; in layout 3 it is `null` for a play with a stated
+start, whose first mark is in `results.json` and in the journal's line for
+the play's end. `lab align` and `lab assess` refuse a layout-1 or layout-2
+run by its number, as they refuse any layout but their own; such a run is
 read by the harness revision that wrote it.
 
 ## Common shapes
@@ -335,6 +338,7 @@ later appears here too.
  "level_mb": -1800, "cap_mb": -1800,
  "local_time": "2026-11-13T14:38:31-05:00",
  "first": {"frames_handed": 1600, "delay_frames": 1600, "at": {…clock reading…}},
+ "asked_start": null,
  "file": {…pointer…}}
 ```
 
@@ -384,7 +388,12 @@ says what each field means.
   then, and the role's clock reading directly after. Frame
   `frames_handed − delay_frames` of the kept copy is, by the output's own
   account, at its output at `at`: on a card by the device's, on a sink by the
-  sound server's estimate.
+  sound server's estimate. **`first` is `null` for a play with a stated
+  start**: the reply is made before its first frame is handed, and the entry
+  is not rewritten at its end. Its first mark is in its record in
+  `results.json` and in the journal's line for its end.
+- `asked_start`: the start the script stated, a clock reading of the role's
+  own machine and clock (*Clock readings*); `null` for a play with none.
 - On a sink, `controls` and `found` hold one control, `sink` index 0, a
   channel per sink channel named by its position. `level_mb` is relative to
   the sink's full volume, not to the device's unamplified level: where
@@ -431,6 +440,14 @@ message:
   the next reply line of that role, not necessarily the next line.
 - The journal is the record if the runner dies. A directory with a journal
   and no `results.json` still says what was sent and what came back.
+- A script that places a play in time asks the role for its clock:
+  `playback.clock`, with empty `args`, and its reply, `result_type`
+  `playback.clock_read` with `result` `{at}`, the role's reading. A
+  `playback.play` line's `args` carry `start`, `null` or a clock reading; its
+  reply carries `asked_start`. A play's end (`playback.ended`,
+  `playback.failed`, or the `playback.stopped` reply) carries `woke` and
+  `first` (`experiments.md`, *Events*): for a timed play the journal's only
+  line with its first mark.
 
 ## `results.json`
 
@@ -555,8 +572,23 @@ them is such a write left unfinished, and is not part of the record.
     an underrun may also have frames that never sounded, and `as_sent` is
     subject to the limit just stated: a sink that ran out as the last write
     was sent leaves it true.
-  - `first`, `last`: the marks after the first and the last write. `end`: the
-    role's reading once the stream was closed.
+  - `first`, `last`: the marks after the first and the last write; each
+    `null` for a play that handed no frame (a timed play stopped or failed
+    before its start). `first` comes from the play's reply when it stated
+    no start and from its end when it did; until a timed play's end arrives
+    its `first` is `null`, and the runner's release at the script's end ends
+    every running play, so a finished run's record has it. `end`: the role's
+    reading once the stream was closed.
+  - `asked_start`: the start the script stated, from the reply; `null` for a
+    play with none.
+  - `woke`: the role's reading when a timed play's wait ended at its start,
+    before the first write; `null` for a play with no stated start and for
+    one that ended during its wait. `woke` less `asked_start` is how late the
+    role woke; `first.at` less `woke` is what the first write took.
+  - `started_after_us`: `first.at` less `asked_start` on the monotonic
+    clock, in microseconds: how far after its stated start the play's first
+    mark lay. Both readings are the role's own, on one machine. `null` for a
+    play with no stated start or that handed no frame.
   - `restored`: whether the role put every control back as found
     (`experiments.md`, *The cap*, says what false means).
   - `failure`: `null`, or the role's failure as it crossed the seam.
@@ -614,6 +646,8 @@ the capture kind's, this table holds for a playback role's failure:
 | `unknown_command` | `{command}` |
 | `source_outside`, `source_missing`, `source_format`, `alsa_missing`, `mixer`, `role_io`, `role_error`, `already_playing`, `not_playing` | empty |
 | `stream_died` | `{delay_frames}`, the last delay read, when the output did not play its buffer out by the end-of-play bound; empty otherwise |
+| `start_clock` | `{machine, clock, role_machine}`: the stated start's machine and monotonic clock name, and the role's machine |
+| `start_passed` | `{late_us}`: how far past the stated start the role's clock read, when the output was ready (a failure reply) or when the play's thread woke (a `playback.failed` event) |
 
 On a sink (`output = "pulse"`) the reasons the sink output names carry:
 
@@ -949,8 +983,8 @@ the largest capture's export, in the run's `.alignment.tmp/`.
 every instant and a capture still being written exports with an
 `unterminated` tail; the report describes the run so far. A source entry
 with no `marker` key is `no_marker_record`, and results with no `sources`
-are read as a run with no play. A layout-1 run is refused (*The version
-rule*).
+are read as a run with no play. A layout-1 or layout-2 run is refused (*The
+version rule*).
 
 ## `assessment.json`
 
@@ -1171,7 +1205,8 @@ One entry per source entry of every playback role:
 ```json
 {"role": "speaker", "play": 1, "file": {…pointer…},
  "record": {"ended": "completed", "stopped_by": null, "frames": 312000, "frames_handed": 312000,
-            "unplayed_frames": 0, "underruns": 0, "as_sent": true, "restored": true, "failure": null},
+            "unplayed_frames": 0, "underruns": 0, "as_sent": true, "restored": true, "failure": null,
+            "asked_start": null, "started_after_us": null},
  "marker": {"state": "marked", "start": "expected", "end": "expected", "located": true,
             "found_in": [{"capture": {"role": "mic", "capture": 1}, "channel": "raw_mic_0",
                           "offset_frames": 29138.4, "ratio_basis": "measured",
@@ -1181,7 +1216,10 @@ One entry per source entry of every playback role:
 - `record`: the play's record in `results.json`, `underruns` as a count;
   `null` when there is none. Its `unplayed_frames` means what the results say
   it means for the play's output kind, and is `null` for a kind this harness
-  does not know.
+  does not know. `asked_start` and `started_after_us` are copied from the
+  results record: the start the script stated, and how far after it the
+  play's first mark lay. No finding and no threshold rests on them, and the
+  assessment reads no clock to give them.
 - `marker.state`: alignment's state of the play. `start`, `end`: whether
   each marker is expected in a capture, below; `null` unless the state is
   `marked`. `located`: alignment's rule, both markers found on one channel
@@ -1211,7 +1249,7 @@ so far, and a capture being written is `log_not_ended`. A run with no
 `results.json`, including one whose runner died while writing it, is
 assessed in part: `run_not_completed` and `results`/`no_results`, every
 capture read and measured, loss stated from the reader alone. A layout-1
-run is refused by its number (*The version rule*). A `manifest.json` or
+or layout-2 run is refused by its number (*The version rule*). A `manifest.json` or
 `results.json` that is present and damaged is refused, as above; a source
 entry with no `output.kind` is such damage, refused before any capture is
 read, though `lab align`, which does not read the key, still aligns the run. One `results.json` the runner writes itself is refused the same way.
@@ -1357,3 +1395,38 @@ the 1600 of every other run, while the capture's arrival of the copy's frame
 estimate moved in that run, not the path. An exact tie needs the
 device's own copy of what it played inside the capture, and the reSpeaker
 Flex's six-channel image carries none (`own-device-playback-sample-relationship`).
+
+**Where the gap between two outputs' plays moved, before plays had a stated
+start.** Read from all 34 runs of the anchoring scenario the audible bench
+kept on 2026-11-14, each sending the talker's play on the LG-PL5 sink,
+waiting one second, then sending the speaker's on the Flex: in every run the
+gap in the capture between the two plays is the sum of four intervals, (a)
+the talker's first mark to its reply, (b) its reply to the speaker's
+command, (c) the speaker's command to its first mark, and (d) the speaker's
+path from its first mark to the capture less the talker's.
+
+- **The outputs' paths did not move.** From first mark to where alignment
+  put the play: the Flex 5.1 to 6.0 ms, the sink 243.4 to 249.3 ms, the same
+  in runs of both gaps; (d) was −243.3 to −237.9 ms in every run.
+- **What moved was on the machine's clock**: the runner's work between the
+  talker's reply and the speaker's command, less the one-second wait (the
+  manifest's rewrite and `fsync` after the reply, and the wait's overshoot),
+  2.9 to 142.9 ms; and the speaker's pre-roll from its command to its first
+  mark, 22.9 to 167.3 ms. Their sum was 35 to 152 ms in the 31 runs whose
+  capture gap was 0.79 to 0.91 s, and 219 to 294 ms in the 3 whose gap was
+  0.98 to 1.06 s. Neither alone separated the two groups; in the three late
+  runs both were large.
+- Whether that was two clusters or one tail, 34 runs could not settle: the
+  upper group was three runs, the lower spanned 117 ms. Across all 405 plays
+  kept that day, a play's pre-roll, its command to its first mark, was 28.6
+  to 221.3 ms on the sink (median 97.9) and 17.2 to 182.0 ms on the Flex
+  (median 77.8).
+- Not explained: the Flex's first mark fell 0.1 to 1.0 ms after a 32 ms grid
+  counted from the capture's start reading, in all 34 runs.
+
+With a stated start the pre-roll is done before the start and the runner's
+bookkeeping before the wait, so both moving intervals leave the gap. In the
+eight timed scenario runs of the same afternoon the two first marks were
+999.4 to 1000.0 ms apart for a stated 1000 ms, and the capture gap was 755.3
+to 760.5 ms where alignment located both plays (`experiments.md`, *A level
+under another play*).

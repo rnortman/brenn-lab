@@ -6,8 +6,9 @@ sink client, playing the marked speech clip.
 
 import json
 import os
+import time
 import wave
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,16 @@ import pytest
 from brenn_lab import marker, runner
 from brenn_lab.assess import report
 from brenn_lab.buildinfo import Revision
-from brenn_lab.playback import output
+from brenn_lab.data import ClockReading, Command, Event, Release, Reply, Request, now
+from brenn_lab.place import Place
+from brenn_lab.playback import KIND, Clock, ClockRead, Play, output
+from brenn_lab.playback import role as playback_role
+from brenn_lab.playback.device import HeldControl, PlaybackDevice
+from brenn_lab.playback.messages import Ended, Started
 from brenn_lab.playback.output import ControlName
+from brenn_lab.playback.role import PlaybackRole
+from brenn_lab.runner import Script
+from brenn_lab.script import Lab, RoleFailure
 from brenn_lab.testing import bench
 from brenn_lab.testing.fake_output import FakeControl, FakeOutput
 from brenn_lab.testing.lab_driver import MACHINE, lab_toml, speaker_toml, talker_toml
@@ -38,6 +47,15 @@ SPEAKER_MEMBER = 4
 RAW = 50000
 SPEAKER_CAP_MB = -1800
 TALKER_CAP_MB = -2400
+
+
+@pytest.fixture(autouse=True)
+def late_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The roles here have the machine's clock and the example's `lab.wait`
+    passes real time, so a timed play's thread can wake late on a busy
+    machine; no test here judges how late.
+    """
+    monkeypatch.setattr(playback_role, "LATE_SECONDS", 3600.0)
 
 
 @pytest.fixture
@@ -130,14 +148,31 @@ def us(mark: Any) -> int:
 
 
 def test_the_example_dry_runs_with_no_problem(
-    tmp_path: Path, server: StandInServer, speakers: list[FakeOutput]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    server: StandInServer,
+    speakers: list[FakeOutput],
 ) -> None:
     folder, _, _ = sources(tmp_path)
+    replies: list[Reply] = []
+    handle = PlaybackRole.handle
+
+    def kept(self: PlaybackRole, command: Command) -> Reply:
+        reply = handle(self, command)
+        replies.append(reply)
+        return reply
+
+    monkeypatch.setattr(PlaybackRole, "handle", kept)
     dry = runner.dry_run(lab(tmp_path, folder), MACHINE, EXAMPLE, PINNED)
     assert isinstance(dry, dict), dry
     report_: Any = dry
     assert report_["problems"] == [] and report_["ok"] is True, report_["problems"]
-    assert report_["trace"] == {"complete": True, "commands": 6, "stopped_at": None}
+    assert report_["trace"] == {"complete": True, "commands": 8, "stopped_at": None}
+    started = {r.role: r.outcome for r in replies if isinstance(r.outcome, Started)}
+    assert started.keys() == {"talker", "speaker"}
+    for name, play in started.items():
+        assert play.asked_start is not None and play.asked_start.machine == MACHINE, name
+    assert all(r.dry for r in replies)
     talker = report_["roles"]["talker"]["check"]
     assert talker["ok"] is True
     assert talker["result"]["device"]["sink_name"] == SINK
@@ -186,14 +221,32 @@ def test_the_example_runs_both_plays_overlapping(
         assert record["marker"]["member"] == marked.marker.member
         assert record["first"]["delay_frames"] is not None
         assert record["last"]["frames_handed"] == record["frames"]
-    assert records["talker"]["first"] == talker["first"]
-    assert records["speaker"]["first"] == speaker["first"]
+    for entry, record in ((talker, records["talker"]), (speaker, records["speaker"])):
+        asked = entry["asked_start"]
+        assert entry["first"] is None and asked is not None
+        assert record["asked_start"] == asked and asked["machine"] == MACHINE
+        assert record["woke"] is not None and record["first"] is not None
+        assert record["woke"]["monotonic"]["us"] >= asked["monotonic"]["us"]
+        assert us(record["first"]) >= asked["monotonic"]["us"]
+        assert record["started_after_us"] >= 0
     assert [(c["role"], c["command"]) for c in journaled(out, ("talker", "speaker"))] == [
         ("talker", "check"),
         ("speaker", "check"),
+        ("talker", "playback.clock"),
+        ("speaker", "playback.clock"),
         ("talker", "playback.play"),
         ("speaker", "playback.play"),
     ]
+    lines = [json.loads(line) for line in (out / "journal.jsonl").read_text().splitlines()]
+    for name in ("talker", "speaker"):
+        mine = [line for line in lines if line.get("role") == name]
+        replied = next(
+            i
+            for i, line in enumerate(mine)
+            if line.get("command") == "playback.play" and "ok" in line
+        )
+        ended = next(i for i, line in enumerate(mine) if line.get("event") == "playback.ended")
+        assert all("event" not in line for line in mine[replied + 1 : ended]), name
     for entry, cap in ((talker, TALKER_CAP_MB), (speaker, SPEAKER_CAP_MB)):
         assert entry["cap_mb"] == cap and entry["level_mb"] == cap, entry
     assert results["played"]["plays_marked"] == 2
@@ -297,8 +350,8 @@ def test_level_step_plays_the_primer_then_the_marked_source_at_the_cap(
     commands = journaled(out)
     assert [c["command"] for c in commands] == ["check", "playback.play", "playback.play"]
     assert [c["args"] for c in commands[1:]] == [
-        {"source": "primer.wav", "volume_mb": STEP_CAP_MB},
-        {"source": "marked.wav", "volume_mb": STEP_CAP_MB},
+        {"source": "primer.wav", "volume_mb": STEP_CAP_MB, "start": None},
+        {"source": "marked.wav", "volume_mb": STEP_CAP_MB, "start": None},
     ]
     entries = manifest["roles"]["speaker"]["sources"]
     assert [e["source"]["name"] for e in entries] == ["primer.wav", "marked.wav"]
@@ -323,3 +376,124 @@ def test_level_step_plays_the_primer_then_the_marked_source_at_the_cap(
         # the stand-in's raw volumes are where they started after the last.
         assert entries[1]["found"] == entries[0]["found"]
         assert server.sink_state(SINK)["volumes"] == [RAW, RAW]
+
+
+# The example's idiom on two machines. The runner hosts no role of another
+# machine (it answers such a role `unreachable`) and gives a hosted role no
+# clock but its own machine's, so the example is run here through the script
+# API on a session that hosts two playback roles of its own.
+TALKER_MACHINE = "lab-a"
+SPEAKER_MACHINE = "lab-b"
+SPEAKER_AHEAD_S = 1000.0
+"""How far the speaker's machine's clock reads ahead of the talker's."""
+STATED_OFFSET_US = 1_000_000
+"""The example's `OFFSET_S`: its speaker's start after its talker's, each
+stated on its own role's clock."""
+
+
+class TwoMachines:
+    """A session with `talker` and `speaker` on different machines, each a
+    playback role on a fake output with its own machine's clock, the two
+    clocks disagreeing by `SPEAKER_AHEAD_S`; `mic`'s commands are answered
+    with a placeholder result, since the example reads none of them.
+    """
+
+    def __init__(self, tmp: Path, folder: Path) -> None:
+        self.events: list[Event] = []
+        self.replies: list[Reply] = []
+        clocks: dict[str, tuple[str, Callable[[], ClockReading]]] = {
+            "talker": (TALKER_MACHINE, lambda: now(TALKER_MACHINE)),
+            "speaker": (SPEAKER_MACHINE, lambda: now(SPEAKER_MACHINE).after(SPEAKER_AHEAD_S)),
+        }
+        self.roles: dict[str, PlaybackRole] = {}
+        for name, (machine, clock) in clocks.items():
+            device = PlaybackDevice(
+                output="alsa",
+                selector="Fake",
+                source_dir=str(folder),
+                cap_mb=-1800,
+                quiet_hours=(),
+                level=ControlName("PCM", 1),
+                held=(HeldControl(ControlName("PCM", 0), 0),),
+            )
+            fake = FakeOutput(
+                [FakeControl(ControlName("PCM", 1)), FakeControl(ControlName("PCM", 0))],
+                speed=4.0,
+            )
+            self.roles[name] = PlaybackRole(
+                name,
+                machine,
+                device,
+                fake,
+                self.events.append,
+                Place(tmp / "run" / name, tmp / "logs" / name, lambda _: None),
+                clock=clock,
+            )
+
+    def send(self, name: str, body: Request[object]) -> Reply:
+        command = Command(role=name, body=body)
+        if name == "mic":
+            return Reply(name, command.name, False, ClockRead(now(TALKER_MACHINE)))
+        reply = self.roles[name].handle(command)
+        self.replies.append(reply)
+        return reply
+
+    def wait(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+    def release(self) -> None:
+        for name, played in self.roles.items():
+            played.handle(Command(role=name, body=Release()))
+
+
+def example() -> Script:
+    loaded = runner.load_script(EXAMPLE, EXAMPLE.read_bytes())
+    assert isinstance(loaded, Script), loaded
+    return loaded
+
+
+def test_the_example_states_each_start_on_its_own_role_s_machine(tmp_path: Path) -> None:
+    folder, _, _ = sources(tmp_path)
+    session = TwoMachines(tmp_path, folder)
+    script = example()
+    try:
+        script.run(Lab(script.roles, session))
+    finally:
+        session.release()
+    started = {r.role: r.outcome for r in session.replies if isinstance(r.outcome, Started)}
+    ended = {e.role: e.body for e in session.events if isinstance(e.body, Ended)}
+    assert started.keys() == ended.keys() == {"talker", "speaker"}
+    assert len(session.events) == 2
+    for name, machine in (("talker", TALKER_MACHINE), ("speaker", SPEAKER_MACHINE)):
+        asked, end = started[name].asked_start, ended[name]
+        assert asked is not None and asked.machine == machine, name
+        assert end.first is not None and end.woke is not None, name
+        assert end.first.at.machine == machine
+        assert end.first.at.monotonic.us >= asked.monotonic.us, name
+        assert end.frames_handed == started[name].source.frames
+    read = {r.role: r.outcome.at for r in session.replies if isinstance(r.outcome, ClockRead)}
+    leads: dict[str, int] = {}
+    for name in ("talker", "speaker"):
+        asked = started[name].asked_start
+        assert asked is not None
+        leads[name] = asked.monotonic.us - read[name].monotonic.us
+    assert leads["speaker"] - leads["talker"] == STATED_OFFSET_US
+
+
+def test_a_reading_handed_to_another_machine_s_role_is_refused(tmp_path: Path) -> None:
+    folder, _, _ = sources(tmp_path)
+    session = TwoMachines(tmp_path, folder)
+    lab = Lab({"talker": KIND, "speaker": KIND}, session)
+    talker_now = lab.role("talker").send(Clock()).at
+    with pytest.raises(RoleFailure) as refused:
+        lab.role("speaker").send(
+            Play(source="own.wav", volume_mb=-1800, start=talker_now.after(2.0))
+        )
+    assert refused.value.failure.reason == "start_clock"
+    assert refused.value.failure.data == {
+        "machine": TALKER_MACHINE,
+        "clock": talker_now.monotonic.clock,
+        "role_machine": SPEAKER_MACHINE,
+    }
+    assert session.events == []
+    session.release()

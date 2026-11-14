@@ -28,6 +28,8 @@ def run(lab: Lab) -> None:
     level = checked.cap_mb
     mic.send(capture.Start())
     lab.wait(AMBIENT_S)
+    # TODO(sink-lead-in-not-one-held-stream): the lead-in is a play of its own,
+    # on a stream closed before the measured play's is opened.
     for source in ("primer.wav", "marked.wav"):
         played = speaker.send(playback.Play(source=source, volume_mb=level))
         lab.wait(played.source.frames / played.source.rate_hz + AMBIENT_S)

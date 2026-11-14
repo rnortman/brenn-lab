@@ -126,6 +126,19 @@ class ClockReading:
     monotonic: ClockValue
     wall: ClockValue
 
+    def after(self, seconds: float) -> ClockReading:
+        """The moment `seconds` after this one on the same machine and clocks:
+        both values later by `seconds`, rounded to microseconds.
+        """
+        if not seconds >= 0:
+            raise ValueError(f"cannot move a clock reading by {seconds} s; give 0 or more")
+        us = round(seconds * 1_000_000)
+        return ClockReading(
+            machine=self.machine,
+            monotonic=ClockValue(self.monotonic.clock, self.monotonic.us + us),
+            wall=ClockValue(self.wall.clock, self.wall.us + us),
+        )
+
 
 def now(machine: str) -> ClockReading:
     """This process's clock reading on `machine`, its own."""

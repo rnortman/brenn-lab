@@ -200,6 +200,73 @@ def healthy(record: Any) -> bool:
     )
 
 
+def first_mark(records: Sequence[Any], role: str) -> Any:
+    """The first mark of `role`'s one play, from its `results.json` record,
+    where a play with a stated start has it; the manifest's is null for such
+    a play. A `ValueError` if the role has no one play or it handed no frame.
+    """
+    found = [r for r in records if r["role"] == role]
+    if len(found) != 1:
+        raise ValueError(f"{len(found)} records of {role}'s plays; the scenario has one")
+    if found[0]["first"] is None:
+        raise ValueError(f"{role}'s play has no first mark: {found[0]}")
+    return found[0]["first"]
+
+
+def stated_offset_us(journal: Sequence[Any], early: str, late: str) -> int:
+    """The offset the script stated from `early`'s start to `late`'s: each
+    role's asked start less the clock reading it gave last before the play,
+    `late`'s less `early`'s. Each difference is on its own role's clock, so
+    this holds whether or not the roles share a machine.
+    """
+
+    def lead(role: str) -> int:
+        reading: Any = None
+        for line in journal:
+            if line.get("role") != role or line.get("ok") is not True:
+                continue
+            if line["command"] == "playback.clock":
+                reading = line["result"]["at"]
+            elif line["command"] == "playback.play":
+                asked = line["result"]["asked_start"]
+                if reading is None or asked is None:
+                    raise ValueError(f"{role}'s play states no start from a reading of its clock")
+                return int(asked["monotonic"]["us"]) - int(reading["monotonic"]["us"])
+        raise ValueError(f"the journal holds no play of {role}")
+
+    return lead(late) - lead(early)
+
+
+def marks_gap_us(early: Any, late: Any) -> int:
+    """The time from one first mark to another, both on one machine's clock."""
+    if early["at"]["machine"] != late["at"]["machine"]:
+        raise ValueError("the two first marks are on different machines' clocks")
+    return int(late["at"]["monotonic"]["us"]) - int(early["at"]["monotonic"]["us"])
+
+
+def raw_offsets(early: Any, late: Any) -> dict[str, tuple[float, float]]:
+    """Each raw microphone's `offset_frames` in two pairs of one capture, the
+    earlier pair's then the later's. A `ValueError` unless both pairs have
+    the same raw microphones, at least one, and every one located both plays.
+    """
+    found = [{c["channel"]: c["offset_frames"] for c in raw_channels(p)} for p in (early, late)]
+    if found[0].keys() != found[1].keys() or not found[0]:
+        raise ValueError(f"the pairs' raw microphones differ or are none: {found}")
+    missing = [c for c in found[0] if found[0][c] is None or found[1][c] is None]
+    if missing:
+        raise ValueError(f"raw microphones that did not locate both plays: {missing}")
+    return {c: (float(found[0][c]), float(found[1][c])) for c in found[0]}
+
+
+def capture_gap_s(offsets: dict[str, tuple[float, float]], rate_hz: int) -> float:
+    """The time in the capture from one play to another: the later
+    `offset_frames` less the earlier, the mean over the raw microphones of
+    `raw_offsets`, at the capture's rate.
+    """
+    gaps = [late - early for early, late in offsets.values()]
+    return sum(gaps) / len(gaps) / rate_hz
+
+
 def played(records: Sequence[Any], entries: Sequence[Any], level_mb: int) -> bool:
     """Whether every play of a step ran as asked: each results record
     `healthy`, and no control of any source entry read back above what was

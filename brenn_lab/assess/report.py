@@ -68,6 +68,8 @@ class _PlayRecord:
     as_sent: bool
     restored: bool
     failure: JsonObject | None
+    asked_start: JsonObject | None
+    started_after_us: int | None
 
 
 @dataclass(frozen=True)
@@ -185,6 +187,8 @@ def _play_record(record: JsonValue, where: str) -> _PlayRecord:
         get(record, "as_sent", bool, where),
         get(record, "restored", bool, where),
         get_or_null(record, "failure", dict, where),
+        get_or_null(record, "asked_start", dict, where),
+        get_or_null(record, "started_after_us", int, where),
     )
 
 
@@ -605,6 +609,8 @@ class _Report:
                 "as_sent": record.as_sent,
                 "restored": record.restored,
                 "failure": record.failure,
+                "asked_start": record.asked_start,
+                "started_after_us": record.started_after_us,
             },
             "marker": self.marker(aligned, record),
         }

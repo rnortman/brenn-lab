@@ -68,6 +68,9 @@ LEVEL = m.Control(
 )
 HELD = m.Control(element="Speaker", index=0, part="held", channels=(m.Channel("Mono", None, True),))
 MARK = m.Mark(frames_handed=1600, delay_frames=None, at=AT)
+START = AT.after(2.0)
+WOKE = AT.after(2.0004)
+FIRST = m.Mark(frames_handed=1600, delay_frames=320, at=AT.after(2.0011))
 STOPPED = m.Stopped(
     play=1,
     frames_handed=16000,
@@ -76,6 +79,8 @@ STOPPED = m.Stopped(
     last=MARK,
     end=AT,
     restored=True,
+    woke=None,
+    first=None,
 )
 STARTED = m.Started(
     play=1,
@@ -89,13 +94,22 @@ STARTED = m.Started(
     level_mb=-1800,
     cap_mb=-1800,
     local_time="2026-11-13T14:00:00-05:00",
+    asked_start=None,
     first=MARK,
 )
 FAILURE = Failure("controls_moved", "PCM 1 moved", {"element": "PCM", "index": 1})
+LATE = Failure("start_passed", "late", {"late_us": 20001})
 
-COMMAND_BODIES = [m.Play(source="clips/a.wav", volume_mb=-1800), m.Stop()]
+COMMAND_BODIES = [
+    m.Play(source="clips/a.wav", volume_mb=-1800),
+    m.Play(source="clips/a.wav", volume_mb=-1800, start=START),
+    m.Clock(),
+    m.Stop(),
+]
 RESULT_BODIES: list[object] = [
     STARTED,
+    dataclasses.replace(STARTED, asked_start=START, first=None),
+    m.ClockRead(at=AT),
     dataclasses.replace(
         STARTED,
         play=0,
@@ -105,6 +119,8 @@ RESULT_BODIES: list[object] = [
     ),
     STOPPED,
     dataclasses.replace(STOPPED, last=None, unplayed_frames=320),
+    dataclasses.replace(STOPPED, woke=WOKE, first=FIRST),
+    dataclasses.replace(STOPPED, frames_handed=0, unplayed_frames=0, last=None),
     m.Checked(
         output=OUTPUT,
         device=CARD,
@@ -173,6 +189,19 @@ EVENT_BODIES: list[object] = [
         last=MARK,
         end=AT,
         restored=True,
+        woke=None,
+        first=None,
+    ),
+    m.Ended(
+        play=2,
+        frames_handed=16000,
+        unplayed_frames=0,
+        underruns=0,
+        last=MARK,
+        end=AT,
+        restored=True,
+        woke=WOKE,
+        first=FIRST,
     ),
     m.Underrun(play=1, at_frame=8000, at=AT, detail="EPIPE"),
     m.Failed(
@@ -184,6 +213,20 @@ EVENT_BODIES: list[object] = [
         last=MARK,
         end=AT,
         restored=False,
+        woke=None,
+        first=None,
+    ),
+    m.Failed(
+        play=2,
+        failure=LATE,
+        frames_handed=0,
+        unplayed_frames=0,
+        underruns=0,
+        last=None,
+        end=AT,
+        restored=True,
+        woke=AT.after(2.020001),
+        first=None,
     ),
 ]
 
@@ -192,8 +235,10 @@ def test_the_kinds_names_are_registered() -> None:
     assert playback.KIND == "playback"
     assert COMMANDS["playback.play"] is m.Play
     assert COMMANDS["playback.stop"] is m.Stop
+    assert COMMANDS["playback.clock"] is m.Clock
     assert {n for n in RESULTS if n.startswith("playback.")} == {
         "playback.started",
+        "playback.clock_read",
         "playback.stopped",
         "playback.checked",
         "playback.released",
@@ -206,7 +251,7 @@ def test_the_kinds_names_are_registered() -> None:
 
 
 @pytest.mark.parametrize("body", COMMAND_BODIES)
-def test_commands_round_trip(body: m.Play | m.Stop) -> None:
+def test_commands_round_trip(body: m.Play | m.Clock | m.Stop) -> None:
     message = Command(role="speaker", body=body, dry=True)
     assert loads(dumps(message)) == message
 
@@ -225,7 +270,7 @@ def test_events_round_trip(body: object) -> None:
 
 
 def test_only_the_failed_event_reports_a_failure() -> None:
-    assert [failure_of(body) for body in EVENT_BODIES] == [None, None, FAILURE]
+    assert [failure_of(body) for body in EVENT_BODIES] == [None, None, None, FAILURE, LATE]
 
 
 def test_a_part_other_than_level_or_held_is_refused() -> None:

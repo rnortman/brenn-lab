@@ -140,15 +140,19 @@ class QuietSpan:
 @result("playback.started")
 @dataclass(frozen=True)
 class Started:
-    """A play is running. In a dry reply `play` is 0, `copy` and `first` are
-    null and `controls` are as found.
+    """A play is running, or, with a stated start, readied. In a dry reply
+    `play` is 0, `copy` and `first` are null and `controls` are as found.
 
     `controls` are read back after the role set them, `found` before it set
     anything. `level_mb` is the level at which a full-scale sample is played:
     the controls' volumes read back, in a dry reply the asked and configured
     ones. The play's own peak level is `level_mb + source.peak_mb`.
     `local_time` is the machine's local civil time, ISO 8601 with its UTC
-    offset, at which quiet hours were judged.
+    offset, at which quiet hours were judged. `asked_start` is the play's
+    stated start, null for a play that stated none. `first` is the mark after
+    the first write of an untimed play; null for a play with a stated start,
+    whose reply comes before any frame is handed and whose first mark is in
+    its end.
     """
 
     play: int
@@ -162,7 +166,16 @@ class Started:
     level_mb: int
     cap_mb: int
     local_time: str
+    asked_start: ClockReading | None
     first: Mark | None
+
+
+@result("playback.clock_read")
+@dataclass(frozen=True)
+class ClockRead:
+    """The role's clock reading, taken as the last thing before the reply."""
+
+    at: ClockReading
 
 
 @result("playback.stopped")
@@ -173,8 +186,12 @@ class Stopped:
     `unplayed_frames` is the device's delay read just before the cut, the
     handed frames that were discarded, null when it could not be read.
     `underruns` counts the play's underruns. `last` is the mark after the last
-    write, null in a dry reply; `end` is read once the stream is closed.
-    `restored` says whether every control was put back as found.
+    write, null in a dry reply and for a play that handed no frame; `end` is
+    read once the stream is closed. `restored` says whether every control was
+    put back as found. For a play with a stated start, `woke` is the reading
+    when its wait ended at the start, before the first write, and `first` the
+    mark after its first write; both are null for an untimed play, whose first
+    mark is in its reply, and where the play never got that far.
     """
 
     play: int
@@ -184,6 +201,8 @@ class Stopped:
     last: Mark | None
     end: ClockReading
     restored: bool
+    woke: ClockReading | None
+    first: Mark | None
 
 
 @result("playback.checked")
@@ -214,12 +233,27 @@ class Released:
 @dataclass(frozen=True)
 class Play(Request[Started]):
     """Play `source`, a path under the role's source directory, with the level
-    control at `volume_mb`. Replies once the first frames are handed to the
-    device; the play goes on without blocking the script.
+    control at `volume_mb`. The play goes on without blocking the script.
+
+    With `start` null, replies once the first frames are handed to the
+    device. With `start` set, a reading on the role's own machine and
+    monotonic clock, the role readies the play (source, copy, output,
+    controls) and replies; the first frames are handed over when its
+    monotonic clock reaches `start`. Only the monotonic value places the
+    play; the wall value is carried for the record.
     """
 
     source: str
     volume_mb: int
+    start: ClockReading | None = None
+
+
+@command("playback.clock")
+@dataclass(frozen=True)
+class Clock(Request[ClockRead]):
+    """Read the role's clock. Touches no output; answered while a play runs,
+    and the same whether dry or not.
+    """
 
 
 @command("playback.stop")
@@ -231,7 +265,9 @@ class Stop(Request[Stopped]):
 @event("playback.ended")
 @dataclass(frozen=True)
 class Ended:
-    """The source was handed over whole and the device played its buffer out."""
+    """The source was handed over whole and the device played its buffer out.
+    `woke` and `first` are as in `Stopped`.
+    """
 
     play: int
     frames_handed: int
@@ -240,6 +276,8 @@ class Ended:
     last: Mark
     end: ClockReading
     restored: bool
+    woke: ClockReading | None
+    first: Mark | None
 
 
 @event("playback.underrun")
@@ -260,7 +298,9 @@ class Underrun:
 @dataclass(frozen=True)
 class Failed:
     """The play ended and nobody asked: the stream died, a held control moved,
-    quiet hours began, or the recoveries ran out.
+    quiet hours began, the recoveries ran out, or a play with a stated start
+    woke too late for it. `last` is null when no frame was handed; `woke` and
+    `first` are as in `Stopped`.
     """
 
     play: int
@@ -268,6 +308,8 @@ class Failed:
     frames_handed: int
     unplayed_frames: int | None
     underruns: int
-    last: Mark
+    last: Mark | None
     end: ClockReading
     restored: bool
+    woke: ClockReading | None
+    first: Mark | None

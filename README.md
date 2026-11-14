@@ -9,7 +9,7 @@ It is built for many devices on many machines. No experiment assumes one
 microphone, one speaker, one sample rate or one host, and a device's stream
 need not be audio: pose, fault and status streams are data too.
 
-<!-- TODO(cross-machine-control-waits-on-bus-blob-transfer): control of devices on other machines starts from the owner's answer to this entry. -->
+<!-- TODO(remote-capture-reaches-run-directory): control of devices on other machines runs over the brenn bus; how a capture recorded elsewhere reaches the run directory is this entry. -->
 
 ## Status
 
@@ -31,6 +31,12 @@ manifest, a journal of every command, reply and event, and results.
   one device clock. Its audible-lane test plays through an attached reSpeaker
   Flex and through a sound-server sink, each at the quietest level the
   Flex's microphones detect plus a margin, while the capture role records.
+  A script can state when a play starts, on the playing role's own clock;
+  the role does its slow work first and hands the first frames over at the
+  start, and the run records the start asked beside the first mark. On one
+  machine two plays on a card and a sink were placed a stated second apart
+  to under a millisecond at their first marks; a start on another machine's
+  clock is refused, and across machines the gap is left to alignment.
   On a sink the role runs a sound server client this repository builds,
   loads no host sound library, and holds the sink's volume; it has played on
   one Bluetooth speaker.

@@ -147,6 +147,59 @@ and the results. A script runs in the runner's interpreter with the runner's
 dependencies, `brenn_lab` and the standard library; a script that needs a
 third-party package needs it added to `requirements.in`.
 
+### Placing a play in time
+
+A play may state when it starts: `playback.Play(..., start=...)`, where the
+start is a `ClockReading` of the playing role's own machine. A script never
+reads its own clock to make one. It asks the role for a reading with
+`playback.Clock()`, whose result `.at` is the role's clock as it replies, and
+moves it later with `ClockReading.after(seconds)`:
+
+```python
+LEAD_S = 2.0
+
+talker_now = talker.send(playback.Clock()).at
+speaker_now = speaker.send(playback.Clock()).at
+talker.send(playback.Play(source="talker.wav", volume_mb=talker_mb, start=talker_now.after(LEAD_S)))
+speaker.send(
+    playback.Play(
+        source="own.wav", volume_mb=speaker_mb, start=speaker_now.after(LEAD_S + OFFSET_S)
+    )
+)
+lab.wait(LEAD_S + max(talker_s, OFFSET_S + own_s) + 1.0)
+```
+
+- The role does every slow step of the play (judging the source, the kept
+  copy, attaching and opening the output, setting and reading back the
+  controls) before it replies, and replies as soon as the play is ready. At
+  the start it hands the first frames over and does nothing else first. The
+  reply does not wait for the start, so a second role's play can be readied
+  while the first waits.
+- `LEAD_S` is room for both plays to be readied before either start. A start
+  that has passed by the time the output is ready fails the play
+  (`start_passed`); it is never played late.
+- **A role refuses a start that is not on its own clock**: a start naming
+  another machine, or another clock, fails `start_clock` before anything is
+  read, attached or opened, live and in a dry run. So the idiom above states
+  each start on its own role's reading and never hands one role's reading to
+  another.
+- **On one machine** the two readings are asked one after the other and
+  treated as one moment. The gap between the two plays' first marks is the
+  stated offset plus the time between the two `clock` replies, plus the
+  difference of the two plays' `started_after_us`. On the bench that was a
+  tenth of a millisecond plus under one millisecond (*The anchoring scenario*).
+- **On two machines** the same script runs unchanged. The harness claims each
+  play's start against its own machine's clock, at its first mark; it claims
+  nothing about the gap between the two machines' plays beyond what the
+  script could know: both readings were taken between its sending the first
+  `clock` and receiving the second's reply, and the journal's four lines for
+  those commands record that interval. Alignment measures the gap that
+  sounded after the fact; nothing compares the two clocks.
+- The harness claims a start at the play's first mark, the mark taken after
+  the first write. It corrects for no output's latency: what an output adds
+  after the mark (a quarter second on a Bluetooth sink) is in the gap in the
+  room, and alignment measures it.
+
 `examples/` holds scripts that are tracked and type-checked. Scripts for one
 experiment, with a room's particulars in them, need not be in the repository
 at all.
@@ -193,8 +246,8 @@ The registered names:
 
 | | Names |
 |---|---|
-| Commands | `check`, `release`, `capture.start`, `capture.stop`, `playback.play`, `playback.stop` |
-| Results | `capture.started`, `capture.stopped`, `capture.checked`, `capture.released`, `playback.started`, `playback.stopped`, `playback.checked`, `playback.released` |
+| Commands | `check`, `release`, `capture.start`, `capture.stop`, `playback.play`, `playback.stop`, `playback.clock` |
+| Results | `capture.started`, `capture.stopped`, `capture.checked`, `capture.released`, `playback.started`, `playback.stopped`, `playback.checked`, `playback.released`, `playback.clock_read` |
 | Events | `capture.gap`, `capture.late`, `capture.failed`, `playback.ended`, `playback.underrun`, `playback.failed` |
 
 ## The capture kind
@@ -393,11 +446,16 @@ volume_mb = 0
 
 ### Commands and results
 
-- `playback.play {source, volume_mb}` → `playback.started`. `source` is a
-  path relative to `source_dir`; `volume_mb` is the level control's setting
-  for this play. The reply comes once the first frames have been handed to
-  the device; the play goes on on a thread of the role's, and the script is
-  not blocked for the length of the source.
+- `playback.play {source, volume_mb, start}` → `playback.started`. `source`
+  is a path relative to `source_dir`; `volume_mb` is the level control's
+  setting for this play. `start` is `null` (the default) or a clock reading
+  of the role's own machine and clock: when the role's monotonic clock reaches
+  `start.monotonic.us`, the first frames are handed over. Only the monotonic
+  value places the play; the wall value is carried for the record. The reply
+  to an untimed play comes once the first frames have been handed to the
+  device; the reply to a timed play comes once the play is ready, before its
+  start (*How the role plays*). Either way the play goes on on a thread of
+  the role's, and the script is not blocked for the length of the source.
   - `play`: the role's play number in the run, from 1; 0 in a dry reply.
   - `source`: `{name, sha256, frames, rate_hz, channels, sample_format,
     peak_mb, marker}`: the file as named, the hash of its bytes, what it
@@ -423,15 +481,24 @@ volume_mb = 0
     controls' configured values. `cap_mb`: the cap.
   - `local_time`: the machine's local civil time, ISO 8601 with its UTC
     offset, at which quiet hours were last judged before the open.
-  - `first`: the mark after the first write; `null` in a dry reply.
+  - `first`: the mark after the first write; `null` in a dry reply, and
+    `null` for a timed play, of which no frame has been handed when the reply
+    is made. A timed play's first mark is in its end.
+  - `asked_start`: the command's `start`, echoed; `null` for an untimed play.
 - `playback.stop` → `playback.stopped`: cuts the running play. Frames still in
   the device's buffer are discarded, the stream is closed and the controls are
   restored. `play`, `frames_handed`, `unplayed_frames` (the device's delay
   read just before the cut, `null` when it could not be read), `underruns` (a
-  count), `last` (the mark after the last write; `null` in a dry reply), `end`
-  (a clock reading once the stream is closed), `restored` (whether every
-  control was put back as found). `not_playing` when nothing is playing, a
-  play that already ended included.
+  count), `last` (the mark after the last write; `null` in a dry reply and for
+  a play that handed no frame), `end` (a clock reading once the stream is
+  closed), `restored` (whether every control was put back as found), `woke`
+  and `first` (below). `not_playing` when nothing is playing, a play that
+  already ended included. A timed play stopped before its start is cut with
+  `frames_handed` 0.
+- `playback.clock` → `playback.clock_read`: `at`, the role's clock reading,
+  taken as the last thing before the reply. It touches no output, is
+  answered while a play runs, and is the same live and dry. It is how a
+  script gets a reading to state a start from (*Placing a play in time*).
 - `check` → `playback.checked`: `output`, `device`, `controls` (each with its
   `range`, `{min_mb, max_mb}` or `null`, and its channels as found), `cap_mb`,
   `quiet_hours`, `local_time`, `quiet_now`. It resolves the card and reads the
@@ -482,7 +549,22 @@ and the run fails with `left_running`.
   out by one write.
 - `playback.failed`: `{play, failure, …the fields of playback.stopped…}`. The
   play ended and nobody asked: the stream died, a held control moved, quiet
-  hours began, the recoveries ran out, or the role's own code failed.
+  hours began, the recoveries ran out, a timed play woke too late, or the
+  role's own code failed. `last` is `null` when the play ended before any
+  frame was handed.
+
+A play's end (`playback.ended`, `playback.failed`, `playback.stopped`)
+carries two fields of a timed play's start, both `null` for an untimed play:
+
+- `woke`: the role's clock reading when the play's wait ended at its start,
+  before the first write; `null` too for a timed play that ended during its
+  wait. With it a run tells a role that woke late from a device that took the
+  write late.
+- `first`: the mark after the first write; `null` for a play that handed no
+  frame. A play's first mark is stated once: in its reply when untimed, in
+  its end when timed.
+
+Nothing is reported at a timed play's start.
 
 ### How the role plays
 
@@ -545,6 +627,57 @@ been played:
   playback roles on two devices play at once. Two on one card: the second
   play fails with `open` while the first runs.
 - The role keeps no stream open between plays.
+
+#### A timed play
+
+A play with a `start` runs these steps instead:
+
+1. **Own clock.** Before anything else, the start must name the role's
+   machine and the clock of the role's own readings; otherwise
+   `start_clock`, with nothing read, attached, written or opened. Live and
+   dry alike.
+2. **Source and limits**, as above, but quiet hours are judged over the hold
+   and the sound: from now to the start plus the source's length.
+3. **Kept copy**, as above; quiet hours judged again over the same span.
+4. **Open**, as above. On a sink the stream is created corked.
+5. **Controls**, as above: read, moved, read back.
+6. **Passed?** The role reads its clock. At or past the start, the play
+   fails `start_passed` with `data` `{late_us}`: no frame, stream closed,
+   controls restored, output let go, no event; the copy is left and its
+   number used, as for a play refused at the controls.
+7. **Reply** `playback.started` with `first` `null` and `asked_start`; the
+   play's thread starts and the play is the role's running play.
+8. **Wait.** While more than 100 ms remain, the thread makes the
+   between-chunks check (a stop, a moved control, quiet hours) and waits
+   100 ms on the play's stop. Inside the last 100 ms it makes no check and
+   waits for what remains of a fresh reading of the role's clock, again
+   while that clock still reads before the start. No frame is handed while
+   the clock reads before the start. So the controls are verified no longer
+   before the first frame than between two chunks of a running play, and no
+   round trip to a mixer or a sound server stands between the wake and the
+   write.
+9. **At the start.** The thread reads the clock (`woke`). More than 20 ms
+   past the start, the play fails `start_passed` in a `playback.failed`
+   event with no frame handed: a play in the wrong place is worse than a
+   failed run, and 20 ms is one period of the stream. Otherwise the first
+   chunk is handed over, and the play goes on as any play from step 6 above.
+   `woke` and the first mark are kept for the play's end.
+
+**What a readied play holds**, from its reply to its end: its output
+attached, its stream open with no frame written (on a sink, corked), the
+controls at the play's level, and the role refusing another play or a
+`check` (`already_playing`). `stop`, `release` and an interrupt end the wait
+at once; the play ends `playback.stopped` with `frames_handed` 0 and `last`,
+`first` and `woke` `null`, its controls restored. A start far ahead holds the
+output that long; the runner's release at the script's end stops it.
+
+**Nothing is reported at a timed play's start.** From its wake to its first
+underrun or its end, the play's thread reports nothing and takes no lock the
+script's thread can hold. The runner records a reply under a lock held across
+the manifest's rewrite and `fsync`, and an event takes the same lock; a
+thread that reported its first mark there could wait past its first 100 ms
+chunk while the script readied another role's play, and underrun its own
+head. The first mark and `woke` are carried by the play's end.
 
 ### The cap
 
@@ -635,7 +768,10 @@ zone setting (`/etc/localtime`, UTC when absent) give it. A play is refused
 with `quiet_hours` if any instant from now to now plus the source's length
 falls in a quiet span, so a source that would run into quiet hours never
 starts. That is judged with the limits and again just before the open, once
-the kept copy is written. Before each chunk the thread judges again, against a stalled or
+the kept copy is written. A timed play is judged from now to its start plus
+the source's length, so a play whose hold or sound touches a quiet span is
+refused before anything is written, and the wait before its start judges
+again every 100 ms until the last 100 ms. Before each chunk the thread judges again, against a stalled or
 stepped clock, and ends the play with `quiet_hours` if the time has come. The
 reply and `check` carry the local time the role judged by, so a machine with a
 wrong zone shows in the dry run's report; the role cannot know its zone is
@@ -660,6 +796,12 @@ dry run spanned (−88 to −92 dB, as around them). In both, about one to two
 seconds after the dry run had ended, one half second rose 8 to 13 dB on all
 four microphones; what made it is not known.
 
+A dry timed play makes the own-clock step first (`start_clock` on another
+machine's or another clock's start), then what any dry play makes, with
+quiet hours judged from now to its start plus the source's length. It
+judges nothing about whether the start has passed, waits for nothing,
+replies with `asked_start`, and holds nothing open after its reply.
+
 A dry `playback.stop` checks only that a dry play preceded it. A dry role
 reports no event.
 
@@ -678,6 +820,8 @@ reports no event.
 | `volume_range` | `volume_mb` is outside the level control's range, the level control has no volume, or a held control's stated volume does not fit it (out of range, stated for a control with no volume, or missing for one with a volume) |
 | `over_cap` | the play's level is above the cap |
 | `quiet_hours` | the play would fall in a quiet span, or one began during it |
+| `start_clock` | the play's `start` names another machine than the role's, or another clock than the role's own readings'; `data` `{machine, clock, role_machine}`, the start's machine and clock and the role's machine |
+| `start_passed` | a timed play's start had passed when its output was ready (a failure reply), or its thread woke more than 20 ms after it (a `playback.failed` event); no frame was handed. `data` `{late_us}`, how far past the start the role's clock read |
 | `open` | the device could not be opened, for one because something else holds it |
 | `params` | the device did not grant the source's rate, channel count and format exactly |
 | `mixer` | a mixer call failed: the mixer could not be opened or loaded, a read or write was refused, or a volume has no dB scale (such a control cannot be held to a cap in millibels) |
@@ -853,21 +997,40 @@ is about 12 dB quieter at the later placement (−32 dB of full scale against
 half second before it at −61 dB in both and the Flex's own tone the same at
 each level. So a high score is the start marker landing in a quieter stretch
 of the speech; the talker's delay estimate, the talker's level and the
-Flex's level were ruled out. What moves the two plays a quarter second
-against each other from run to run was not read
-(`scenario-play-offset-varies-between-runs`). The ramp that counted three
-in a row had no high run at −6000 or −5400 mB, and its three runs at −4800 mB
-scored alike.
+Flex's level were ruled out. The ramp that counted three in a row had no
+high run at −6000 or −5400 mB, and its three runs at −4800 mB scored alike.
 
-So under the talker, a run that misses at a level where an earlier run was
-detected is most likely a run in the earlier cluster after one in the later,
-not a level too low. Above −4000 mB the bench still reads that miss, and a
-Flex's tone that stands out there stops the ramp as not recognised. That is a
-choice: past −4000 mB the bench plays nothing louder for a miss its level
-does not explain, and going louder would answer a timing cause with level.
-Every run is kept with its scores, so such a stop shows a detection and a
-miss at one level, which is what tells it from a play the level does not
-explain.
+What moved the two plays against each other was read from all 34 scenario
+runs of that day (`run-directory.md`, *The same device played and
+recorded*): not either output's path, but the runner's work between the
+talker's reply and the speaker's command, and the speaker's own pre-roll
+from its command to its first mark, both on the machine's clock. Those runs
+were **untimed**: the example sent the talker's play, waited one second, and
+sent the speaker's.
+
+The example now states both starts (*Placing a play in time*). In the lane
+run of the same afternoon all eight scenario runs were timed, five in the
+ramp under the talker and three of the scenario itself. Each play's first
+mark lay 0.17 to 0.32 ms after its stated start on the Flex and 0.41 to
+0.86 ms after it on the sink; each thread woke 0.04 to 0.16 ms after the
+start. The two first marks were 999.4 to 1000.0 ms apart for a stated
+1000 ms, the two clock readings having been taken 0.1 ms apart. In the six
+runs where alignment located both plays, the speaker's play lay 755.3 to
+760.5 ms after the talker's in the capture, a spread of 5.2 ms, in one
+group: the stated second less the Bluetooth path's quarter second, which the
+harness does not correct for. The two clusters do not occur in timed runs.
+The ramp under the talker read, start and end: at −6000 mB 0.09 to 0.13 and
+0.27 to 0.30, missed; at −5400 mB 0.15 to 0.17 and 0.45 to 0.48, missed; at
+−4800 mB three runs at 0.28 to 0.31 and 0.61 to 0.66, each detected. It
+found −4800 mB, as the untimed ramp that counted three in a row had.
+
+So, in a timed run, a run that misses at a level where an earlier run was
+detected is not explained by where the plays fell against each other. Above
+−4000 mB the bench reads that miss, and a Flex's tone that stands out there
+stops the ramp as not recognised: past −4000 mB the bench plays nothing
+louder for a miss its level does not explain. Every run is kept with its
+scores, so such a stop shows a detection and a miss at one level, which is
+what tells it from a play the level does not explain.
 
 `examples/anchoring_scenario.py` takes its levels from the configuration: it
 sends each playback role `check` before the capture starts and plays each
@@ -1075,14 +1238,18 @@ base volume 0 mB. Through the ramps, test runs and the anchoring scenario:
   level, with nothing louder after, and no step showed sound after the
   restore. It does not follow the level asked: no step from −12000 to
   −9000 mB sounded it. The same burst, its peak within 2.5 dB, came in eleven
-  ramps over two hours. What makes it, the speaker or the server, these runs cannot
-  tell.
+  ramps over two hours. The maintainer's account of it: it is the speaker's
+  own chirp, the sound this speaker makes when its volume is set above or
+  below a limit.
 
 #### The anchoring scenario
 
 `examples/anchoring_scenario.py` records on `mic` while a talker plays on
 `talker` and the robot's own sound, one second later, on `speaker`; it stops
-the capture a second after the later of the two plays has ended. Both
+the capture a second after the later of the two plays has ended. It states
+both starts, each on its own role's clock reading, two seconds ahead
+(*Placing a play in time*), so the same script runs with its roles on one
+machine or on two. Both
 sources are marked with `lab mark`, one member each, so that `lab assess`
 can locate each play in the capture. Roles are named, no device: a lab
 configuration for it, with invented names. The example plays each source at
@@ -1170,7 +1337,21 @@ in a row there detect the play, it found −4800 mB again and the scenario
 played the Flex at −4200 mB: both plays were located in three runs of three,
 the robot's start marker scoring 0.47 to 0.61 and its end marker 0.68 to
 0.76, with `drift_ppm` −1.0 to 4.9 on the Flex's play and 28.0 to 35.3 on
-the talker's.
+the talker's. All the runs of this paragraph so far were untimed: the
+example waited one second between sending its two plays.
+
+Timed, in the lane run of the same afternoon, the ramp under the talker
+found −4800 mB and the scenario played the Flex at −4200 mB: both plays
+were located in three runs of three, the robot's start marker scoring 0.46
+to 0.51 and its end marker 0.68 to 0.74. Each play's first mark lay 0.21 to
+0.32 ms after its stated start on the Flex and 0.41 to 0.59 ms after it on
+the sink, and the two first marks were 999.7 to 1000.0 ms apart. In the
+capture the robot's play lay 757.8 to 760.5 ms after the talker's; from its
+first mark, the Flex's play lay 5.3 to 5.6 ms on, the sink's 244.4 to
+247.9 ms. So on one machine a stated gap between two outputs' first marks
+holds to under a millisecond, on a card and on a sink alike, and the gap
+that sounds is that less the difference of the two outputs' paths, which
+alignment measures and the harness does not correct for.
 
 ## Starting the runner
 
@@ -1499,7 +1680,7 @@ verdict on the run.
 |---|---|
 | 0 | a report was written; every capture and play was read and every marked play located in some capture. A run with no marked play aligns with 0 |
 | 1 | a report was written that says otherwise |
-| 2 | refused, no report written: `where` `run`, `reason` `unreadable` (no directory, no `manifest.json` or `results.json` that is JSON of the expected shape), `layout` (not layout 2) or `not_writable` (the run directory cannot be written: a read-only disk, a directory without write permission, or a leftover `.alignment.tmp/` that cannot be removed, which the detail names; decided after the run is read and before any capture is read); or `where` `arguments`, `reason` `usage` |
+| 2 | refused, no report written: `where` `run`, `reason` `unreadable` (no directory, no `manifest.json` or `results.json` that is JSON of the expected shape), `layout` (not layout 3) or `not_writable` (the run directory cannot be written: a read-only disk, a directory without write permission, or a leftover `.alignment.tmp/` that cannot be removed, which the detail names; decided after the run is read and before any capture is read); or `where` `arguments`, `reason` `usage` |
 | 3 | the command raised; a `.alignment.tmp/` left in the run is not part of the record, and the next `align` clears it, or refuses with `not_writable` if it cannot |
 
 `align` writes its report and its scratch into the run and nowhere else. To

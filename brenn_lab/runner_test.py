@@ -167,7 +167,7 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
     notes.write_text("door shut\n")
     out, manifest, results = do_run(tmp_path, lab_path, EXAMPLE, notes)
 
-    assert manifest["layout"] == 2
+    assert manifest["layout"] == 3
     assert results["schema"] == 2
     assert manifest["harness"] == HARNESS.encode()
     assert manifest["runner"] == {"machine": MACHINE}

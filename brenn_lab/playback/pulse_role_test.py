@@ -17,8 +17,20 @@ from pathlib import Path
 
 import pytest
 
+from brenn_lab.data import (
+    MONOTONIC,
+    REALTIME,
+    ClockReading,
+    ClockValue,
+    Command,
+    Event,
+    Failure,
+    JsonObject,
+    JsonValue,
+    Reply,
+    now,
+)
 from brenn_lab.data import Check as CheckCommand
-from brenn_lab.data import Command, Event, Failure, JsonObject, JsonValue, Reply
 from brenn_lab.place import Place
 from brenn_lab.playback import role as role_module
 from brenn_lab.playback.device import SINK_LEVEL, PlaybackDevice
@@ -138,6 +150,8 @@ class Bench:
         self.output = Recording(selector, self.server)
         self.events: list[Event] = []
         self.ended = threading.Event()
+        # The role's clock reads this, while it is set, and the machine's clock otherwise.
+        self.at: ClockReading | None = None
         device = PlaybackDevice(
             output="pulse",
             selector=selector,
@@ -154,6 +168,7 @@ class Bench:
             self.output,
             self._sink,
             Place(self.data, tmp / "logs" / "talker", lambda _: None),
+            clock=lambda: self.at if self.at is not None else now("bench"),
         )
         self.dry_role = role_module.PlaybackRole(
             "talker", "bench", device, self.output, self._sink, None
@@ -173,8 +188,10 @@ class Bench:
         assert isinstance(reply, Reply)
         return reply.outcome
 
-    def play(self, volume_mb: int = -1800, dry: bool = False) -> object:
-        return self.send(Play(source="a.wav", volume_mb=volume_mb), dry)
+    def play(
+        self, volume_mb: int = -1800, dry: bool = False, start: ClockReading | None = None
+    ) -> object:
+        return self.send(Play(source="a.wav", volume_mb=volume_mb, start=start), dry)
 
     def wait_end(self) -> Ended | Failed:
         assert self.ended.wait(20), self.events
@@ -497,6 +514,56 @@ def test_stop_cuts_the_play_with_its_unplayed_frames(
         assert bench.events == []
     finally:
         bench.server.close()
+
+
+SET = ClockReading(
+    machine="bench",
+    monotonic=ClockValue(MONOTONIC, 81_000_000),
+    wall=ClockValue(REALTIME, 1_794_000_000_000_000),
+)
+"""The role's set clock: it reads this until a test sets it again."""
+START = SET.after(5.0)
+
+
+def test_a_timed_play_holds_a_stream_that_takes_nothing_until_its_start(bench: Bench) -> None:
+    frames = bench.clip(0.35)
+    bench.at = SET
+    s = started(bench.play(start=START))
+    assert (s.asked_start, s.first) == (START, None)
+    [stream] = bench.server.streams()
+    assert stream["sink"] == SPEAKER
+    assert stream["corked"] is True and stream["taken_frames"] == 0
+    assert bench.server.frames() == b"" and bench.events == []
+    bench.at = START
+    ended = bench.wait_end()
+    assert isinstance(ended, Ended), ended
+    assert (ended.frames_handed, ended.unplayed_frames, ended.underruns) == (5600, 0, 0)
+    assert ended.restored and ended.woke == START
+    assert ended.first is not None and ended.first.at == START
+    assert ended.first.frames_handed == 1600 and ended.first.delay_frames is not None
+    assert bench.server.frames() == frames
+    assert bench.server.streams() == []
+    bench.found_again()
+    assert bench.output.client_pid is None
+
+
+def test_a_stop_during_the_hold_leaves_no_stream(bench: Bench) -> None:
+    bench.clip(0.35)
+    bench.at = SET
+    started(bench.play(start=START))
+    stopped = bench.send(Stop())
+    assert isinstance(stopped, Stopped), stopped
+    assert (stopped.frames_handed, stopped.last, stopped.first, stopped.woke) == (
+        0,
+        None,
+        None,
+        None,
+    )
+    assert stopped.restored
+    assert bench.server.streams() == []
+    assert bench.server.frames() == b"" and bench.events == []
+    bench.found_again()
+    assert bench.output.client_pid is None
 
 
 def test_a_dry_play_makes_one_corked_stream_and_writes_and_sets_nothing(bench: Bench) -> None:

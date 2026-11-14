@@ -165,6 +165,109 @@ def test_unhealthy(changes: dict[str, Any]) -> None:
     assert not bench.healthy(record(**changes))
 
 
+def reading(us: int, machine: str = "bench") -> dict[str, Any]:
+    return {"machine": machine, "monotonic": {"clock": "CLOCK_MONOTONIC", "us": us}}
+
+
+def mark(us: int, machine: str = "bench") -> dict[str, Any]:
+    return {"frames_handed": 1600, "delay_frames": 320, "at": reading(us, machine)}
+
+
+def test_the_first_mark_is_the_results_record_s() -> None:
+    records = [
+        {"role": "talker", "first": mark(10)},
+        {"role": "speaker", "first": mark(20)},
+    ]
+    assert bench.first_mark(records, "speaker") == mark(20)
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [],
+        [{"role": "speaker", "first": mark(1)}, {"role": "speaker", "first": mark(2)}],
+        [{"role": "speaker", "first": None}],
+    ],
+)
+def test_no_one_first_mark_is_refused(records: list[Any]) -> None:
+    with pytest.raises(ValueError):
+        bench.first_mark(records, "speaker")
+
+
+def clock_reply(role: str, us: int) -> dict[str, Any]:
+    return {"role": role, "command": "playback.clock", "ok": True, "result": {"at": reading(us)}}
+
+
+def play_reply(role: str, asked: int | None) -> dict[str, Any]:
+    asked_start = None if asked is None else reading(asked)
+    return {
+        "role": role,
+        "command": "playback.play",
+        "ok": True,
+        "result": {"asked_start": asked_start},
+    }
+
+
+def test_the_stated_offset_is_each_role_s_lead_from_its_own_reading() -> None:
+    journal = [
+        {"role": "talker", "command": "playback.clock", "by": "script"},
+        clock_reply("talker", 1_000_000),
+        # The speaker's clock is read 30 ms later, and reads otherwise.
+        clock_reply("speaker", 50_030_000),
+        play_reply("talker", 3_000_000),
+        play_reply("speaker", 53_030_000),
+    ]
+    assert bench.stated_offset_us(journal, "talker", "speaker") == 1_000_000
+
+
+@pytest.mark.parametrize(
+    "journal",
+    [
+        [clock_reply("talker", 0), play_reply("talker", 1)],
+        [clock_reply("talker", 0), play_reply("talker", 1), play_reply("speaker", 2)],
+        [clock_reply("talker", 0), play_reply("talker", 1)]
+        + [clock_reply("speaker", 0), play_reply("speaker", None)],
+    ],
+)
+def test_a_stated_offset_with_no_stated_start_is_refused(journal: list[Any]) -> None:
+    with pytest.raises(ValueError):
+        bench.stated_offset_us(journal, "talker", "speaker")
+
+
+def test_the_gap_between_first_marks() -> None:
+    assert bench.marks_gap_us(mark(2_000_000), mark(3_004_000)) == 1_004_000
+    with pytest.raises(ValueError):
+        bench.marks_gap_us(mark(0), mark(1, machine="other"))
+
+
+def located(offsets: dict[str, float | None]) -> dict[str, Any]:
+    return {"channels": [{"channel": c, "offset_frames": o} for c, o in offsets.items()]}
+
+
+def test_raw_offsets_pair_the_raw_microphones() -> None:
+    early = located({"raw_mic_0": 1000.0, "raw_mic_1": 1002.0, "asr_beam": None})
+    late = located({"raw_mic_0": 13000.0, "raw_mic_1": 13010.0, "asr_beam": 0.0})
+    offsets = bench.raw_offsets(early, late)
+    assert offsets == {"raw_mic_0": (1000.0, 13000.0), "raw_mic_1": (1002.0, 13010.0)}
+    assert bench.capture_gap_s(offsets, 16000) == pytest.approx(12004.0 / 16000)
+
+
+@pytest.mark.parametrize(
+    ("early", "late"),
+    [
+        ({"raw_mic_0": 1.0, "raw_mic_1": 2.0}, {"raw_mic_0": 1.0, "raw_mic_1": None}),
+        ({"raw_mic_0": None}, {"raw_mic_0": 1.0}),
+        ({"raw_mic_0": 1.0, "raw_mic_1": 2.0}, {"raw_mic_0": 1.0}),
+        ({"asr_beam": 1.0}, {"asr_beam": 1.0}),
+    ],
+)
+def test_raw_offsets_refuse_a_microphone_that_did_not_locate_both(
+    early: dict[str, float | None], late: dict[str, float | None]
+) -> None:
+    with pytest.raises(ValueError):
+        bench.raw_offsets(located(early), located(late))
+
+
 def entry(level: int, held: int = 0) -> dict[str, Any]:
     def control(part: str, volume: int) -> dict[str, Any]:
         channels = [{"channel": c, "volume_mb": volume, "switch": True} for c in ("l", "r")]

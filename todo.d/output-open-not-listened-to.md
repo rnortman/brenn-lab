@@ -15,3 +15,7 @@ spanned. In both runs, one to two seconds after the dry run ended, one half
 second rose 8 to 13 dB on all four microphones. That is not a listen: the
 open may sound below what the microphones pick out of the room, and what
 made the later rise, the output's close or the room, is not known.
+
+A play with a stated start holds a real output open with no frame written from
+its readying to its start, longer than a dry run's open, under the same quiet
+hours as the play.

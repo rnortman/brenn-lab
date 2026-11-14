@@ -235,3 +235,19 @@ def test_an_event_whose_failure_is_not_a_failure_is_refused(annotation: object) 
     with pytest.raises(TypeError, match="failure"):
         register_event("test.odd_failure")(Odd)
     assert "test.odd_failure" not in EVENTS
+
+
+def test_after_moves_both_values_and_keeps_the_names() -> None:
+    assert AT.after(1.5) == ClockReading(
+        machine="bench",
+        monotonic=ClockValue(MONOTONIC, 81234567 + 1_500_000),
+        wall=ClockValue(REALTIME, 1794000000000000 + 1_500_000),
+    )
+    assert AT.after(0.0000004) == AT
+    assert AT.after(0) == AT
+
+
+@pytest.mark.parametrize("seconds", [-0.000001, -1.0, float("nan")])
+def test_after_refuses_a_negative(seconds: float) -> None:
+    with pytest.raises(ValueError, match="0 or more"):
+        AT.after(seconds)

@@ -401,6 +401,13 @@ py_pytest_test(
 )
 
 py_pytest_test(
+    name = "playback_account_test",
+    size = "small",
+    srcs = ["playback/account_test.py"],
+    deps = [":brenn_lab"],
+)
+
+py_pytest_test(
     name = "playback_messages_test",
     size = "small",
     srcs = ["playback/messages_test.py"],

@@ -304,6 +304,37 @@ def test_a_play_ending(tmp_path: Path, ending: dict[str, Any], expected: list[st
         assert done["plays"][0]["record"]["as_sent"] is False
 
 
+def test_a_timed_play_s_start_is_copied_and_judged_by_nothing(tmp_path: Path) -> None:
+    asked: JsonObject = {
+        "machine": "bench",
+        "monotonic": {"clock": "CLOCK_MONOTONIC", "us": 5_000_000},
+        "wall": {"clock": "CLOCK_REALTIME", "us": 1_700_000_000_000_000},
+    }
+    timed = Play("speaker", 1, None, at=2000.0, asked_start=asked, started_after_us=900_000)
+    done = assess(scenes.build(tmp_path / "run", [timed]).run)
+    assert done["plays"][0]["record"]["asked_start"] == asked
+    assert done["plays"][0]["record"]["started_after_us"] == 900_000
+    assert names(done) == []
+    assert done["clock_readings"] == "not_used"
+    late = Play(
+        "speaker",
+        1,
+        None,
+        at=2000.0,
+        ended="failed",
+        failure={"reason": "start_passed", "detail": "late", "data": {"late_us": 20_001}},
+        handed=0,
+        asked_start=asked,
+    )
+    failed = assess(scenes.build(tmp_path / "late", [late]).run)
+    assert names(failed) == ["play_failed"]
+    assert failed["plays"][0]["record"]["asked_start"] == asked
+    assert failed["plays"][0]["record"]["started_after_us"] is None
+    untimed = assess(scenes.build(tmp_path / "untimed", [Play("speaker", 1, None, at=2000.0)]).run)
+    assert untimed["plays"][0]["record"]["asked_start"] is None
+    assert untimed["plays"][0]["record"]["started_after_us"] is None
+
+
 def test_a_missing_kept_copy(tmp_path: Path) -> None:
     built = scenes.build(tmp_path / "run", [MARKED])
     (built.run / "sources" / "speaker" / "0001.wav").unlink()
@@ -599,9 +630,10 @@ def test_a_missing_manifest_or_another_layout_is_refused(tmp_path: Path) -> None
     run.mkdir()
     refused = report.assess(run, READER, False, HARNESS)
     assert isinstance(refused, Failure) and refused.reason == "unreadable"
-    (run / "manifest.json").write_text(json.dumps({"layout": 1, "roles": {}}))
-    refused = report.assess(run, READER, False, HARNESS)
-    assert isinstance(refused, Failure) and refused.reason == "layout"
+    for layout in (1, 2):
+        (run / "manifest.json").write_text(json.dumps({"layout": layout, "roles": {}}))
+        refused = report.assess(run, READER, False, HARNESS)
+        assert isinstance(refused, Failure) and refused.reason == "layout"
     assert listing(run) == {"manifest.json": (run / "manifest.json").read_bytes()}
 
 

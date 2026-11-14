@@ -485,12 +485,11 @@ def align(run: Path) -> Any:
     return read_json(run / "alignment.json")
 
 
-def latency(pair_: Any, entry: Any, capture_start: Any, rate: int) -> None:
+def latency(pair_: Any, first: Any, capture_start: Any, rate: int) -> None:
     """Print, per raw microphone, where alignment put copy frame 0 against
-    the clock tie, and the path's latency: the capture's arrival of copy
-    frame 0 less the first mark's reading.
+    the clock tie of the play's first mark `first`, and the path's latency:
+    the capture's arrival of copy frame 0 less the first mark's reading.
     """
-    first = entry["first"]
     tied = bench.tie(first, capture_start, rate)
     mark_s = (int(first["at"]["monotonic"]["us"]) - int(capture_start["monotonic"]["us"])) / 1e6
     print(
@@ -626,7 +625,7 @@ def flex_marked_play(
     pair_ = bench.pair(alignment, "speaker", 1)
     for channel, (s, e) in bench.scores(pair_).items():
         print(f"  {channel}: start marker {s}, end marker {e}")
-    latency(pair_, entry, started["start"], RATE_HZ)
+    latency(pair_, entry["first"], started["start"], RATE_HZ)
     raws = bench.raw_channels(pair_)
     for c in raws:
         assert (c["start"]["outcome"], c["end"]["outcome"]) == ("found", "found"), c
@@ -754,7 +753,7 @@ def test_sink_marked_play(
     assert bench.detected(alignment, "speaker", MARKED_PLAY), alignment["pairs"]
     pair_ = bench.pair(alignment, "speaker", MARKED_PLAY)
     [started] = manifest["roles"]["mic"]["captures"]
-    latency(pair_, marked, started["start"], RATE_HZ)
+    latency(pair_, marked["first"], started["start"], RATE_HZ)
     for c in bench.raw_channels(pair_):
         assert c["ratio_basis"] == "measured", c
 
@@ -867,14 +866,14 @@ def own_tone(root: Path, run: Path) -> tuple[bench.Standout, ...]:
     """Each raw microphone's reading of the Flex speaker's tone in a
     scenario run, as `bench.marked_tone` places it in the run's capture.
     """
-    manifest = read_json(run / "manifest.json")
+    manifest, results = read_json(run / "manifest.json"), read_json(run / "results.json")
     [started] = manifest["roles"]["mic"]["captures"]
-    [own] = manifest["roles"]["speaker"]["sources"]
+    first = bench.first_mark(results["sources"], "speaker")
     wav = export(run, started)
     keep(wav, root)
     rate, mics = bench.channels(wav, started["layout"])
     assert rate == RATE_HZ, rate
-    read = bench.marked_tone(own["first"], started["start"], mics, rate)
+    read = bench.marked_tone(first, started["start"], mics, rate)
     for r in read:
         print(f"  {r.channel}: own tone 1 kHz {r.tone_db:.1f} dB, neighbours {r.neighbour_db:.1f}")
     return read
@@ -994,6 +993,12 @@ def test_anchoring_level(anchoring_ramp: Overlap) -> None:
 
 SCENARIO_RUNS = 3
 
+START_WITHIN_S = 0.06
+"""How long after its stated start a scenario play's first mark may fall:
+the role's `LATE_SECONDS` and 40 ms for the first write and its mark, which
+covers one step of the Flex's 32 ms grid.
+"""
+
 
 def located_both(run: Path) -> bool:
     """Whether a scenario run's assessment located both plays."""
@@ -1051,28 +1056,42 @@ def scenario_held(run: Path, sink_level: int) -> None:
     assert records.keys() == {"talker", "speaker"}, records
     for record in records.values():
         assert bench.healthy(record), record
+    for role, record in records.items():
+        asked, first = record["asked_start"], record["first"]
+        assert asked is not None and first is not None, (role, record)
+        after = record["started_after_us"]
+        woke = int(record["woke"]["monotonic"]["us"]) - int(asked["monotonic"]["us"])
+        print(f"  {role}: first mark {after} us after its stated start, woke {woke} us after it")
+        assert 0 <= after <= START_WITHIN_S * 1e6, (role, after)
     [talker] = manifest["roles"]["talker"]["sources"]
-    [speaker] = manifest["roles"]["speaker"]["sources"]
     print(f"  sink: {talker['device']}")
     for control in talker["controls"]:
         for channel in control["channels"]:
             print(f"  {channel}: {sink_level - channel['volume_mb']} mB under {sink_level}")
     [started] = manifest["roles"]["mic"]["captures"]
     pairs = {}
-    for role, entry in (("talker", talker), ("speaker", speaker)):
+    for role in ("talker", "speaker"):
         assert bench.detected(alignment, role, 1), (role, alignment["pairs"])
         pairs[role] = bench.pair(alignment, role, 1)
         print(f"  {role}:")
         for channel, (s, e) in bench.scores(pairs[role]).items():
             print(f"  {channel}: start marker {s}, end marker {e}")
-        latency(pairs[role], entry, started["start"], RATE_HZ)
+        latency(pairs[role], records[role]["first"], started["start"], RATE_HZ)
+
+    journal = [json.loads(line) for line in (run / "journal.jsonl").read_text().splitlines()]
+    stated_us = bench.stated_offset_us(journal, "talker", "speaker")
+    marks_us = bench.marks_gap_us(records["talker"]["first"], records["speaker"]["first"])
+    offsets = bench.raw_offsets(pairs["talker"], pairs["speaker"])
+    in_capture_s = bench.capture_gap_s(offsets, RATE_HZ)
+    print(
+        f"  stated offset {stated_us / 1000:.1f} ms, first marks {marks_us / 1000:.1f} ms apart,"
+        f" gap in the capture {in_capture_s * 1000:.1f} ms"
+    )
 
     talker_frames = int(talker["source"]["frames"]) * RATE_HZ / int(talker["source"]["rate_hz"])
-    speaker_at = {c["channel"]: c["offset_frames"] for c in bench.raw_channels(pairs["speaker"])}
-    for c in bench.raw_channels(pairs["talker"]):
-        talker_at = float(c["offset_frames"])
-        within = talker_at <= float(speaker_at[c["channel"]]) <= talker_at + talker_frames
-        assert within, (c["channel"], talker_at, talker_frames, speaker_at[c["channel"]])
+    for channel, (talker_at, speaker_at) in offsets.items():
+        within = talker_at <= speaker_at <= talker_at + talker_frames
+        assert within, (channel, talker_at, talker_frames, speaker_at)
 
     assert assessment["answer"] == "clean", assessment["findings"]
     plays = {p["role"]: p for p in assessment["plays"]}

@@ -3,12 +3,26 @@ import datetime
 import threading
 import time
 import wave
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
 from brenn_lab import marker
-from brenn_lab.data import Check, ClockReading, Command, Event, Failure, Release, Reply, now
+from brenn_lab.data import (
+    MONOTONIC,
+    REALTIME,
+    Check,
+    ClockReading,
+    ClockValue,
+    Command,
+    Event,
+    Failure,
+    Release,
+    Reply,
+    now,
+)
 from brenn_lab.place import Place
 from brenn_lab.playback import role as role_module
 from brenn_lab.playback import source
@@ -17,6 +31,8 @@ from brenn_lab.playback.limits import QuietMinutes
 from brenn_lab.playback.messages import (
     Channel,
     Checked,
+    Clock,
+    ClockRead,
     Control,
     Ended,
     Failed,
@@ -78,6 +94,10 @@ class Bench:
         self.refuse_end = False
         # The role's clock raises instead of answering.
         self.clock_broken = False
+        # The role's clock reads this, while it is set, and the machine's clock otherwise.
+        self.at: ClockReading | None = None
+        # The frames the output had been handed when each event was reported.
+        self.written_at_report: list[int] = []
         self.local = NOON
         device = PlaybackDevice(
             output="alsa",
@@ -99,18 +119,26 @@ class Bench:
             local_now=lambda: self.local,
         )
         self.dry_role = PlaybackRole(
-            name, "bench", device, self.output, self._sink, None, local_now=lambda: self.local
+            name,
+            "bench",
+            device,
+            self.output,
+            self._sink,
+            None,
+            clock=self._clock,
+            local_now=lambda: self.local,
         )
 
     def _clock(self) -> ClockReading:
         if self.clock_broken:
             raise Unexpected("clock broke")
-        return now("bench")
+        return self.at if self.at is not None else now("bench")
 
     def _sink(self, event: Event) -> None:
         if self.refuse_end and isinstance(event.body, Ended | Failed):
             self.ended.set()
             raise RuntimeError("the sink failed")
+        self.written_at_report.append(sum(len(s.frames) for s in self.output.streams))
         self.events.append(event)
         if isinstance(event.body, Ended | Failed):
             self.ended.set()
@@ -124,8 +152,14 @@ class Bench:
         assert isinstance(reply, Reply)
         return reply.outcome
 
-    def play(self, source: str = "a.wav", volume_mb: int = -1800, dry: bool = False) -> object:
-        return self.send(Play(source=source, volume_mb=volume_mb), dry)
+    def play(
+        self,
+        source: str = "a.wav",
+        volume_mb: int = -1800,
+        dry: bool = False,
+        start: ClockReading | None = None,
+    ) -> object:
+        return self.send(Play(source=source, volume_mb=volume_mb, start=start), dry)
 
     def wait_end(self) -> Ended | Failed:
         assert self.ended.wait(10), self.events
@@ -182,11 +216,14 @@ def test_a_play_to_its_end(tmp_path: Path) -> None:
     assert s.first is not None and s.first.frames_handed == 1600
     assert s.first.delay_frames is not None and s.first.at.machine == "bench"
 
+    assert s.asked_start is None
+
     ended = b.wait_end()
     assert isinstance(ended, Ended)
     assert (ended.play, ended.frames_handed, ended.unplayed_frames) == (1, 5600, 0)
     assert ended.underruns == 0 and ended.restored
     assert ended.last.frames_handed == 5600
+    assert (ended.woke, ended.first) == (None, None)
     stream = b.output.streams[0]
     assert stream.drained and stream.closed and not stream.dropped
     assert bytes(stream.frames) == frames
@@ -208,6 +245,7 @@ def test_stop_cuts_the_play(tmp_path: Path) -> None:
     assert 0 < stopped.frames_handed < 80000
     assert stopped.unplayed_frames is not None and stopped.unplayed_frames > 0
     assert stopped.last is not None
+    assert (stopped.woke, stopped.first) == (None, None)
     stream = b.output.streams[0]
     assert stream.dropped and stream.closed and not stream.drained
     assert b.output.controls[LEVEL].values == list(channels(0))
@@ -447,6 +485,7 @@ def test_quiet_hours_beginning_mid_play_end_it(tmp_path: Path) -> None:
     assert isinstance(failed, Failed)
     assert failed.failure.reason == "quiet_hours"
     assert failed.frames_handed == 2 * 1600
+    assert (failed.woke, failed.first) == (None, None)
 
 
 def test_an_underrun_is_reported_and_the_play_goes_on(tmp_path: Path) -> None:
@@ -1270,6 +1309,301 @@ def test_two_roles_play_at_once(tmp_path: Path) -> None:
     assert not first.ended.is_set()
     assert isinstance(first.wait_end(), Ended)
     assert isinstance(second.wait_end(), Ended)
+
+
+# Plays with a stated start, on a set clock: the role's clock reads `Bench.at`,
+# which changes only when a test sets it, so a play's thread waits until the
+# test moves the clock and wakes to the reading the test set.
+
+SET = ClockReading(
+    machine="bench",
+    monotonic=ClockValue(MONOTONIC, 81_000_000),
+    wall=ClockValue(REALTIME, 1_794_000_000_000_000),
+)
+START = SET.after(5.0)
+SETTLE_SECONDS = 0.3
+"""Real time a test lets pass so the play's thread sees a clock it set; the
+assertion after it holds whether or not the thread looked."""
+
+
+def timed(tmp_path: Path, seconds: float = 0.35, **bench: object) -> Bench:
+    b = Bench(tmp_path, **bench)  # type: ignore[arg-type]
+    b.clip("a.wav", seconds)
+    b.at = SET
+    return b
+
+
+def assert_held(b: Bench) -> None:
+    """The play is readied and nothing has been handed over or reported."""
+    assert b.output.writes == 0 and b.events == []
+    assert b.output.open_streams == 1
+
+
+def test_a_timed_play_is_readied_and_replies_before_any_write(tmp_path: Path) -> None:
+    b = timed(tmp_path)
+    s = started(b.play(start=START))
+    assert (s.play, s.asked_start, s.first) == (1, START, None)
+    assert s.copy is not None and Path(s.copy.path).exists()
+    assert s.controls == (
+        Control("PCM", 1, "level", channels(-1800)),
+        Control("PCM", 0, "held", channels(0)),
+    )
+    assert b.output.controls[LEVEL].values == list(channels(-1800))
+    assert b.output.attached
+    assert_held(b)
+    assert isinstance(b.send(Stop()), Stopped)
+
+
+def test_a_timed_play_hands_nothing_over_before_its_start(tmp_path: Path) -> None:
+    b = timed(tmp_path)
+    frames = b.clip("a.wav", 0.35)
+    started(b.play(start=START))
+    b.at = SET.after(4.999)
+    time.sleep(SETTLE_SECONDS)
+    assert_held(b)
+    b.at = START
+    ended = b.wait_end()
+    assert isinstance(ended, Ended)
+    assert (ended.frames_handed, ended.unplayed_frames, ended.restored) == (5600, 0, True)
+    assert ended.woke == START
+    assert ended.first is not None and ended.first.at == START
+    assert ended.first.frames_handed == 1600
+    assert bytes(b.output.streams[0].frames) == frames
+    assert b.output.controls[LEVEL].values == list(channels(0))
+    assert not b.output.attached
+
+
+def test_a_timed_play_reports_nothing_at_its_start(tmp_path: Path) -> None:
+    b = timed(tmp_path)
+    started(b.play(start=START))
+    b.at = START
+    ended = b.wait_end()
+    assert [type(e.body) for e in b.events] == [Ended]
+    assert b.written_at_report == [5600 * 4]
+    assert isinstance(ended, Ended) and ended.frames_handed == 5600
+
+
+def test_a_wake_at_the_tolerance_plays(tmp_path: Path) -> None:
+    b = timed(tmp_path)
+    started(b.play(start=START))
+    late = START.after(role_module.LATE_SECONDS)
+    b.at = late
+    ended = b.wait_end()
+    assert isinstance(ended, Ended) and ended.frames_handed == 5600
+    assert ended.woke == late
+    assert ended.first is not None and ended.first.at == late
+
+
+def test_a_wake_past_the_tolerance_fails_with_no_frame(tmp_path: Path) -> None:
+    b = timed(tmp_path)
+    started(b.play(start=START))
+    late = START.after(role_module.LATE_SECONDS + 0.000001)
+    b.at = late
+    failed = b.wait_end()
+    assert isinstance(failed, Failed)
+    assert failed.failure.reason == "start_passed"
+    assert failed.failure.data == {"late_us": round(role_module.LATE_SECONDS * 1e6) + 1}
+    assert (failed.frames_handed, failed.last, failed.first) == (0, None, None)
+    assert failed.woke == late and failed.restored
+    assert b.output.writes == 0
+    assert b.output.controls[LEVEL].values == list(channels(0))
+    assert not b.output.attached
+
+
+def test_a_first_chunk_cut_part_way_keeps_a_first_mark(tmp_path: Path) -> None:
+    """The output takes 1000 of the first chunk's 1600 frames and the next
+    write fails: the failure carries those frames and a mark for them.
+    """
+    output = FakeOutput(fake_controls(), speed=4.0, grant={"buffer_frames": 1000})
+
+    def on_write(n: int) -> None:
+        if n == 2:
+            output.errors = 1
+
+    output.on_write = on_write
+    b = timed(tmp_path, output=output)
+    started(b.play(start=START))
+    b.at = START
+    failed = b.wait_end()
+    assert isinstance(failed, Failed) and failed.failure.reason == "stream_died"
+    assert failed.frames_handed == 1000 and failed.woke == START
+    assert failed.first is not None and failed.first == failed.last
+    assert failed.first.frames_handed == 1000 and failed.first.at == START
+    assert output.writes == 2
+
+
+CHECK_SECONDS = 0.05
+"""What one read of the controls costs on the clock of the test below."""
+
+
+def test_a_wait_after_a_check_ends_at_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check made with more than a chunk's time left moves the clock on, and
+    the wait after it is for what remains, not a whole chunk. The role's clock
+    moves only on the play's thread: by `CHECK_SECONDS` at each read of the
+    controls, and by what the thread asks to wait on its stop event.
+    """
+    b = timed(tmp_path)
+    test_thread = threading.current_thread()
+    waits: list[float] = []
+
+    def advance(seconds: float) -> None:
+        if threading.current_thread() is not test_thread:
+            assert b.at is not None
+            b.at = b.at.after(seconds)
+
+    class ClockedStop(threading.Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            assert timeout is not None
+            waits.append(timeout)
+            advance(timeout)
+            return super().wait(timeout)
+
+    @dataclass
+    class Playing(role_module._Playing):
+        stop: threading.Event = field(default_factory=ClockedStop)
+
+    monkeypatch.setattr(role_module, "_Playing", Playing)
+    read = b.output.read
+
+    def costly_read(controls: Sequence[ControlName]) -> tuple[tuple[Channel, ...], ...] | Failure:
+        advance(CHECK_SECONDS)
+        return read(controls)
+
+    monkeypatch.setattr(b.output, "read", costly_read)
+    start = SET.after(role_module.CHUNK_SECONDS + 0.02)
+    started(b.play(start=start))
+    ended = b.wait_end()
+    assert waits[0] == pytest.approx(role_module.CHUNK_SECONDS + 0.02 - CHECK_SECONDS)
+    assert isinstance(ended, Ended) and ended.frames_handed == 5600
+    assert ended.woke == start
+    assert ended.first is not None and ended.first.at == start
+
+
+@pytest.mark.parametrize("late_us", [0, 1000])
+def test_a_start_reached_when_the_output_is_ready_is_refused(tmp_path: Path, late_us: int) -> None:
+    b = timed(tmp_path)
+    start = ClockReading(
+        "bench", ClockValue(MONOTONIC, SET.monotonic.us - late_us), ClockValue(REALTIME, 0)
+    )
+    refused = b.play(start=start)
+    assert reason(refused) == "start_passed"
+    assert isinstance(refused, Failure) and refused.data == {"late_us": late_us}
+    assert b.output.writes == 0 and b.events == []
+    assert b.output.controls[LEVEL].values == list(channels(0))
+    assert b.output.open_streams == 0 and not b.output.attached
+    assert (b.data / "0001.wav").exists()
+    b.at = None
+    assert started(b.play()).play == 2
+    b.wait_end()
+
+
+@pytest.mark.parametrize(
+    ("machine", "clock"), [("elsewhere", MONOTONIC), ("bench", "CLOCK_BOOTTIME")]
+)
+@pytest.mark.parametrize("dry", [False, True])
+def test_a_start_on_another_clock_is_refused_before_anything_is_done(
+    tmp_path: Path, machine: str, clock: str, dry: bool
+) -> None:
+    b = timed(tmp_path)
+    start = ClockReading(machine, ClockValue(clock, START.monotonic.us), START.wall)
+    refused = b.play(start=start, dry=dry)
+    assert reason(refused) == "start_clock"
+    assert isinstance(refused, Failure)
+    assert refused.data == {"machine": machine, "clock": clock, "role_machine": "bench"}
+    b.nothing_done()
+    assert b.output.attaches == 0
+
+
+def test_quiet_hours_reached_by_the_held_play_refuse_it_at_the_command(tmp_path: Path) -> None:
+    b = timed(tmp_path, quiet=(QuietMinutes(12 * 60 + 2, 13 * 60),))
+    # The span begins 120 s after the local time; the clip is 0.35 s long.
+    assert reason(b.play(start=SET.after(119.8))) == "quiet_hours"
+    b.nothing_done()
+    assert started(b.play(start=SET.after(119.6))).asked_start == SET.after(119.6)
+    b.send(Stop())
+
+
+def test_quiet_hours_begun_during_the_hold_end_the_play_unplayed(tmp_path: Path) -> None:
+    b = timed(tmp_path, quiet=(QuietMinutes(13 * 60, 14 * 60),))
+    started(b.play(start=START))
+    b.local = NOON + datetime.timedelta(hours=1)
+    failed = b.wait_end()
+    assert isinstance(failed, Failed) and failed.failure.reason == "quiet_hours"
+    assert (failed.frames_handed, failed.last, failed.first, failed.woke) == (0, None, None, None)
+    assert failed.restored and b.output.writes == 0
+
+
+def test_a_control_moved_during_the_hold_ends_the_play_unplayed(tmp_path: Path) -> None:
+    b = timed(tmp_path)
+    started(b.play(start=START))
+    b.output.move(LEVEL, 0, volume_mb=-1000)
+    failed = b.wait_end()
+    assert isinstance(failed, Failed) and failed.failure.reason == "controls_moved"
+    assert (failed.frames_handed, failed.last, failed.first, failed.woke) == (0, None, None, None)
+    assert b.output.writes == 0
+
+
+@pytest.mark.parametrize("inside_the_last_chunk", [False, True])
+def test_stop_during_the_hold(tmp_path: Path, inside_the_last_chunk: bool) -> None:
+    b = timed(tmp_path)
+    started(b.play(start=START))
+    if inside_the_last_chunk:
+        b.at = SET.after(4.95)
+    assert reason(b.play(start=START)) == "already_playing"
+    assert reason(b.send(Check())) == "already_playing"
+    stopped = b.send(Stop())
+    assert isinstance(stopped, Stopped)
+    assert (stopped.play, stopped.frames_handed, stopped.unplayed_frames) == (1, 0, 0)
+    assert (stopped.last, stopped.first, stopped.woke) == (None, None, None)
+    assert stopped.restored
+    assert b.output.writes == 0 and b.events == []
+    assert b.output.controls[LEVEL].values == list(channels(0))
+    assert b.output.open_streams == 0 and not b.output.attached
+
+
+def test_release_during_the_hold_names_the_play_it_cut(tmp_path: Path) -> None:
+    b = timed(tmp_path)
+    started(b.play(start=START))
+    released = b.send(Release())
+    assert isinstance(released, Released) and released.stopped is not None
+    assert (released.stopped.play, released.stopped.frames_handed) == (1, 0)
+    assert released.stopped.last is None and released.stopped.restored
+    assert b.output.writes == 0 and b.events == []
+
+
+def test_the_clock_is_read_live_dry_and_during_a_play(tmp_path: Path) -> None:
+    b = timed(tmp_path)
+    assert b.send(Clock()) == ClockRead(SET)
+    assert b.send(Clock(), dry=True) == ClockRead(SET)
+    assert b.output.attaches == 0 and b.output.opens == 0
+    started(b.play(start=START))
+    b.at = SET.after(1.0)
+    assert b.send(Clock()) == ClockRead(SET.after(1.0))
+    assert b.output.attaches == 1 and b.output.opens == 1
+    assert_held(b)
+    b.send(Stop())
+
+
+def test_a_dry_timed_play_holds_nothing(tmp_path: Path) -> None:
+    b = timed(tmp_path)
+    start = SET.after(3600.0)
+    threads = threading.active_count()
+    s = started(b.play(start=start, dry=True))
+    assert (s.play, s.copy, s.asked_start, s.first) == (0, None, start, None)
+    assert b.output.opens == 1 and b.output.open_streams == 0
+    assert not b.output.attached
+    assert b.dry_role._live() is None
+    assert threading.active_count() == threads
+    assert b.output.sets == [] and b.output.writes == 0 and b.events == []
+
+
+def test_a_dry_timed_play_judges_quiet_hours_up_to_its_end(tmp_path: Path) -> None:
+    b = timed(tmp_path, quiet=(QuietMinutes(13 * 60, 14 * 60),))
+    assert reason(b.play(start=SET.after(3600.0), dry=True)) == "quiet_hours"
+    b.nothing_done()
+    assert started(b.play(start=SET, dry=True)).asked_start == SET
 
 
 @pytest.mark.parametrize("peak", [0, 1])
