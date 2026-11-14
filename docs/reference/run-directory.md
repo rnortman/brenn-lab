@@ -868,8 +868,7 @@ that the marker accounts for. A position at or above the **threshold, 0.25**,
 is an instance; the strongest suppresses everything within one marker length
 either side.
 
-What that implies, on synthetic signals; **none of it has been measured on a
-played run**:
+What that implies, on synthetic signals:
 
 - Another member's marker scores at most about 0.17, however loud. Noise,
   level bursts and tones stay near 0.1.
@@ -887,6 +886,44 @@ played run**:
   score further. Markers that overlap in part score higher. Past the limit
   nothing is misattributed: each marker under the threshold is `not_found`
   with the score seen.
+
+Measured on played runs, on one bench on 2026-11-14, recorded by a reSpeaker
+Flex XVF3800's six-channel image at 16 kHz in a quiet room
+(`experiments.md`, *Finding a level*):
+
+- **Scores.** A marked 1 s tone played on the Flex's own output at the
+  quietest level detected and one step above it scored 0.54 to 0.79 on the
+  four raw microphones; the marked speech clip played on a Bluetooth
+  speaker, 0.65 to 0.89. A step not detected scored 0.06 to 0.10. The two
+  processed beams scored 0.05 to 0.39 for the Flex's own output, under the
+  threshold or barely over it and never found at both markers, and 0.76 to
+  0.80 for the speaker.
+- **Drift on one clock.** For the Flex playing and recording on its one
+  clock, where the true drift is none, `drift_ppm` read −5.5 to 12.2 on the
+  raw microphones over the 2.012 s between the markers' midpoints: under
+  half a capture frame. The four microphones' `offset_frames` agreed within
+  5.2 frames.
+- **Drift across clocks.** For the Bluetooth speaker against the Flex,
+  `drift_ppm` read 28 to 62 across runs, steady within a run to about 2 ppm
+  across the microphones: the speaker's clock and the sound server's
+  conversion together. No played run came near the ±500 ppm a marker
+  tolerates.
+- **Masking.** A played marker under another played source's sound is lost
+  as the synthetic figures say: the Flex's marked tone, one step above the
+  level found for it alone, started about a second into the speaker's speech, scored
+  0.15 to 0.20 at its start marker in three runs of four, while its end
+  marker, after more of the speech had passed, was found every time. Under
+  the speech its markers were first found at −4800 mB, 1200 mB above its
+  level found alone, with start markers scoring 0.09 to 0.13 at −6000 mB and
+  0.14 to 0.20 at −5400 mB; one step above that, at −4200 mB, both markers
+  were found in nine runs of nine (start 0.46 to 0.56). At −5400 mB, after
+  a ramp that stopped at −6000 mB on one run's start markers scoring 0.30
+  to 0.33, they were found in one run of three; in the other two the start
+  marker scored 0.15 to 0.19. A ramp that counts a level only when three
+  runs in a row there detect the play found −4800 mB again (start 0.28 to
+  0.33 in its three runs there), and at −4200 mB both markers were found in
+  three runs of three. The high scores under the threshold came where the
+  start marker fell in a stretch of the speech about 12 dB quieter in band.
 
 **Memory and disk.** `align` holds no array of a capture's length. Each
 channel is read from the exported file twice, block by block: once for its
@@ -1304,9 +1341,19 @@ in a capture.
 
 Not measured by this harness: the offset to the frame by any means but
 correlation; the latency from the capture's trigger to its frame 0; whether
-the device's delay reading is accurate. The playback role's audible-lane test
-asserts that the clock tie lies within 150 ms of the offset correlation
-finds, which holds the delay reading, the capture's start latency and the
-clock readings together and separates none of them. An exact tie needs the
+the device's delay reading is accurate. The audible bench,
+`//brenn_lab:bench_audible_test`, asserts for the Flex that the clock tie
+lies within 150 ms of the offset correlation finds, which holds the delay
+reading, the capture's start latency and the clock readings together and
+separates none of them. Measured there on 2026-11-14, over every run, the
+offset correlation found lay 4.4 to 5.8 ms after the tie, on every raw
+microphone; the processed beams never found that play's markers. On a
+Bluetooth sink the offset
+lay 243 to 249 ms after the tie: the server's latency estimate leaves out
+about a quarter second of the path. In one run of many it lay 55 ms after
+the tie: there the server's estimate at the first mark was 4650 frames, not
+the 1600 of every other run, while the capture's arrival of the copy's frame
+0 stood 246 ms after the first mark's reading, as in the others. The
+estimate moved in that run, not the path. An exact tie needs the
 device's own copy of what it played inside the capture, and the reSpeaker
 Flex's six-channel image carries none (`own-device-playback-sample-relationship`).

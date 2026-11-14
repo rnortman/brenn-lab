@@ -124,10 +124,7 @@ py_pytest_test(
     name = "signals_test",
     size = "small",
     srcs = ["signals_test.py"],
-    deps = [
-        ":signals",
-        "//brenn_lab",
-    ],
+    deps = [":signals"],
 )
 
 py_library(
@@ -136,6 +133,32 @@ py_library(
     srcs = ["lab_driver.py"],
     visibility = ["//brenn_lab:__subpackages__"],
     deps = [":transcript_files"],
+)
+
+py_library(
+    name = "bench",
+    testonly = True,
+    srcs = ["bench.py"],
+    visibility = ["//brenn_lab:__subpackages__"],
+    deps = [
+        ":lab_driver",
+        ":signals",
+        "//brenn_lab",
+        "//brenn_lab:align",
+        "@pypi_lab//numpy",
+    ],
+)
+
+py_pytest_test(
+    name = "bench_test",
+    size = "small",
+    srcs = ["bench_test.py"],
+    deps = [
+        ":bench",
+        ":signals",
+        "//brenn_lab",
+        "@pypi_lab//numpy",
+    ],
 )
 
 py_library(

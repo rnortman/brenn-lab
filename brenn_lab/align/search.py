@@ -29,7 +29,6 @@ import numpy.typing as npt
 
 from brenn_lab import marker
 
-# TODO(alignment-not-measured-on-a-played-run)
 THRESHOLD = 0.25
 """The score at and above which a position is an instance of a marker."""
 BAND_HZ = (500, 3500)

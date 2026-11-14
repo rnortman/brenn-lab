@@ -597,8 +597,8 @@ class PulseOutput:
             return kept.raw
         return raw_volume(mb)
 
-    # TODO(playback-through-sound-server-sink): a stream on a sink has played
-    # on no real server.
+    # TODO(playback-through-sound-server-sink): whether a corked stream leaves
+    # a suspended sink silent is unmeasured on a real server.
     def open(
         self,
         rate_hz: int,

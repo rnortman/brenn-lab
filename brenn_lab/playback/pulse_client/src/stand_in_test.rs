@@ -200,7 +200,25 @@ fn the_stream_is_made_corked_at_0_db_unmuted_on_the_named_sink() {
     assert_eq!(stream["muted"], false);
     let state = b.instruct(json!({"op": "state"}));
     assert_eq!(state["streams"][0]["corked"], true);
+    // Set once made, as well as asked for at creation.
+    assert_eq!(state["streams"][0]["volume_sets"], 1);
     assert_eq!(state["streams_made"], 1);
+    // Neither restored nor remembered, nor moved to a remembered sink, by a
+    // session manager that reads the stream's properties as WirePlumber
+    // does.
+    assert_eq!(state["streams"][0]["restore_props"], false);
+    assert_eq!(state["streams"][0]["restore_target"], false);
+}
+
+#[test]
+fn a_refused_volume_set_closes_the_stream_and_fails_the_open() {
+    let mut b = bench(1.0, 0);
+    b.instruct(json!({"op": "refuse_stream_volume"}));
+    let open = b.client.open(SINK, RATE, 2, "s16_le", PERIOD, BUFFER);
+    assert_eq!(refused(open).0, "server");
+    let state = b.instruct(json!({"op": "state"}));
+    assert_eq!(state["streams_made"], 1);
+    assert_eq!(state["streams"], json!([]));
 }
 
 #[test]
@@ -210,6 +228,24 @@ fn a_server_that_ignores_the_volume_asked_for_is_seen() {
     b.open();
     let stream = ok(b.client.stream_state());
     assert_eq!(stream["volumes"], json!([32_768, 32_768]));
+}
+
+#[test]
+fn a_server_that_restores_stream_volumes_leaves_every_stream_at_0_db() {
+    let mut b = bench(1.0, 0);
+    b.instruct(json!({"op": "restore_streams"}));
+    // A one-channel stream, then a two-channel one. Each is set to 0 dB once
+    // made, so even a stream the server restored ends at 0 dB on every
+    // channel; that the client opts out of the restore is held by the
+    // stream's state in the test of how it is made.
+    ok(b.client.open(SINK, RATE, 1, "s16_le", PERIOD, BUFFER));
+    assert_eq!(ok(b.client.stream_state())["volumes"], json!([65_536]));
+    ok(b.client.close());
+    b.open();
+    assert_eq!(
+        ok(b.client.stream_state())["volumes"],
+        json!([65_536, 65_536])
+    );
 }
 
 #[test]

@@ -679,7 +679,6 @@ class _Report:
         kind = self.run.outputs[(role, n)]
         start = _word(aligned, carried.start, record, kind)
         end = _word(aligned, carried.end, record, kind)
-        # TODO(alignment-not-measured-on-a-played-run)
         tried = [p for p in self.aligned.pairs if p.play is aligned and p.not_tried is None]
         outcomes: Counter[str] = Counter()
         located = False

@@ -297,16 +297,19 @@ py_pytest_test(
         "//brenn_lab/testing:speech/arctic_a0001.wav",
         "//brenn_lab/testing:stand_in",
         "//examples:anchoring_scenario.py",
+        "//examples:level_step.py",
     ],
     env = {
         "EXAMPLE": "$(rootpath //examples:anchoring_scenario.py)",
         "EXPORT_STAND_IN": "$(rootpath //brenn_lab/testing:export_stand_in)",
+        "LEVEL_STEP": "$(rootpath //examples:level_step.py)",
         "SPEECH": "$(rootpath //brenn_lab/testing:speech/arctic_a0001.wav)",
         "STAND_IN": "$(rootpath //brenn_lab/testing:stand_in)",
     },
     deps = [
         ":assess",
         ":brenn_lab",
+        "//brenn_lab/testing:bench",
         "//brenn_lab/testing:fake_output",
         "//brenn_lab/testing:lab_driver",
         "//brenn_lab/testing:pulse_stand_in",
@@ -361,40 +364,6 @@ py_pytest_test(
         ":brenn_lab",
         "//brenn_lab/testing:lab_driver",
         "//brenn_lab/testing:transcript_files",
-    ],
-)
-
-# The audible lane: the playback role on an attached reSpeaker Flex XVF3800
-# with a speaker on its output, while the capture role records it, through the
-# runner as a program and the pinned recorder and reader. It plays sound, so
-# it runs only inside a window the maintainer agreed. The runner's playback
-# role and the recorder load the host's ALSA runtime library.
-# TODO(lanes-load-host-alsa-runtime)
-# The Flex has one opener and Bazel runs test targets in parallel, so this is
-# the only target in its lane that opens a PCM of the Flex: another test in the
-# lane that opens one is added to this target, or that target and this one are
-# both tagged `exclusive`.
-py_pytest_test(
-    name = "playback_flex_audible_test",
-    size = "small",
-    timeout = "moderate",
-    srcs = ["playback/flex_audible_test.py"],
-    data = [
-        ":lab",
-        "//tools/brenn_pod:frame-log",
-    ],
-    env = {
-        "FRAME_LOG": "$(rootpath //tools/brenn_pod:frame-log)",
-        "LAB": "$(rootpath :lab)",
-    },
-    tags = [
-        "audible",
-        "external",
-    ],
-    deps = [
-        ":brenn_lab",
-        "//brenn_lab/testing:lab_driver",
-        "//brenn_lab/testing:signals",
     ],
 )
 
@@ -527,4 +496,48 @@ py_pytest_test(
     size = "small",
     srcs = ["rundir_test.py"],
     deps = [":brenn_lab"],
+)
+
+# The audible bench: the playback role on the Flex's own output and on a sink
+# of the desktop's sound server, recorded by the Flex's microphones, each
+# output played at the quietest level a marked play is detected at. It plays
+# sound, so it runs only inside a window the maintainer agreed, which `make
+# audible-test` passes as LAB_WINDOW, and LAB_SINK names the sink. The
+# runner's playback role and the recorder load the host's ALSA runtime
+# library.
+# TODO(lanes-load-host-alsa-runtime)
+# No Bazel timeout: one would kill the runner mid-play and leave the sink at
+# the play's volume. Every program the test starts has its own limit. `-s`
+# puts what the test prints in its log, pass or fail.
+py_pytest_test(
+    name = "bench_audible_test",
+    size = "small",
+    timeout = "eternal",
+    srcs = ["bench_audible_test.py"],
+    args = ["-s"],
+    data = [
+        ":lab",
+        "//brenn_lab/testing:speech/arctic_a0001.wav",
+        "//examples:anchoring_scenario.py",
+        "//examples:level_step.py",
+        "//examples:ten_seconds.py",
+        "//tools/brenn_pod:frame-log",
+    ],
+    env = {
+        "ANCHORING": "$(rootpath //examples:anchoring_scenario.py)",
+        "FRAME_LOG": "$(rootpath //tools/brenn_pod:frame-log)",
+        "LAB": "$(rootpath :lab)",
+        "LEVEL_STEP": "$(rootpath //examples:level_step.py)",
+        "SPEECH": "$(rootpath //brenn_lab/testing:speech/arctic_a0001.wav)",
+        "TEN_SECONDS": "$(rootpath //examples:ten_seconds.py)",
+    },
+    tags = [
+        "audible",
+        "external",
+    ],
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:bench",
+        "//brenn_lab/testing:lab_driver",
+    ],
 )

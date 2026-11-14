@@ -32,8 +32,8 @@ use pulseaudio::protocol::stream::{BufferAttr, StreamFlags};
 use pulseaudio::protocol::{
     ChannelVolume, Command, CorkStreamParams, CreatePlaybackStreamReply, GetSinkInfo,
     LatencyParams, PlaybackLatency, PlaybackStreamParams, Prop, Props, PulseError, SampleSpec,
-    ServerInfo, SetDeviceMuteParams, SetDeviceVolumeParams, SinkFlags, SinkInfo, SinkInfoList,
-    SinkInputInfo, Volume,
+    ServerInfo, SetDeviceMuteParams, SetDeviceVolumeParams, SetStreamVolumeParams, SinkFlags,
+    SinkInfo, SinkInfoList, SinkInputInfo, Volume,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -247,6 +247,12 @@ impl Client {
         };
         let mut props = Props::new();
         props.set(Prop::MediaName, c"brenn-lab play");
+        // A session manager that restores a stream's volumes and target by
+        // the client's name (WirePlumber) would otherwise give a stream the
+        // last one's volumes, channel by channel, over the 0 dB it asks for,
+        // and remember this one's for the next.
+        props.set_bytes(c"state.restore-props", b"false\0");
+        props.set_bytes(c"state.restore-target", b"false\0");
         let params = PlaybackStreamParams {
             sample_spec: spec,
             channel_map: map,
@@ -293,6 +299,20 @@ impl Client {
                 "params",
                 format!("the server granted {:?}, not {:?}", reply.sample_spec, spec),
             ));
+        }
+        // The volume asked for at creation is not enough on PipeWire: a
+        // stream nothing has set since reads 0 on every channel once its
+        // sink is at its lowest volume.
+        let volume = SetStreamVolumeParams {
+            index: reply.stream_index,
+            volume: ChannelVolume::norm(count),
+        };
+        if let Err(f) = self
+            .conn
+            .ack(Command::SetSinkInputVolume(volume), deadline())
+        {
+            let _ = self.close();
+            return Err(server(f));
         }
         Ok(json!({
             "sink": text(&reply.sink_name),

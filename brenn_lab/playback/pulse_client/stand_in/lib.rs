@@ -12,7 +12,7 @@
 //! the frames each stream had taken when it was first uncorked.
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -109,11 +109,21 @@ pub enum Instruction {
     /// Report an underflow on every open stream.
     Underflow,
     /// Give every stream made from now on this raw volume per channel,
-    /// whatever volume it asks for.
+    /// whatever volume it asks for at creation or sets after.
     IgnoreInitialVolume { volume: u32 },
     /// Grant every stream made from now on this rate, whatever rate it asks
     /// for.
     GrantRate { rate_hz: u32 },
+    /// From now on, give every stream made the raw volumes the last stream
+    /// made was given, channel by channel and 0 on a channel the last had
+    /// not, as a session manager restores a stream's volumes by the client's
+    /// application name. A stream whose properties set `state.restore-props`
+    /// to `false` keeps the volume it asks for and is not remembered. No
+    /// stream is moved to a remembered sink, whatever its
+    /// `state.restore-target`.
+    RestoreStreams,
+    /// From now on, refuse every client's set of a stream's volume.
+    RefuseStreamVolume,
     /// Answer what the stand-in holds.
     State,
 }
@@ -141,6 +151,15 @@ struct Stream {
     spec: SampleSpec,
     map: ChannelMap,
     volume: ChannelVolume,
+    /// How many times a client has set the stream's volume.
+    volume_sets: u32,
+    /// Whether a session manager may restore the stream's volumes and
+    /// remember them: true unless its properties set `state.restore-props`
+    /// to `false`.
+    restore_props: bool,
+    /// Whether a session manager may move the stream to a remembered sink:
+    /// true unless its properties set `state.restore-target` to `false`.
+    restore_target: bool,
     muted: bool,
     corked: bool,
     target: u64,
@@ -181,6 +200,9 @@ struct State {
     stalled: bool,
     forced_volume: Option<u32>,
     forced_rate: Option<u32>,
+    restoring: bool,
+    refusing_stream_volume: bool,
+    remembered: Option<Vec<u32>>,
     streams_made: u32,
     frames: File,
 }
@@ -400,6 +422,23 @@ impl State {
                     None => self.error(client, seq, PulseError::NoEntity),
                 }
             }
+            Command::SetSinkInputVolume(params) => {
+                let forced = self.forced_volume.is_some();
+                if self.refusing_stream_volume {
+                    return self.error(client, seq, PulseError::AccessDenied);
+                }
+                match self.streams.get_mut(&params.index) {
+                    Some(s) if params.volume.channels().len() == usize::from(s.spec.channels) => {
+                        if !forced {
+                            s.volume = params.volume;
+                        }
+                        s.volume_sets += 1;
+                        self.ack(client, seq);
+                    }
+                    Some(_) => self.error(client, seq, PulseError::Invalid),
+                    None => self.error(client, seq, PulseError::NoEntity),
+                }
+            }
             Command::SetSinkMute(params) => {
                 let found = params
                     .device_name
@@ -496,11 +535,25 @@ impl State {
         {
             return self.error(client, seq, PulseError::Invalid);
         }
-        let volume = match (self.forced_volume, params.cvolume) {
+        let mut volume = match (self.forced_volume, params.cvolume) {
             (Some(v), _) => volumes(&vec![v; usize::from(spec.channels)]),
             (None, Some(v)) => v,
             (None, None) => ChannelVolume::norm(spec.channels),
         };
+        let not_false = |key: &CStr| params.props.get_bytes(key) != Some(&b"false\0"[..]);
+        let restore_props = not_false(c"state.restore-props");
+        let restore_target = not_false(c"state.restore-target");
+        if self.restoring && restore_props {
+            if let Some(last) = &self.remembered {
+                let n = usize::from(spec.channels);
+                volume = volumes(
+                    &(0..n)
+                        .map(|c| last.get(c).copied().unwrap_or(0))
+                        .collect::<Vec<_>>(),
+                );
+            }
+            self.remembered = Some(raw(&volume));
+        }
         let channel = self.next_index;
         self.next_index += 1;
         self.streams_made += 1;
@@ -532,6 +585,9 @@ impl State {
             spec,
             map: params.channel_map,
             volume,
+            volume_sets: 0,
+            restore_props,
+            restore_target,
             muted: params.flags.start_muted.unwrap_or(false),
             corked: params.flags.start_corked,
             target: u64::from(buffer_attr.target_length),
@@ -716,6 +772,8 @@ impl State {
             }
             Instruction::IgnoreInitialVolume { volume } => self.forced_volume = Some(volume),
             Instruction::GrantRate { rate_hz } => self.forced_rate = Some(rate_hz),
+            Instruction::RestoreStreams => self.restoring = true,
+            Instruction::RefuseStreamVolume => self.refusing_stream_volume = true,
             Instruction::State => return Ok(self.snapshot()),
         }
         Ok(json!({}))
@@ -748,6 +806,9 @@ impl State {
                     "channel": channel,
                     "sink": sink.map(|k| k.name.to_string_lossy()),
                     "volumes": raw(&s.volume),
+                    "volume_sets": s.volume_sets,
+                    "restore_props": s.restore_props,
+                    "restore_target": s.restore_target,
                     "muted": s.muted,
                     "corked": s.corked,
                     "taken_frames": s.write_index / s.frame_bytes(),
@@ -787,6 +848,9 @@ impl StandIn {
             stalled: false,
             forced_volume: None,
             forced_rate: None,
+            restoring: false,
+            refusing_stream_volume: false,
+            remembered: None,
             streams_made: 0,
             frames,
         }));

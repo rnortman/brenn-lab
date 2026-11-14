@@ -23,7 +23,7 @@ help:
 	@echo "  make build          build every target"
 	@echo "  make test           run every default test, without the lint aspect"
 	@echo "  make hardware-test  run the hardware lane: tests that need a device attached or the desktop's sound server"
-	@echo "  make audible-test WINDOW=<agreed window>"
+	@echo "  make audible-test WINDOW=HH:MM-HH:MM SINK=<sink> [ONLY=<pytest -k>]"
 	@echo "                      run the audible lane: tests that play sound or move a robot"
 	@echo "  make fix            ruff (format and lint fixes), rustfmt and buildifier the tree in place"
 	@echo "  make repin          regenerate the Python lock and the five crate locks"
@@ -68,17 +68,26 @@ test:
 hardware-test:
 	bazel test --test_tag_filters=hardware,-audible --test_env=LAB_LANE=hardware --test_env=XDG_RUNTIME_DIR //...
 
-# Anything audible needs the maintainer's agreement on when. WINDOW is a speed
-# bump, not an enforcement: it keeps the lane off tab completion and puts the
-# rule on screen at the moment it matters.
+# Anything audible needs the maintainer's agreement on when. WINDOW is the
+# agreed window, HH:MM-HH:MM in local time; the bench test refuses to play
+# outside it and gives every playback role it configures the rest of the day
+# as quiet hours. SINK selects the sound-server sink the bench test plays on,
+# as a substring of its name or description. ONLY, a pytest -k expression,
+# runs the matching tests of the bench target alone.
+SINK ?=
+ONLY ?=
 .PHONY: audible-test
 audible-test:
-	@if [[ "$(origin WINDOW)" != "command line" || -z "$(WINDOW)" ]]; then \
+	@re='^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$$'; \
+	if [[ "$(origin WINDOW)" != "command line" || ! "$(WINDOW)" =~ $$re ]]; then \
 	    echo "make audible-test: the audible lane plays sound or moves a robot." >&2; \
 	    echo "Ask the maintainer for a time window, wait for it, and batch audible work" >&2; \
-	    echo "into as few windows as possible. Then: make audible-test WINDOW=<the agreed window>" >&2; \
+	    echo "into as few windows as possible. Then: make audible-test WINDOW=HH:MM-HH:MM" >&2; \
+	    echo "(local time) SINK=<sink name or description>, optionally ONLY=<pytest -k>" >&2; \
 	    exit 1; fi
-	bazel test --test_tag_filters=audible --test_env=LAB_LANE=audible //...
+	bazel test --test_tag_filters=audible --test_env=LAB_LANE=audible --test_env=XDG_RUNTIME_DIR \
+	    --test_env=LAB_WINDOW="$(WINDOW)" --test_env=LAB_SINK="$(SINK)" \
+	    $(if $(ONLY),--test_arg=-k --test_arg="$(ONLY)" //brenn_lab:bench_audible_test,//...)
 
 # Passthrough to allthechanges for queries and dry runs:
 # `make changes ARGS="todo query"`,

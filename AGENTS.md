@@ -82,7 +82,7 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
 | `make build` | Build every target |
 | `make test` | Every default test, without the lint aspect (the inner loop) |
 | `make hardware-test` | Run the hardware lane: tests that need a device attached or the desktop's sound server; passes `XDG_RUNTIME_DIR` to the tests |
-| `make audible-test WINDOW=...` | Run the audible lane: tests that play sound or move a robot. Refuses without `WINDOW` (see Test lanes) |
+| `make audible-test WINDOW=HH:MM-HH:MM SINK=...` | Run the audible lane: tests that play sound or move a robot. Refuses without `WINDOW`, the agreed window in local time; `SINK` names the sound-server sink the bench plays on; `ONLY=<pytest -k expression>` runs only the matching tests of the bench (see Test lanes) |
 | `make fix` | ruff (format and lint fixes), rustfmt and buildifier the tree in place |
 | `make repin` | Regenerate the Python lock and the five crate locks |
 | `make todo-gather` | Fold `todo.d/` fragments into `TODO.md` |
@@ -165,11 +165,17 @@ is never served from cache.
   the lanes, of running the pinned recorder and of a playback role, and of
   nothing in `make check`. The capture role's lane test,
   `//brenn_lab:capture_flex_hardware_test`, needs a reSpeaker Flex XVF3800 on
-  its six-channel USB image; without it the lane fails. The playback role's
-  lane test, `//brenn_lab:playback_flex_audible_test`, needs that Flex with a
+  its six-channel USB image; without it the lane fails. The audible lane's
+  one test target, `//brenn_lab:bench_audible_test`, finds for each output
+  the quietest level at which the Flex's microphones detect a marked play
+  three runs in a row, then plays everything else one step above it, but
+  for the anchoring scenario's Flex play, which is one step above the level
+  found with the scenario's talker playing. It needs that Flex with a
   speaker on its output and with no firmware on the board's XIAO ESP32 module
-  that configures the XVF3800. With such firmware on the module the board has
-  taken every frame written to it and played nothing. The sink output's lane
+  that configures the XVF3800 (with such firmware the board has taken every
+  frame written to it and played nothing), and a sound-server sink near the
+  Flex, given as `SINK`; without `SINK` its sink tests fail and the Flex's
+  run. The sink output's lane
   test, `//brenn_lab:playback_pulse_hardware_test`, needs the desktop's sound
   server, at `$XDG_RUNTIME_DIR/pulse/native`, with at least one sink; without
   one the lane fails. It loads no host library, creates no stream and sets
@@ -180,7 +186,7 @@ is never served from cache.
   off. With the card held by the sound server, the lanes fail at the open.
 - The Flex's PCMs have one opener per lane. In each lane one test target
   opens a PCM of the Flex: `capture_flex_hardware_test` in `hardware`,
-  `playback_flex_audible_test` in `audible`. Another test that opens one is
+  `bench_audible_test` in `audible`. Another test that opens one is
   added to that target, or both are tagged `exclusive`. The two lanes never
   run in one `bazel test`.
 - Hardware-in-the-loop tests assert the expected behaviour and are allowed to
@@ -188,8 +194,12 @@ is never served from cache.
   the maintainer before any test is changed to pass.
 - Anything audible needs the maintainer's agreement on when. Ask for a time
   window, wait for it, and batch audible work into as few windows as possible.
-  `make audible-test` refuses unless `WINDOW=<the agreed window>` is given;
-  that is a reminder, not an enforcement.
+  `make audible-test` refuses unless `WINDOW=HH:MM-HH:MM`, the agreed window
+  in local time, is given. The bench test fails every test outside it, and
+  every lab file it writes gives each playback role the rest of the day as
+  quiet hours, so the role itself refuses to sound outside the window. For a
+  lane test that writes no lab file, `WINDOW` is a reminder, not an
+  enforcement.
 
 ## Design rules
 

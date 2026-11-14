@@ -5,6 +5,7 @@ load("@rules_python//python:defs.bzl", "py_library")
 
 EXAMPLES = [
     "anchoring_scenario.py",
+    "level_step.py",
     "play_and_record.py",
     "ten_seconds.py",
 ]

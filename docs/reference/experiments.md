@@ -436,7 +436,18 @@ volume_mb = 0
   `range`, `{min_mb, max_mb}` or `null`, and its channels as found), `cap_mb`,
   `quiet_hours`, `local_time`, `quiet_now`. It resolves the card and reads the
   mixer. It sets nothing and opens no stream. It is refused with
-  `already_playing` while a play runs.
+  `already_playing` while a play runs. A script sends it as
+  `brenn_lab.data.Check()`, the command every kind answers, so `send` returns
+  `object`; the script narrows the reply to `brenn_lab.playback.Checked`
+  before reading it:
+
+  ```python
+  checked = speaker.send(Check())
+  assert isinstance(checked, playback.Checked)
+  level = checked.cap_mb
+  ```
+
+  That is `examples/level_step.py`, which plays at its role's cap.
 - `release` → `playback.released`: `stopped`, a `playback.stopped` when a play
   was running, else `null`. A play cut by `release` is `left_running`.
 
@@ -642,7 +653,12 @@ opens its output at no time inside the device's quiet hours, dry or not.
 
 Nobody has yet listened to that open on a real output, so **a dry run of a
 playback role on a real output is made only inside an agreed window**, as
-`AGENTS.md` says (`output-open-not-listened-to`).
+`AGENTS.md` says (`output-open-not-listened-to`). The Flex's own microphones
+have recorded it: in two runs of the audible bench, the 500–3500 Hz level of
+each raw microphone, per half second, did not rise in the half seconds the
+dry run spanned (−88 to −92 dB, as around them). In both, about one to two
+seconds after the dry run had ended, one half second rose 8 to 13 dB on all
+four microphones; what made it is not known.
 
 A dry `playback.stop` checks only that a dry play preceded it. A dry role
 reports no event.
@@ -695,6 +711,170 @@ the first time it resolves a card, and at no other time. A host without it
 gets `alsa_missing` from `check` and from `playback.play`. A role on a
 sound-server sink loads no host library: it runs the pinned sink client,
 which speaks the server's protocol itself.
+
+### Finding a level
+
+How loud an output must play for the microphones to find a marked play
+depends on the device, its placement and the room, so it is found on the
+bench, not written into a script. `examples/level_step.py`, roles `mic` and
+`speaker`, is one step: it reads the role's cap from `check` and plays at
+that level, so the cap is the step's level and nothing in the run is louder.
+It starts the capture, waits one second, plays `primer.wav` (any unmarked
+sound of a few seconds, which also wakes a speaker that fades in after
+silence) and waits its length plus a second, then plays `marked.wav` (any
+file from `lab mark`), waits its length plus a second and stops the capture.
+
+By hand, a run is: set the role's `cap_mb` in the lab file to the level,
+`lab run` `level_step.py`, and read the `alignment.json` the run's closing
+assessment wrote. The play was detected in that run when, in the pair of
+`speaker`'s play 2 with the capture, every `raw_mic_` channel has `start` and
+`end` both `found`. Near the threshold one level is detected in some runs and
+missed in others, so a level is found when three runs in a row at it detect
+the play; a run that misses sends the hand up one level. The audible bench,
+`//brenn_lab:bench_audible_test`, makes the ramp so for each output it plays
+on:
+
+- the levels are the role's minimum (the level control's `range.min_mb` from
+  a dry run's `check`), then −12000 mB upward in steps of 600 mB, ending at
+  the output's ceiling: −1800 mB on the Flex's output, −2000 mB on a sink;
+- it stops at the first level at which three runs in a row detect the play,
+  and plays nothing louder: after a level's first detection it takes up to
+  two more runs at that level, none louder to confirm, and a run that misses
+  ends the level, whatever the runs before it there read; on a sink a
+  detection at the minimum, which is silence, is a defect on its first run;
+- a run whose plays did not run as asked (a record not `completed` with no
+  underrun and `restored`, or a control read back above the level asked)
+  stops the ramp as a defect, at any level;
+- an undetected run above −4000 mB whose plays ran as asked is read before
+  the next: a primer not 10 dB above the room on every raw microphone, or a
+  marked play's 500–3500 Hz band 3 dB or more above the room's that still was
+  not found, stops the ramp as a defect; otherwise the marker is still under
+  the room's noise and the ramp goes on;
+- every later play on the output alone is one step above the level found,
+  never above the ceiling, under a cap of that level. A play that starts
+  under another output's sound takes its level from a ramp made with that
+  sound playing (*A level under another play*).
+
+Measured on one bench on 2026-11-14, in a quiet room, the speakers close to
+the microphones:
+
+- **The Flex's own output** was detected at its level control's minimum,
+  −6000 mB, in every ramp (raw-microphone scores 0.54 to 0.78), so later
+  plays were at −5400 mB. In the last lane run, which counted three runs in
+  a row, the three runs there read start-marker scores of 0.67 to 0.73, 0.68
+  to 0.78 and 0.68 to 0.77. The control has nothing quieter. The primer read
+  −70 to −75 dB at 1 kHz on the raw microphones against a room of −115 to
+  −134 dB, flat from its first quarter second.
+- **An LG-PL5 Bluetooth speaker** as a sink was detected at −8400 mB in every
+  ramp, with −9000 mB undetected, so later plays were at −7800 mB; in the
+  last lane run its three runs at −8400 mB each read 0.65 to 0.89. At
+  −9000 mB and below the primer was at the room's noise; at −8400 mB it read
+  about −50 dB. Sixty decibels for a 6 dB step reads as the speaker sounding
+  nothing under some sink volume between those two settings, so how far a
+  sink's volume moves this speaker's sound was not measurable in the ramp.
+
+#### A level under another play
+
+A level found for an output alone is a margin over the level at which that
+output was detected alone in a quiet room, not over another output's sound. On the bench
+above, `examples/anchoring_scenario.py` with each output one step above its
+alone-level (the Flex's at −5400 mB, the LG-PL5's at −7800 mB) located both
+plays in one run of four: the Flex's start marker, which sounds about a
+second into the talker's speech, scored 0.15 to 0.20 in the other three, while
+its end marker was found every time. The talker masked it.
+
+The bench answers this by raising the overlapping output's level, found by a
+second ramp made with the other output playing. Two other answers were not
+taken: a different offset between the plays, because the overlap is what the
+scenario is for, and a weaker expectation in the test, because finding both
+plays in the overlap is what the test asserts. Each ramp counts a play
+detected at a level when three runs in a row there detect it. The bench's
+ramps took one run per level at first, and a run that scored high by chance
+then stopped the ramp under the talker two levels below the level earlier
+ramps had found (below).
+
+By hand: set the talker's cap to its own play level and the speaker's cap to
+its alone-level; run the example; read `alignment.json`; until three runs in
+a row at one level have every `raw_mic_` channel with the speaker's `start`
+and `end` `found`, raise the speaker's cap 600 mB after a run that misses and
+run again; play one step above that level.
+
+The audible bench makes that ramp after both alone-ramps, each run one run
+of the scenario itself (a priming play on the talker, then the example) with
+the talker at its play level and the speaker's cap at the run's level:
+
+- the levels are the Flex's alone-level as found, then every 600 mB above it,
+  ending at the ceiling;
+- a run whose plays did not run as asked stops it, at any level;
+- it stops at the first level at which both of the Flex's markers are found
+  on every raw microphone in three runs in a row, and plays nothing louder; a
+  run that misses ends its level; whether the talker was found is printed
+  and is not a stop;
+- an undetected run above −4000 mB is read before the next, whether or not
+  earlier runs at its level were detected. The Flex's tone,
+  over 0.8 s placed by the clock tie, must stand 10 dB above the larger of
+  its 900 Hz and 1100 Hz neighbours on some raw microphone, or the ramp stops:
+  speech has no line that stands out so across 0.8 s, a tone that reached the
+  microphones does. A tone that stands out at a step 2000 mB or more above
+  the ramp's first step stops the ramp as not recognised: a score is about
+  the square root of the marker's share of the band's energy, so 8 dB of
+  level carries a marker from the search's floor, about 0.1, to the 0.25
+  threshold, and the rule allows 12 dB more before it calls the play
+  unexplained by its level. Otherwise the ramp goes on;
+- the scenario then plays the Flex one step above the level found, never
+  above the ceiling, and runs three times.
+
+Measured on the same bench, the talker at −7800 mB, in three ramps an hour
+after the alone-level runs: the Flex's raw-microphone scores were, start and
+end, 0.09 to 0.13 and 0.30 to 0.36 at −6000 mB; 0.14 to 0.20 and 0.49 to 0.54
+at −5400 mB; and at −4800 mB 0.30 to 0.35 and 0.58 to 0.70, detected. The
+scenario played the Flex at −4200 mB. A fourth ramp, in a later lane run,
+read 0.30 to 0.33 and 0.30 to 0.34 at −6000 mB and stopped there, detected;
+the scenario then played the Flex at −5400 mB (see *The anchoring scenario*).
+Those four ramps took one run per level, so a run that scored high by chance
+stopped the ramp below the level the scenario needed. With the talker
+playing, the Flex's start marker had scored over the threshold in one run of
+four at −6000 mB and two of ten at −5400 mB.
+
+In the next lane run, the first to count three runs in a row, the ramp under
+the talker read, start and end: at −6000 mB one run, 0.08 to 0.13 and 0.29
+to 0.34, missed; at −5400 mB one run, 0.15 to 0.17 and 0.48 to 0.51, missed;
+at −4800 mB three runs, 0.28 to 0.32 and 0.62 to 0.67, 0.28 to 0.32 and 0.61
+to 0.67, 0.29 to 0.33 and 0.63 to 0.68, each detected. It found −4800 mB, and
+the scenario played the Flex at −4200 mB.
+
+Why one level scores two ways was read from the kept runs at −6000 and
+−5400 mB: in all three high runs the Flex's play started 0.98 to 1.06 s after
+the talker's in the capture, and in all thirteen low runs 0.80 to 0.88 s
+after. The speech clip's 500–3500 Hz band over the Flex's start-marker span
+is about 12 dB quieter at the later placement (−32 dB of full scale against
+−20 dB in the source), and at the microphones the band under that span read
+−70 to −73 dB in the high runs against −61 to −62 dB in the low, with the
+half second before it at −61 dB in both and the Flex's own tone the same at
+each level. So a high score is the start marker landing in a quieter stretch
+of the speech; the talker's delay estimate, the talker's level and the
+Flex's level were ruled out. What moves the two plays a quarter second
+against each other from run to run was not read
+(`scenario-play-offset-varies-between-runs`). The ramp that counted three
+in a row had no high run at −6000 or −5400 mB, and its three runs at −4800 mB
+scored alike.
+
+So under the talker, a run that misses at a level where an earlier run was
+detected is most likely a run in the earlier cluster after one in the later,
+not a level too low. Above −4000 mB the bench still reads that miss, and a
+Flex's tone that stands out there stops the ramp as not recognised. That is a
+choice: past −4000 mB the bench plays nothing louder for a miss its level
+does not explain, and going louder would answer a timing cause with level.
+Every run is kept with its scores, so such a stop shows a detection and a
+miss at one level, which is what tells it from a play the level does not
+explain.
+
+`examples/anchoring_scenario.py` takes its levels from the configuration: it
+sends each playback role `check` before the capture starts and plays each
+source at its role's `cap_mb`. A configuration for it sets the talker's cap
+one step above the talker's level found alone, and the speaker's, whose play
+starts under the talker's, one step above the level found with the talker
+playing.
 
 ### On a sound-server sink
 
@@ -757,10 +937,15 @@ made at exactly 0 dB on every channel, unmuted, pinned to the sink, with the
 source's rate, channel count and format exactly (`params` otherwise), no
 pre-buffer, and corked until its first frames have been sent. It is not a
 second control: the output checks it, with the sink, at every read, and a
-stream that is not on the sink, not at 0 dB or muted is `stream_moved`. A
-server that restores a saved stream volume, or ignores the one asked for, is
-caught at the read-back before the first frame. During a play the role
-reports a moved stream as `controls_moved`.
+stream that is not on the sink, not at 0 dB or muted is `stream_moved`. The
+client asks a session manager not to restore a saved volume or target onto
+the stream and not to save its own (`state.restore-props` and
+`state.restore-target`, both `false`), and once the stream is made it sets
+the stream's volume to 0 dB itself: on PipeWire a stream nothing has set
+read 0 on every channel with its sink at the sink's lowest volume. A server
+that restores a saved stream volume anyway, or ignores the one set, is caught
+at the read-back before the first frame. During a play the role reports a
+moved stream as `controls_moved`.
 
 **The cap on a sink** covers the sink's volume and mute, the stream's volume
 and mute, and the stream's sink. It cannot see a knob on the speaker, a
@@ -826,7 +1011,8 @@ measured on none.
 server's estimate**: the frames in the stream's buffer plus the server's
 latency to the sink, as the server reports them. Once the buffer is seen
 empty, the latency is counted down in real time, so the figure reaches 0 at
-the end of a play. What the figure is worth on a real sink is unmeasured.
+the end of a play. On a Bluetooth speaker it understated the path by about
+a quarter second (*Measured on a Bluetooth speaker*, below).
 `unplayed_frames` is that figure too.
 
 **The end of a play** is bounded as on a card (*How the role plays*, step 6).
@@ -842,6 +1028,56 @@ no frame and setting nothing. Whether a corked stream leaves a suspended sink
 silent is unmeasured, so this dry run too is made only inside an agreed
 window.
 
+**Measured on a Bluetooth speaker.** On 2026-11-14 the audible bench played
+on an LG-PL5 over A2DP: PipeWire 1.6.9's pulse server (protocol server
+version 15.0.0), the sink 48 kHz, two channels, `s16le`, hardware volume,
+base volume 0 mB. Through the ramps, test runs and the anchoring scenario:
+
+- Once the client set the stream's volume itself (*The stream*), every play
+  ended `completed`, no underrun, `restored`, no failure: no `stream_died`
+  at the end-of-play bound, no false underrun, the stream at 0 dB and
+  unmoved at every read. Before that, a session manager's restore had left
+  plays' streams under 0 dB, caught as `stream_moved` before a frame.
+- The sink read back exactly the level asked (−7800 mB on both channels,
+  0 mB under), and its volume was back at what it was before (−4235 mB) after
+  every run.
+- A play over the cap was refused with `over_cap` before any stream existed,
+  and the capture during it was about 60 dB or more under the primer heard
+  at the ramp's level.
+- A 16 kHz one-channel `s16_le` source was granted as asked, with no
+  conversion in the client, and sounded with both markers found on every raw
+  microphone (scores 0.65 to 0.89). Alignment reported `drift_ppm` 28 to 62:
+  the server's conversion and the speaker's clock against the Flex's,
+  together; one run cannot tell them apart. A conversion off by more than
+  the ±500 ppm the search spans would show as a marker not found.
+- The first mark's `delay_frames` was 1600 frames (100 ms) in every run but
+  one; alignment put copy frame 0 243 to 249 ms after where that estimate
+  puts it, on every raw microphone. The Bluetooth path's latency is the
+  server's estimate plus about a quarter second. In the one run the first
+  mark read 4650 frames, and frame 0 sounded where it sounded in the others,
+  246 ms after the mark's reading: the estimate moved, the path did not.
+- No fade-in was seen: every sink play's primer that sounded reached its
+  full level in its second quarter second, the first quarter second being
+  the latency above. Every such play came seconds after another stream on
+  the speaker, the ramp's quieter steps included, so the fade-in the speaker
+  is known to make after minutes of silence had no chance to show, and it is
+  unmeasured.
+- At the sink's silent minimum, −28899 mB, every play of every ramp's first
+  step sounded a burst of about half a second at its start: it began 50 to
+  100 ms before where the play's first frame sounds, peaked at −45 dB in the
+  500–3500 Hz band on the raw microphones (louder than the primer at −8400 mB,
+  about −53 dB) and decayed into the room. It is not the played content: it
+  was the same in the primer and in the marked play, whose first half second
+  is digital silence, and its 1 kHz level sat about 12 dB under its 900 Hz
+  and 1100 Hz neighbours, where the primer's tone stands far above them. It
+  is not the end of a play at the restored volume: at −8400 mB the primer's
+  tone ended within 30 ms of the role's restore and decayed from its play
+  level, with nothing louder after, and no step showed sound after the
+  restore. It does not follow the level asked: no step from −12000 to
+  −9000 mB sounded it. The same burst, its peak within 2.5 dB, came in eleven
+  ramps over two hours. What makes it, the speaker or the server, these runs cannot
+  tell.
+
 #### The anchoring scenario
 
 `examples/anchoring_scenario.py` records on `mic` while a talker plays on
@@ -849,7 +1085,12 @@ window.
 the capture a second after the later of the two plays has ended. Both
 sources are marked with `lab mark`, one member each, so that `lab assess`
 can locate each play in the capture. Roles are named, no device: a lab
-configuration for it, with invented names:
+configuration for it, with invented names. The example plays each source at
+its role's `cap_mb`, so here a cap is the play's level, not a ceiling over
+it: set the talker's from the level found for its output alone, and the
+speaker's from the level found with the talker playing (*Finding a level*,
+*A level under another play*). The caps below are the levels the bench of
+that section played at, and are right for no other bench:
 
 ```toml
 schema = 1
@@ -878,7 +1119,7 @@ sample_clock = "flex"
 output = "alsa"
 card = "Flex XVF3800 L16K6Ch"
 source_dir = "/data/lab/sources"
-cap_mb = -2400
+cap_mb = -4200                       # the level this example plays at
 quiet_hours = [["22:00", "07:00"]]
 
 [roles.speaker.device.level]
@@ -898,7 +1139,7 @@ machine = "bench"
 output = "pulse"
 sink = "desk speaker"
 source_dir = "/data/lab/sources"
-cap_mb = -2400
+cap_mb = -7800                       # the level this example plays at
 quiet_hours = [["22:00", "07:00"]]
 ```
 
@@ -906,6 +1147,30 @@ quiet_hours = [["22:00", "07:00"]]
 source of the experimenter's choosing, with different members. The tree's
 known speech clip, `brenn_lab/testing/speech/arctic_a0001.wav`, is one
 talker; its README says where it comes from and under what licence.
+
+Run on 2026-11-14 on the bench of *Finding a level*, the speech clip as the
+talker and a marked 1 s tone as the robot's sound, every run completed with
+both plays healthy and the talker found on every raw microphone (scores 0.65
+to 0.89). First, each output one step above the level found for it alone
+(the Flex's own output at −5400 mB, the LG-PL5 sink at −7800 mB): the
+robot's sound was located in one run of four. Its end marker was found every
+time (0.46 to 0.54); its start marker, which sounds about a second into the
+talker's speech, scored 0.15 to 0.20 in three runs and 0.41 to 0.45 in one,
+so the play was not located and alignment failed the run. Then the Flex one
+step above the level found with the talker playing (−4800 mB found, played
+at −4200 mB), the talker unchanged: both plays were located in nine runs of
+nine, the robot's start marker scoring 0.46 to 0.56 and its end marker 0.67
+to 0.77, with `drift_ppm` −5.5 to 12.2 on the Flex's play and 28.5 to 35.3
+on the talker's. In a later lane run the ramp under the talker stopped at
+−6000 mB and the scenario played the Flex at −5400 mB: both plays were
+located in one run of three, the robot's start marker scoring 0.48 to 0.53
+in that run and 0.15 to 0.19 in the other two, its end marker 0.47 to 0.54
+in all three. Then, with the ramp counting a level found only when three runs
+in a row there detect the play, it found −4800 mB again and the scenario
+played the Flex at −4200 mB: both plays were located in three runs of three,
+the robot's start marker scoring 0.47 to 0.61 and its end marker 0.68 to
+0.76, with `drift_ppm` −1.0 to 4.9 on the Flex's play and 28.0 to 35.3 on
+the talker's.
 
 ## Starting the runner
 
