@@ -7,15 +7,20 @@ import os
 import re
 import subprocess
 import textwrap
+import wave
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from brenn_lab import marker
+from brenn_lab.testing import scenes
 from brenn_lab.testing.lab_driver import document, dry_args, lab_toml, run_args
+from brenn_lab.testing.scenes import Play
 
 LAB = os.path.abspath(os.environ["LAB"])
 STAND_IN = os.path.abspath(os.environ["STAND_IN"])
+EXPORT_STAND_IN = os.path.abspath(os.environ["EXPORT_STAND_IN"])
 PROBLEM_KEYS = {"where", "reason", "detail", "role", "command", "key", "data"}
 
 SHORT = """\
@@ -134,6 +139,11 @@ def test_a_dry_run_whose_script_does_not_exist_is_refused(tmp_path: Path) -> Non
         ["dry-run", "--lab", "a", "--machine", "m", "--script", "s", "-h"],
         ["--help"],
         ["run", "--lab", "a", "--machine", "m", "--script", "s", "--ou", "o"],
+        ["mark", "--source", "a.wav", "--out", "b.wav"],
+        ["mark", "--source", "a.wav", "--out", "b.wav", "--member", "one"],
+        ["align"],
+        ["align", "--run", "r", "--frame", "f"],
+        ["align", "--run", "r", "--member", "1"],
     ],
     ids=[
         "nothing",
@@ -144,6 +154,11 @@ def test_a_dry_run_whose_script_does_not_exist_is_refused(tmp_path: Path) -> Non
         "help",
         "top_level_help",
         "abbreviated_flag",
+        "mark_without_member",
+        "mark_member_not_an_integer",
+        "align_without_run",
+        "align_abbreviated_flag",
+        "align_with_a_mark_flag",
     ],
 )
 def test_a_command_line_the_parser_refuses(tmp_path: Path, args: list[str]) -> None:
@@ -208,3 +223,167 @@ def test_a_run_inside_the_workspace_is_refused(tmp_path: Path) -> None:
     problem = only_problem(document(done.stdout))
     assert (problem["where"], problem["reason"]) == ("out", "out_in_workspace")
     assert not out.exists()
+
+
+def source_wav(path: Path, frames: int = 4000, rate_hz: int = 16000, channels: int = 2) -> Path:
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(rate_hz)
+        w.writeframes(bytes(2 * channels * frames))
+    return path
+
+
+def test_mark_writes_a_marked_source(tmp_path: Path) -> None:
+    source, out = source_wav(tmp_path / "in.wav"), tmp_path / "out.wav"
+    done = start(["mark", "--source", str(source), "--out", str(out), "--member", "7"])
+    assert done.returncode == 0, done.stderr
+    got = document(done.stdout)
+    assert got.keys() == {"marked", "source", "marker"}
+    assert got["marked"] == str(out)
+    assert got["source"] == {
+        "frames": 4000,
+        "rate_hz": 16000,
+        "channels": 2,
+        "sample_format": "s16_le",
+    }
+    start_code, end_code = marker.codes(7)
+    carried = got["marker"]
+    assert (carried["definition"], carried["member"]) == (marker.DEFINITION, 7)
+    assert (carried["start_code"], carried["end_code"]) == (start_code, end_code)
+    with wave.open(str(out), "rb") as w:
+        total = w.getnframes()
+        assert (w.getnchannels(), w.getframerate(), w.getsampwidth()) == (2, 16000, 2)
+    spans = marker.layout(16000, total)
+    assert spans is not None
+    assert carried["start"] == {"frame": spans[0].frame, "frames": spans[0].frames}
+    assert carried["end"] == {"frame": spans[1].frame, "frames": spans[1].frames}
+
+
+def test_mark_relative_paths_under_bazel_run(tmp_path: Path) -> None:
+    source_wav(tmp_path / "in.wav")
+    done = start(
+        ["mark", "--source", "in.wav", "--out", "out.wav", "--member", "0"],
+        BUILD_WORKING_DIRECTORY=str(tmp_path),
+    )
+    assert done.returncode == 0, done.stderr
+    assert document(done.stdout)["marked"] == str(tmp_path / "out.wav")
+    assert (tmp_path / "out.wav").is_file()
+
+
+@pytest.mark.parametrize(
+    ("setup", "member", "reason"),
+    [
+        ("good", "511", "member_range"),
+        ("good", "-1", "member_range"),
+        ("missing", "0", "unreadable"),
+        ("not_wav", "0", "source_format"),
+        ("slow", "0", "rate_unsupported"),
+        ("out_exists", "0", "out_exists"),
+    ],
+)
+def test_mark_refusals_write_nothing(tmp_path: Path, setup: str, member: str, reason: str) -> None:
+    source, out = tmp_path / "in.wav", tmp_path / "out.wav"
+    if setup in ("good", "out_exists"):
+        source_wav(source)
+    elif setup == "not_wav":
+        source.write_text("not a wav\n")
+    elif setup == "slow":
+        source_wav(source, rate_hz=4000)
+    if setup == "out_exists":
+        out.write_text("kept\n")
+    done = start(["mark", "--source", str(source), "--out", str(out), "--member", member])
+    assert done.returncode == 2, done.stderr
+    problem = only_problem(document(done.stdout))
+    assert (problem["where"], problem["reason"]) == ("mark", reason)
+    assert problem["detail"]
+    if setup == "out_exists":
+        assert out.read_text() == "kept\n"
+    else:
+        assert not out.exists()
+
+
+def align_args(run: Path) -> list[str]:
+    return ["align", "--run", str(run), "--frame-log", EXPORT_STAND_IN]
+
+
+def test_align_a_run_whose_marked_play_is_found(tmp_path: Path) -> None:
+    built = scenes.build(tmp_path / "run", [Play("speaker", 1, 3, at=5000.0)])
+    done = start(align_args(built.run))
+    assert done.returncode == 0, done.stderr
+    got = document(done.stdout)
+    assert got.keys() == {"run", "report", "ok", "summary"}
+    assert got["run"] == str(built.run)
+    assert got["report"] == str(built.run / "alignment.json")
+    assert got["ok"] is True
+    written = json.loads((built.run / "alignment.json").read_text())
+    assert got["summary"] == written["summary"]
+    assert (got["summary"]["marked"], got["summary"]["located"]) == (1, 1)
+    assert written["reader"] == {"program": "frame-log", "pinned": False, "path": EXPORT_STAND_IN}
+    harness = written["harness"]
+    assert harness["repository"] == "brenn-lab"
+    assert harness["source"] in ("git", "unknown")
+
+
+def test_align_a_run_with_no_marked_play(tmp_path: Path) -> None:
+    built = scenes.build(tmp_path / "run", [Play("speaker", 1, None, at=5000.0)])
+    done = start(align_args(built.run))
+    assert done.returncode == 0, done.stderr
+    got = document(done.stdout)
+    assert got["ok"] is True
+    assert (got["summary"]["marked"], got["summary"]["captures"]) == (0, 1)
+
+
+def test_align_a_run_whose_marker_is_not_found(tmp_path: Path) -> None:
+    built = scenes.build(tmp_path / "run", [Play("speaker", 1, 1, at=500000.0)])
+    done = start(align_args(built.run))
+    assert done.returncode == 1, done.stderr
+    got = document(done.stdout)
+    assert got["ok"] is False
+    assert got["summary"]["located"] == 0
+    assert (built.run / "alignment.json").is_file()
+
+
+def test_align_relative_run_under_bazel_run(tmp_path: Path) -> None:
+    scenes.build(tmp_path / "run", [Play("speaker", 1, 3, at=5000.0)])
+    done = start(
+        ["align", "--run", "run", "--frame-log", EXPORT_STAND_IN],
+        BUILD_WORKING_DIRECTORY=str(tmp_path),
+    )
+    assert done.returncode == 0, done.stderr
+    assert document(done.stdout)["report"] == str(tmp_path / "run" / "alignment.json")
+
+
+@pytest.mark.parametrize(
+    ("setup", "reason"),
+    [
+        ("no_directory", "unreadable"),
+        ("no_manifest", "unreadable"),
+        ("not_json", "unreadable"),
+        ("layout_2", "layout"),
+        ("read_only", "not_writable"),
+    ],
+)
+def test_align_refusals_write_no_report(tmp_path: Path, setup: str, reason: str) -> None:
+    run = tmp_path / "run"
+    if setup == "read_only":
+        scenes.build(run, [Play("speaker", 1, 3, at=5000.0)])
+    elif setup != "no_directory":
+        run.mkdir()
+    if setup == "not_json":
+        (run / "manifest.json").write_text("{")
+    elif setup == "layout_2":
+        (run / "manifest.json").write_text(json.dumps({"layout": 2, "roles": {}}))
+    if setup == "read_only":
+        run.chmod(0o555)
+        assert not os.access(run, os.W_OK), "the test's process can write a 0o555 directory"
+    try:
+        done = start(align_args(run))
+    finally:
+        if setup == "read_only":
+            run.chmod(0o755)
+    assert done.returncode == 2, done.stderr
+    assert "Traceback" not in done.stderr
+    problem = only_problem(document(done.stdout))
+    assert (problem["where"], problem["reason"]) == ("run", reason)
+    assert not (run / "alignment.json").exists()

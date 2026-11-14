@@ -14,13 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
+from brenn_lab import marker
 from brenn_lab.data import Failure
+from brenn_lab.marker import Carried
 from brenn_lab.playback.limits import peak_mb
 from brenn_lab.playback.messages import Source
-from brenn_lab.sound import SAMPLE_BYTES
+from brenn_lab.sound import FORMAT_OF_WIDTH, SAMPLE_BYTES, TYPECODES
 
-_FORMAT_OF_WIDTH = {width: f for f, width in SAMPLE_BYTES.items()}
-_TYPECODES = {"s16_le": "h", "s32_le": "i"}
 _CHUNK_FRAMES = 65536
 _READ_BYTES = 1 << 20
 
@@ -71,7 +71,9 @@ def resolve(source_dir: str, name: str) -> Path | Failure:
 
 
 def judge(source_dir: str, name: str) -> Judged | Failure:
-    """Read source `name` once: its hash, frame count, parameters and peak."""
+    """Read source `name` once: its hash, frame count, parameters, peak and
+    the marker it carries.
+    """
     path = resolve(source_dir, name)
     if isinstance(path, Failure):
         return path
@@ -84,7 +86,7 @@ def judge(source_dir: str, name: str) -> Judged | Failure:
             hashing.rest()
     except OSError as e:
         return Failure("source_missing", f"{name!r} is not a readable file: {e.strerror}")
-    rate_hz, channels, sample_format, frames, peak = read
+    rate_hz, channels, sample_format, frames, peak, carried = read
     bits = 8 * SAMPLE_BYTES[sample_format]
     return Judged(
         path,
@@ -96,6 +98,7 @@ def judge(source_dir: str, name: str) -> Judged | Failure:
             channels=channels,
             sample_format=sample_format,
             peak_mb=peak_mb(peak, bits),
+            marker=carried,
         ),
     )
 
@@ -195,20 +198,27 @@ def _sync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _read(file: _Hashing, name: str) -> tuple[int, int, str, int, int] | Failure:
-    """Rate, channels, format, frame count and peak magnitude of the WAV in `file`."""
+def _read(file: _Hashing, name: str) -> tuple[int, int, str, int, int, Carried | None] | Failure:
+    """Rate, channels, format, frame count, peak magnitude and carried marker
+    of the WAV in `file`. The frames that may hold a marker are kept as they
+    pass and recognised once the whole file is read.
+    """
     try:
         with wave.open(file, "rb") as reader:  # type: ignore[call-overload]
             params = reader.getparams()
-            sample_format = _FORMAT_OF_WIDTH.get(params.sampwidth)
+            sample_format = FORMAT_OF_WIDTH.get(params.sampwidth)
             if sample_format is None:
                 return Failure(
                     "source_format",
                     f"{name!r} holds {8 * params.sampwidth}-bit samples; "
                     "a source is 16- or 32-bit integer PCM",
                 )
-            typecode = _TYPECODES[sample_format]
+            typecode = TYPECODES[sample_format]
             frame_bytes = params.sampwidth * params.nchannels
+            head_samples = params.nchannels * marker.head_frames(params.framerate)
+            tail_samples = params.nchannels * marker.tail_frames(params.framerate)
+            head = array.array(typecode)
+            tail = array.array(typecode)
             frames = 0
             peak = 0
             while data := reader.readframes(_CHUNK_FRAMES):
@@ -223,10 +233,17 @@ def _read(file: _Hashing, name: str) -> tuple[int, int, str, int, int] | Failure
                     samples.byteswap()
                 if samples:
                     peak = max(peak, max(samples), -min(samples))
+                if len(head) < head_samples:
+                    head.extend(samples[: head_samples - len(head)])
+                tail.extend(samples[-tail_samples:])
+                del tail[:-tail_samples]
     except (wave.Error, EOFError) as e:
         return Failure("source_format", f"{name!r} is not a WAV of integer PCM: {e}")
     if frames != params.nframes:
         return Failure(
             "source_format", f"{name!r} declares {params.nframes} frames and holds {frames}"
         )
-    return params.framerate, params.nchannels, sample_format, frames, peak
+    carried = marker.recognise(
+        head, tail, params.framerate, params.nchannels, sample_format, frames
+    )
+    return params.framerate, params.nchannels, sample_format, frames, peak, carried

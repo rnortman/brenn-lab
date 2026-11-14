@@ -17,21 +17,29 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
   rest by checksum. On linux x86_64 the only host prerequisites are
   bazelisk (as `bazel`), git and make, on a base system that has `bash`,
   `grep`, `sed` and the coreutils `env`, `uname`, `dirname`, `cut`, `tr` and
-  `wc`. On linux aarch64 the C toolchain has no pinned sysroot, so building
-  the gate tools and the two pinned programs also needs the host's libc
-  headers and libraries and, for the recorder's link, the host's ALSA
-  development files.
+  `wc`, and the C++ runtime and zlib (below). On linux aarch64 the C
+  toolchain has no pinned sysroot, so building the gate tools and the two
+  pinned programs also needs the host's libc headers and libraries and, for
+  the recorder's link, the host's ALSA development files.
 - Nothing in a build or test action may reach for a host-installed program.
   A test that needs a service, a fixture generator or a linter gets it as a
   Bazel dependency. If a tool is genuinely impractical to bring in through
   Bazel, pick a different tool, and if that is not possible either, surface it
   as a decision rather than adding a host dependency.
-- One host library is loaded at run time, and the build ships none: ALSA's
-  runtime, `libasound.so.2`. The pinned recorder loads it, and so does the
+- ALSA's runtime, `libasound.so.2`, is loaded from the host at run time, and
+  the build ships none. The pinned recorder loads it, and so does the
   runner's own interpreter when it hosts a playback role, through
   `brenn_lab/playback/alsa.py` and nowhere else. Nothing in `make check`
   loads it (see Test lanes; the owner's question is
   `lanes-load-host-alsa-runtime`).
+- numpy, pinned in the Python lock, loads two host libraries at run time in
+  the process that imports it: the C++ runtime, `libstdc++.so.6`, and zlib,
+  `libz.so.1`. Its one importer in product code is the alignment search,
+  `brenn_lab/align/search.py`, so the default tests of alignment and
+  `lab align` load them. Nothing a run, a dry run or `lab mark` does imports
+  numpy.
+  Both libraries are prerequisites of `make check` on either CPU; the build
+  ships neither.
 - The one place the build reads this tree's git state is the workspace status
   command, `tools/buildinfo/status.sh`, which `.bazelrc` names; it stamps the
   runner with the commit and cleanliness of the tree it was built from. The
@@ -74,7 +82,7 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
 | `make repin` | Regenerate the Python lock and the four crate locks |
 | `make todo-gather` | Fold `todo.d/` fragments into `TODO.md` |
 | `make changes ARGS=...` | Run allthechanges: `ARGS="query"`, `ARGS="todo query"`, `ARGS="gather --version X.Y.Z --dry-run"` |
-| `make lab ARGS=...` | Run the experiment runner: `ARGS="dry-run --lab <lab.toml> --machine <name> --script <script.py>"`, or `run` with `--out <dir>` |
+| `make lab ARGS=...` | Run the experiment runner: `ARGS="dry-run --lab <lab.toml> --machine <name> --script <script.py>"`, or `run` with `--out <dir>`; `ARGS="mark --source <in.wav> --out <out.wav> --member <n>"` to mark a source; `ARGS="align --run <dir>"` to align a run |
 | `make setup` | Wire git at `.githooks` (once per clone; `make check` fails until it has run) |
 | `make scrub-tree` | Whole-tree secret sweep |
 | `make clean` | Drop Bazel's outputs for this workspace |
@@ -156,6 +164,9 @@ is never served from cache.
   speaker on its output and with no firmware on the board's XIAO ESP32 module
   that configures the XVF3800. With such firmware on the module the board has
   taken every frame written to it and played nothing.
+- Both lanes need the desktop's sound server to leave the Flex's card alone:
+  on the maintainer's bench, the card's profile in the sound server is set to
+  off. With the card held by the sound server, the lanes fail at the open.
 - The Flex's PCMs have one opener per lane. In each lane one test target
   opens a PCM of the Flex: `capture_flex_hardware_test` in `hardware`,
   `playback_flex_audible_test` in `audible`. Another test that opens one is

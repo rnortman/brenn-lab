@@ -1,18 +1,24 @@
-"""The entry point of `//brenn_lab:lab`: `dry-run` and `run`.
+"""The entry point of `//brenn_lab:lab`: `dry-run`, `run`, `mark` and `align`.
 
     lab dry-run --lab <lab.toml> --machine <name> --script <script.py>
     lab run --lab <lab.toml> --machine <name> --script <script.py> --out <dir> [--notes <file>]
+    lab mark --source <in.wav> --out <out.wav> --member <0..510>
+    lab align --run <dir> [--frame-log <path>]
 
 On exit status 0, 1 or 2, stdout carries one JSON document and nothing else:
-the dry-run report, the run's pointer to its results, or the refusal. Prose
-goes to stderr.
+the dry-run report, the run's pointer to its results, what was marked, the
+pointer to the alignment report, or the refusal. Prose goes to stderr.
 
 - `dry-run`: 0 no problem; 1 problems; 2 no report could be made.
 - `run`: 0 completed; 1 a run directory was made and the run did not
   complete; 2 refused before anything was created.
-- Either: 2 also for `-h` or `--help`, which prints the help on stderr and
+- `mark`: 0 the marked file was written; 2 refused, nothing written.
+- `align`: 0 a report was written, every capture and play was read and every
+  marked play located; 1 a report was written that says otherwise; 2 the run
+  cannot be read or cannot be written, and no report was written.
+- Any: 2 also for `-h` or `--help`, which prints the help on stderr and
   runs nothing.
-- Either: 3 when the runner raised instead of returning, with nothing on
+- Any: 3 when the command raised instead of returning, with nothing on
   stdout and the traceback on stderr.
 
 Under `bazel run` a relative path is taken from the directory `bazel run`
@@ -31,8 +37,8 @@ from python.runfiles import runfiles
 if TYPE_CHECKING:
     from _typeshed import SupportsWrite
 
-from brenn_lab import buildinfo, pinned, runner
-from brenn_lab.data import JsonObject, to_text
+from brenn_lab import buildinfo, marker, pinned, runner
+from brenn_lab.data import Failure, JsonObject, encode_object, to_text
 from brenn_lab.runner import Problem, Refused
 
 BUILD_INFO = "_main/tools/buildinfo/build_info.json"
@@ -62,7 +68,9 @@ class _Parser(argparse.ArgumentParser):
 
 def _parser() -> _Parser:
     parser = _Parser(
-        prog="lab", description="Dry-run or run an experiment script.", allow_abbrev=False
+        prog="lab",
+        description="Dry-run or run an experiment script, mark a source, or align a run.",
+        allow_abbrev=False,
     )
     commands = parser.add_subparsers(dest="command", required=True)
     dry = commands.add_parser(
@@ -77,6 +85,19 @@ def _parser() -> _Parser:
         command.add_argument("--script", required=True, help="the experiment script")
     run.add_argument("--out", required=True, help="the run directory; must not exist")
     run.add_argument("--notes", help="a free-form notes file, copied into the run")
+    mark = commands.add_parser(
+        "mark", help="write a source with a marker before and after it", allow_abbrev=False
+    )
+    mark.add_argument("--source", required=True, help="the WAV to mark")
+    mark.add_argument("--out", required=True, help="the marked WAV; must not exist")
+    mark.add_argument(
+        "--member", required=True, type=int, help=f"the member, 0 to {marker.MEMBERS - 1}"
+    )
+    align = commands.add_parser(
+        "align", help="find each marked play in each capture of a run", allow_abbrev=False
+    )
+    align.add_argument("--run", required=True, help="the run directory")
+    align.add_argument("--frame-log", help="a frame-log reader to run instead of the pinned one")
     return parser
 
 
@@ -93,6 +114,78 @@ def _harness(found: runfiles.Runfiles) -> buildinfo.Revision:
     return buildinfo.parse(pinned.locate(found, BUILD_INFO).read_text())
 
 
+def _experiment(args: argparse.Namespace) -> tuple[JsonObject, int]:
+    """`dry-run` or `run`: the document and the exit status."""
+    workspace = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
+    found = pinned.runner_runfiles()
+    programs = pinned.resolve(found)
+    if args.command == "dry-run":
+        result = runner.dry_run(_path(args.lab), args.machine, _path(args.script), programs)
+    else:
+        result = runner.run(
+            _path(args.lab),
+            args.machine,
+            _path(args.script),
+            args.script,
+            _path(args.out),
+            None if args.notes is None else _path(args.notes),
+            _harness(found),
+            Path(workspace) if workspace else None,
+            programs,
+        )
+    if isinstance(result, Refused):
+        return result.report(), 2
+    if args.command == "dry-run":
+        return result, 0 if result["ok"] is True else 1
+    return result, 0 if result["completed"] is True else 1
+
+
+def _mark(args: argparse.Namespace) -> tuple[JsonObject, int]:
+    """`mark`: the document and the exit status. Resolves nothing pinned."""
+    source, out = _path(args.source), _path(args.out)
+    marked = marker.mark(source, out, args.member)
+    if isinstance(marked, Failure):
+        return Refused([Problem("mark", marked.reason, marked.detail)]).report(), 2
+    document: JsonObject = {
+        "marked": str(out),
+        "source": {
+            "frames": marked.frames,
+            "rate_hz": marked.rate_hz,
+            "channels": marked.channels,
+            "sample_format": marked.sample_format,
+        },
+        "marker": encode_object(marked.marker),
+    }
+    return document, 0
+
+
+def _align(args: argparse.Namespace) -> tuple[JsonObject, int]:
+    """`align`: the document and the exit status. Resolves the pinned reader
+    unless `--frame-log` names another.
+    """
+    # Imported here, so that numpy is loaded by `align` and by no other command.
+    from brenn_lab.align import report
+
+    found = pinned.runner_runfiles()
+    is_pinned = args.frame_log is None
+    if is_pinned:
+        reader = str(pinned.locate(found, pinned.TOOLS["frame_log"]))
+    else:
+        reader = str(_path(args.frame_log))
+    run = _path(args.run)
+    done = report.align(run, reader, is_pinned, _harness(found).encode())
+    if isinstance(done, Failure):
+        return Refused([Problem("run", done.reason, done.detail)]).report(), 2
+    ok = report.ok(done)
+    document: JsonObject = {
+        "run": str(run),
+        "report": str(run / report.REPORT),
+        "ok": ok,
+        "summary": done["summary"],
+    }
+    return document, 0 if ok else 1
+
+
 def _emit(document: JsonObject) -> None:
     sys.stdout.write(to_text(document) + "\n")
     sys.stdout.flush()
@@ -105,35 +198,19 @@ def main(argv: list[str]) -> int:
         _emit(Refused([Problem("arguments", "usage", str(e))]).report())
         return 2
 
-    workspace = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
     try:
-        found = pinned.runner_runfiles()
-        programs = pinned.resolve(found)
-        if args.command == "dry-run":
-            result = runner.dry_run(_path(args.lab), args.machine, _path(args.script), programs)
+        if args.command == "mark":
+            document, status = _mark(args)
+        elif args.command == "align":
+            document, status = _align(args)
         else:
-            result = runner.run(
-                _path(args.lab),
-                args.machine,
-                _path(args.script),
-                args.script,
-                _path(args.out),
-                None if args.notes is None else _path(args.notes),
-                _harness(found),
-                Path(workspace) if workspace else None,
-                programs,
-            )
+            document, status = _experiment(args)
     except BaseException:
         traceback.print_exc()
         return 3
 
-    if isinstance(result, Refused):
-        _emit(result.report())
-        return 2
-    _emit(result)
-    if args.command == "dry-run":
-        return 0 if result["ok"] is True else 1
-    return 0 if result["completed"] is True else 1
+    _emit(document)
+    return status
 
 
 if __name__ == "__main__":

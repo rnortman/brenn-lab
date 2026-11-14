@@ -1,9 +1,10 @@
 """The programs this harness's build pins, and where this process carries them.
 
 A machine whose programs name `{ pinned = true }` runs the program found here.
-The table's keys are exactly the programs the role kinds use, so every pinned
-program the lab configuration accepts resolves. `locate` is the runner's one
-lookup in its runfiles, for these programs and for its build stamp.
+`PROGRAMS`'s keys are exactly the programs the role kinds use, so every pinned
+program the lab configuration accepts resolves. `TOOLS` are the pinned
+programs the runner's own commands run. `locate` is the runner's one lookup
+in its runfiles, for these programs and for its build stamp.
 """
 
 from pathlib import Path
@@ -14,6 +15,13 @@ PROGRAMS: dict[str, str] = {
     "pod_capture": "_main/tools/brenn_pod/pod-capture",
 }
 """Each pinned program's runfiles path."""
+
+TOOLS: dict[str, str] = {
+    "frame_log": "_main/tools/brenn_pod/frame-log",
+}
+"""Each pinned tool the runner's own commands run, by runfiles path. No role
+kind uses these, so a machine's configuration cannot name them.
+"""
 
 
 def runner_runfiles() -> runfiles.Runfiles:

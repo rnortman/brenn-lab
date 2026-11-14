@@ -4,7 +4,9 @@ An experiment is a script run against a lab. The **lab configuration** says
 which machines and devices there are. The **script** says what to do with
 them. The **dry run** checks a script against a lab without recording
 anything, and the **run** carries it out and leaves a run directory, which
-`run-directory.md` describes.
+`run-directory.md` describes. **Marking** a source lets a run's captures be
+**aligned** with what it played afterwards, by the sound alone (*Marking a
+source*, *Aligning a run*).
 
 ## The lab configuration
 
@@ -382,9 +384,11 @@ volume_mb = 0
   not blocked for the length of the source.
   - `play`: the role's play number in the run, from 1; 0 in a dry reply.
   - `source`: `{name, sha256, frames, rate_hz, channels, sample_format,
-    peak_mb}`: the file as named, the hash of its bytes, what it holds, and
-    its largest sample magnitude relative to full scale, rounded up; `peak_mb`
-    is `null` for a source of silence.
+    peak_mb, marker}`: the file as named, the hash of its bytes, what it
+    holds, and its largest sample magnitude relative to full scale, rounded
+    up; `peak_mb` is `null` for a source of silence. `marker` is the
+    harness's marker the file's samples carry, as `run-directory.md`, *A
+    source entry*, describes it, or `null`; a dry reply carries it too.
   - `copy`: the `Location` of the kept copy; `null` in a dry reply.
   - `output`: `{kind, library: {name, version}}`: `"alsa"`, and the host's
     ALSA library with the version it reports.
@@ -647,7 +651,9 @@ bazel run //brenn_lab:lab -- run     --lab <lab.toml> --machine <name> --script 
 
 `make lab ARGS="dry-run --lab … --machine … --script …"` is the same. Under
 `bazel run` a relative path is taken from the directory `bazel run` was
-started in.
+started in. The same entry point has two more commands, `mark` and `align`,
+described under *Marking a source* and *Aligning a run*; this section is about
+`dry-run` and `run`.
 
 stdout carries one JSON document and nothing else, prose goes to stderr:
 
@@ -852,3 +858,90 @@ ends. If the runner is killed outright (SIGKILL, a power loss), the recorder,
 which runs in a session of its own, keeps recording and keeps the device. The
 next start on that device fails with `open`. The recorder's pid is in the
 run's `logs/runner.log`. Send it SIGTERM and it stops cleanly.
+
+## Marking a source
+
+```
+bazel run //brenn_lab:lab -- mark --source <in.wav> --out <out.wav> --member <0…510>
+```
+
+writes `<out.wav>`: the source with the harness's marker of member
+`--member` before its content and after it, with silence around both, at the
+source's own rate, channel count and sample format. The content's frames are
+unchanged. `run-directory.md`, *The marker*, defines the marker and the marked
+file's layout. Play the marked file as any other source; the playback role
+still transforms nothing.
+
+**One member per play that may sound in one capture**, across every role. Two
+plays of one member are told apart only when one role plays both and every
+capture that holds one holds both; otherwise alignment reports them
+`ambiguous` by name. The family has 511 members.
+
+When a play starts, the role recognises the marker from the source's samples
+and records it: a script reads it back as `started.source.marker`, and the
+manifest's source entry and the results' record carry the same object. A
+file altered after marking (normalised, resampled, trimmed) carries none,
+and plays as before with `marker: null`. Nothing is refused on the marker's
+account.
+
+stdout is one JSON document:
+
+```json
+{"marked": "<out.wav>",
+ "source": {"frames": 312000, "rate_hz": 16000, "channels": 2, "sample_format": "s16_le"},
+ "marker": {"definition": "gold-bpsk-1", "member": 3, "start_code": 6, "end_code": 7,
+            "start": {"frame": 8000, "frames": 8193}, "end": {"frame": 336193, "frames": 8193}}}
+```
+
+`source` describes the file given; `marker` is the record a play of the
+marked file will carry, its spans in the marked file's frames.
+
+| Status | `mark` |
+|---|---|
+| 0 | the marked file was written |
+| 2 | refused, nothing written: `where` `mark`, `reason` `unreadable` (the source cannot be read), `source_format` (not a WAV of 16- or 32-bit integer PCM, as the playback role refuses it), `rate_unsupported` (below 8000 Hz), `member_range` (outside 0 to 510) or `out_exists`; or `where` `arguments`, `reason` `usage` |
+| 3 | the command raised; nothing is left at `<out.wav>` |
+
+## Aligning a run
+
+```
+bazel run //brenn_lab:lab -- align --run <dir> [--frame-log <path>]
+```
+
+searches every capture of the run for the markers of every marked play and
+writes `<dir>/alignment.json`: for each play, capture and capture channel,
+whether each marker was found, where (in the capture's frames), the offset
+of the kept copy in the capture, and the drift between the two clocks.
+`run-directory.md`, *`alignment.json`*, says what every key means and what
+the search can and cannot find. No clock reading is used, so the captures
+may come from any machine or device; the whole of each capture is searched.
+
+Alignment runs only when asked. The runner never aligns at the end of a run.
+`align` changes nothing else in the run, and may be run again: the new report
+names the one it replaced. It may be run on a run still in progress, and
+then describes the run so far.
+
+Captures are read with brenn-pod's `frame-log`, the one the harness's build
+pins. `--frame-log <path>` runs another, for a capture made by an installed
+recorder newer than the pin; the report says which reader was used.
+Aligning loads numpy, and with it the host's C++ runtime and zlib. Its
+memory does not grow with a capture's length, and the run's filesystem needs
+room for one capture's export at a time (`run-directory.md`, *The statistic
+and its limits*).
+
+stdout is one JSON document, a pointer:
+`{"run": "<dir>", "report": "<dir>/alignment.json", "ok": true, "summary": {…}}`,
+`summary` as in the report. `ok` restates the exit status, and is not a
+verdict on the run.
+
+| Status | `align` |
+|---|---|
+| 0 | a report was written; every capture and play was read and every marked play located in some capture. A run with no marked play aligns with 0 |
+| 1 | a report was written that says otherwise |
+| 2 | refused, no report written: `where` `run`, `reason` `unreadable` (no directory, no `manifest.json` or `results.json` that is JSON of the expected shape), `layout` (not layout 1) or `not_writable` (the run directory cannot be written: a read-only disk, a directory without write permission, or a leftover `.alignment.tmp/` that cannot be removed, which the detail names; decided after the run is read and before any capture is read); or `where` `arguments`, `reason` `usage` |
+| 3 | the command raised; a `.alignment.tmp/` left in the run is not part of the record, and the next `align` clears it, or refuses with `not_writable` if it cannot |
+
+`align` writes its report and its scratch into the run and nowhere else. To
+align an archived or read-only run, copy it somewhere writable, and make the
+copy's directories writable too: a copy can keep the source's read-only
+modes.

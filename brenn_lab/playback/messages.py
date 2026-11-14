@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from brenn_lab.data import ClockReading, Failure, Location, Request, command, event, result
+from brenn_lab.marker import Carried
 from brenn_lab.sound import CardIdentity, Granted
 
 
@@ -14,7 +15,8 @@ from brenn_lab.sound import CardIdentity, Granted
 class Source:
     """A source file as a play named it, the hash of its bytes, and what it
     holds. `peak_mb` is the largest sample magnitude relative to full scale,
-    rounded up; null for a source of silence.
+    rounded up; null for a source of silence. `marker` is the marker its
+    frames carry, recognised from the samples; null when they carry none.
     """
 
     name: str
@@ -24,6 +26,7 @@ class Source:
     channels: int
     sample_format: str
     peak_mb: int | None
+    marker: Carried | None
 
 
 @dataclass(frozen=True)

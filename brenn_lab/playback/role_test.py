@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from brenn_lab import marker
 from brenn_lab.data import Check, Command, Event, Failure, Release, Reply
 from brenn_lab.place import Place
 from brenn_lab.playback import role as role_module
@@ -149,6 +150,7 @@ def test_a_play_to_its_end(tmp_path: Path) -> None:
     s = started(b.play())
     assert s.play == 1
     assert s.source.frames == 5600 and s.source.peak_mb == -602
+    assert s.source.marker is None
     assert s.copy is not None and s.copy.machine == "bench"
     assert s.output.kind == "alsa" and s.output.library == LIBRARY
     assert s.device == CARD
@@ -1068,6 +1070,25 @@ def test_found_is_read_when_the_controls_are_first_moved(tmp_path: Path) -> None
     assert s.found[0] == Control("PCM", 1, "level", moved_level)
     assert isinstance(b.wait_end(), Ended)
     assert b.output.controls[LEVEL].values == list(moved_level)
+
+
+def test_a_marked_source_is_played_with_its_marker_recorded(tmp_path: Path) -> None:
+    b = Bench(tmp_path)
+    b.clip("raw.wav", 0.1)
+    marked = marker.mark(b.sources / "raw.wav", b.sources / "marked.wav", 9)
+    assert isinstance(marked, marker.Marked)
+    carried = marked.marker
+    with wave.open(str(b.sources / "marked.wav"), "rb") as r:
+        frames = r.readframes(r.getnframes())
+
+    assert started(b.play("marked.wav", dry=True)).source.marker == carried
+    s = started(b.play("marked.wav"))
+    assert s.source.marker == carried
+    assert isinstance(b.wait_end(), Ended)
+    assert s.copy is not None
+    assert bytes(b.output.streams[-1].frames) == frames
+    with wave.open(s.copy.path, "rb") as copy:
+        assert copy.readframes(copy.getnframes()) == frames
 
 
 def test_the_role_tests_mapped_no_libasound() -> None:

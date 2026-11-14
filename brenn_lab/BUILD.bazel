@@ -19,6 +19,7 @@ py_library(
         "config_table.py",
         "data.py",
         "labconfig.py",
+        "marker.py",
         "pinned.py",
         "place.py",
         "playback/__init__.py",
@@ -41,18 +42,38 @@ py_library(
     deps = ["@rules_python//python/runfiles"],
 )
 
-# The runner: `bazel run //brenn_lab:lab -- dry-run|run ...`. It carries the
-# pinned recorder, which a machine's `pod_capture = { pinned = true }` names.
+# Alignment, apart from the rest so that only what imports it carries numpy.
+py_library(
+    name = "align",
+    srcs = [
+        "align/__init__.py",
+        "align/capture.py",
+        "align/report.py",
+        "align/search.py",
+    ],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":brenn_lab",
+        "@pypi_lab//numpy",
+    ],
+)
+
+# The runner: `bazel run //brenn_lab:lab -- dry-run|run|mark|align ...`. It
+# carries the pinned recorder, which a machine's `pod_capture = { pinned = true }`
+# names, and the pinned reader, which `align` runs.
 py_binary(
     name = "lab",
     srcs = ["cli.py"],
     data = [
+        "//tools/brenn_pod:frame-log",
         "//tools/brenn_pod:pod-capture",
         "//tools/buildinfo:build_info",
     ],
     main = "cli.py",
     visibility = ["//visibility:public"],
     deps = [
+        ":align",
         ":brenn_lab",
         "@rules_python//python/runfiles",
     ],
@@ -62,8 +83,53 @@ py_pytest_test(
     name = "pinned_test",
     size = "small",
     srcs = ["pinned_test.py"],
-    data = ["//tools/brenn_pod:pod-capture"],
+    data = [
+        "//tools/brenn_pod:frame-log",
+        "//tools/brenn_pod:pod-capture",
+    ],
     deps = [":brenn_lab"],
+)
+
+py_pytest_test(
+    name = "align_search_test",
+    size = "small",
+    srcs = ["align/search_test.py"],
+    deps = [
+        ":align",
+        ":brenn_lab",
+        "@pypi_lab//numpy",
+    ],
+)
+
+py_pytest_test(
+    name = "align_capture_test",
+    size = "small",
+    srcs = ["align/capture_test.py"],
+    data = ["//brenn_lab/testing:export_stand_in"],
+    env = {
+        "EXPORT_STAND_IN": "$(rootpath //brenn_lab/testing:export_stand_in)",
+    },
+    deps = [
+        ":align",
+        ":brenn_lab",
+    ],
+)
+
+# Whole synthetic runs aligned through the stand-in reader.
+py_pytest_test(
+    name = "align_report_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = ["align/report_test.py"],
+    data = ["//brenn_lab/testing:export_stand_in"],
+    env = {
+        "EXPORT_STAND_IN": "$(rootpath //brenn_lab/testing:export_stand_in)",
+    },
+    deps = [
+        ":align",
+        ":brenn_lab",
+        "//brenn_lab/testing:scenes",
+    ],
 )
 
 py_pytest_test(
@@ -72,15 +138,18 @@ py_pytest_test(
     srcs = ["cli_test.py"],
     data = [
         ":lab",
+        "//brenn_lab/testing:export_stand_in",
         "//brenn_lab/testing:stand_in",
     ],
     env = {
+        "EXPORT_STAND_IN": "$(rootpath //brenn_lab/testing:export_stand_in)",
         "LAB": "$(rootpath :lab)",
         "STAND_IN": "$(rootpath //brenn_lab/testing:stand_in)",
     },
     deps = [
         ":brenn_lab",
         "//brenn_lab/testing:lab_driver",
+        "//brenn_lab/testing:scenes",
     ],
 )
 
@@ -180,6 +249,7 @@ py_pytest_test(
         "hardware",
     ],
     deps = [
+        ":align",
         ":brenn_lab",
         "//brenn_lab/testing:lab_driver",
         "//brenn_lab/testing:transcript_files",
@@ -247,6 +317,13 @@ py_pytest_test(
 )
 
 py_pytest_test(
+    name = "marker_test",
+    size = "small",
+    srcs = ["marker_test.py"],
+    deps = [":brenn_lab"],
+)
+
+py_pytest_test(
     name = "playback_messages_test",
     size = "small",
     srcs = ["playback/messages_test.py"],
@@ -302,5 +379,12 @@ py_pytest_test(
     name = "labconfig_test",
     size = "small",
     srcs = ["labconfig_test.py"],
+    deps = [":brenn_lab"],
+)
+
+py_pytest_test(
+    name = "rundir_test",
+    size = "small",
+    srcs = ["rundir_test.py"],
     deps = [":brenn_lab"],
 )

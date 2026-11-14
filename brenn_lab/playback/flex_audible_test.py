@@ -268,6 +268,7 @@ def test_play_and_record() -> None:
     assert results["played"] == {
         "plays_started": 2,
         "plays_completed": 2,
+        "plays_marked": 0,
         "frames_handed": CLIP_A.frames + CLIP_B.frames,
     }
 

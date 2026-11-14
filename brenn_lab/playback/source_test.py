@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from brenn_lab import marker
 from brenn_lab.data import Failure
 from brenn_lab.playback import source
 from brenn_lab.playback.source import Judged
@@ -39,6 +40,42 @@ def test_a_16_bit_source(tmp_path: Path) -> None:
     assert s.sha256 == hashlib.sha256(raw).hexdigest()
     assert (s.frames, s.rate_hz, s.channels, s.sample_format) == (3, 16000, 2, "s16_le")
     assert s.peak_mb == -602
+    assert s.marker is None
+
+
+@pytest.mark.parametrize(
+    ("rate", "channels", "content_frames"),
+    [
+        # The end marker and tail straddle the reader's chunks of 65536 frames.
+        (48000, 2, 131072 + 1000 - 109154),
+        # The lead and start marker straddle them.
+        (96000, 1, 50),
+    ],
+)
+def test_a_marked_source_carries_its_marker(
+    tmp_path: Path, rate: int, channels: int, content_frames: int
+) -> None:
+    raw = tmp_path / "raw.wav"
+    write_wav(
+        raw, [(i * 37) % 2001 - 1000 for i in range(content_frames * channels)], channels, 2, rate
+    )
+    marked = marker.mark(raw, tmp_path / "marked.wav", 200)
+    assert isinstance(marked, marker.Marked)
+    carried = marked.marker
+    s = judged(tmp_path, "marked.wav").source
+    assert s.marker == carried
+    assert s.frames == carried.end.frame + carried.end.frames + round(0.25 * rate)
+
+
+def test_a_marked_source_altered_carries_none(tmp_path: Path) -> None:
+    write_wav(tmp_path / "raw.wav", [5] * 100, 1, 2, 16000)
+    assert isinstance(marker.mark(tmp_path / "raw.wav", tmp_path / "marked.wav", 0), marker.Marked)
+    with wave.open(str(tmp_path / "marked.wav"), "rb") as r:
+        params = r.getparams()
+        samples = array.array("h", r.readframes(params.nframes))
+    samples[-5000] += 3
+    write_wav(tmp_path / "altered.wav", list(samples), 1, 2, 16000)
+    assert judged(tmp_path, "altered.wav").source.marker is None
 
 
 def test_a_32_bit_source(tmp_path: Path) -> None:
@@ -74,6 +111,16 @@ def test_the_hash_covers_chunks_after_the_data(tmp_path: Path) -> None:
     assert s.frames == 2
 
 
+def refused_as_source_format(root: Path, name: str) -> None:
+    """The role refuses source `name` as `source_format`, and `marker.mark`
+    refuses it alike, writing nothing.
+    """
+    assert failure(source.judge(str(root), name)) == "source_format"
+    out = root / "marked.wav"
+    assert failure(marker.mark(root / name, out, 0)) == "source_format"
+    assert not out.exists()
+
+
 def test_8_and_24_bit_sources_are_refused(tmp_path: Path) -> None:
     for width in (1, 3):
         with wave.open(str(tmp_path / f"{width}.wav"), "wb") as w:
@@ -81,25 +128,25 @@ def test_8_and_24_bit_sources_are_refused(tmp_path: Path) -> None:
             w.setsampwidth(width)
             w.setframerate(16000)
             w.writeframes(b"\x00" * width * 4)
-        assert failure(source.judge(str(tmp_path), f"{width}.wav")) == "source_format"
+        refused_as_source_format(tmp_path, f"{width}.wav")
 
 
 def test_a_file_that_is_not_a_wav_is_refused(tmp_path: Path) -> None:
     (tmp_path / "a.wav").write_bytes(b"not a wav at all")
-    assert failure(source.judge(str(tmp_path), "a.wav")) == "source_format"
+    refused_as_source_format(tmp_path, "a.wav")
 
 
 def test_a_float_wav_is_refused(tmp_path: Path) -> None:
     raw = bytearray(write_wav(tmp_path / "a.wav", [0, 0], 1, 4, 16000))
     raw[20:22] = (3).to_bytes(2, "little")
     (tmp_path / "a.wav").write_bytes(bytes(raw))
-    assert failure(source.judge(str(tmp_path), "a.wav")) == "source_format"
+    refused_as_source_format(tmp_path, "a.wav")
 
 
 def test_a_truncated_wav_is_refused(tmp_path: Path) -> None:
     raw = write_wav(tmp_path / "a.wav", list(range(100)), 1, 2, 16000)
     (tmp_path / "a.wav").write_bytes(raw[:-10])
-    assert failure(source.judge(str(tmp_path), "a.wav")) == "source_format"
+    refused_as_source_format(tmp_path, "a.wav")
 
 
 @pytest.mark.parametrize(
@@ -120,7 +167,7 @@ def test_a_data_chunk_of_a_partial_frame_is_refused(
     raw[data_at + 4 : data_at + 8] = (size + extra).to_bytes(4, "little")
     raw[4:8] = (int.from_bytes(raw[4:8], "little") + extra).to_bytes(4, "little")
     (tmp_path / "a.wav").write_bytes(bytes(raw) + b"\x01" * extra)
-    assert failure(source.judge(str(tmp_path), "a.wav")) == "source_format"
+    refused_as_source_format(tmp_path, "a.wav")
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,10 @@ from dataclasses import dataclass
 
 SAMPLE_BYTES = {"s16_le": 2, "s32_le": 4}
 """The sample formats a role speaks, and the bytes one sample of each takes."""
+FORMAT_OF_WIDTH = {width: f for f, width in SAMPLE_BYTES.items()}
+"""The sample format whose samples take a given number of bytes."""
+TYPECODES = {"s16_le": "h", "s32_le": "i"}
+"""The `array` typecode that holds one sample of each format."""
 
 
 @dataclass(frozen=True)

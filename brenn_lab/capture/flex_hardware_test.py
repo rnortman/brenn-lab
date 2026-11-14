@@ -7,6 +7,8 @@ run left: stdout and exit statuses, `manifest.json`, `results.json`, the
 recorder's stdout, and the capture through the pinned reader. Nothing is
 stubbed. The live event lines are held last to the recorded transcript of the
 same case, and saved as a test output for the next retake of that transcript.
+The clean run is then aligned with `lab align`, and the product search is run
+over its ambient capture, where it must find no marker.
 """
 
 import json
@@ -16,10 +18,14 @@ import shutil
 import signal
 import subprocess
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any
 
-from brenn_lab.data import JsonObject
+from brenn_lab import marker
+from brenn_lab.align import search
+from brenn_lab.align.capture import read as read_capture
+from brenn_lab.data import Failure, JsonObject
 from brenn_lab.testing import transcript_files
 from brenn_lab.testing.lab_driver import document, dry_args, lab_toml, run_args
 from brenn_lab.testing.transcript_files import layout_of, objects, shape
@@ -213,6 +219,59 @@ def test_clean() -> None:
     assert summary["discontinuities"] == []
 
     same_case(live, "clean")
+
+    check_align(out, ended)
+    check_no_marker_in_ambient(tmp, capture, started)
+
+
+def check_align(out: Path, ended: Any) -> None:
+    """`lab align` on the run, through the pinned reader: no plays, the one
+    capture read whole.
+    """
+    done = start(["align", "--run", str(out)])
+    assert done.returncode == 0, done.stdout
+    pointer = document(done.stdout)
+    assert pointer["ok"] is True
+    report = read_json(out / "alignment.json")
+    assert report["reader"] == {"program": "frame-log", "pinned": True, "path": None}
+    assert report["summary"] == {
+        "plays": 0,
+        "marked": 0,
+        "located": 0,
+        "captures": 1,
+        "marker_failures": 0,
+        "read_failures": 0,
+    }
+    [read] = report["captures"]
+    assert (read["rate_hz"], read["layout"]) == (RATE_HZ, LAYOUT)
+    assert read["exported_frames"] == ended["frames"]
+    assert read["failure"] is None
+    assert read["tail"] == "ended"
+    assert not (out / ".alignment.tmp").exists()
+
+
+def check_no_marker_in_ambient(tmp: Path, capture: Path, started: Any) -> None:
+    """The product search over the ambient capture, for both markers of
+    members 0 to 3 on every channel: no instance. The largest score of each
+    channel is printed; one at or above the threshold is an unexpected
+    hardware reading for the maintainer.
+    """
+    exported = read_capture(
+        capture, tmp / "ambient.wav", FRAME_LOG, RATE_HZ, "s16_le", tuple(started["layout"])
+    )
+    assert not isinstance(exported, Failure), exported
+    templates = [
+        search.template(marker.code(shift), RATE_HZ)
+        for member in range(4)
+        for shift in marker.codes(member)
+    ]
+    for index, name in enumerate(LAYOUT):
+        found = search.search(partial(exported.blocks, index), RATE_HZ, templates)
+        best = max(f.best for f in found)
+        print(f"ambient {name}: largest score {best:.3f}")
+        assert all(f.instances == () for f in found), (name, best)
+        assert best < search.THRESHOLD
+    exported.path.unlink()
 
 
 def test_loss() -> None:

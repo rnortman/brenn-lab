@@ -13,6 +13,7 @@ start a run is in `experiments.md`.
   manifest.json        from the start; rewritten whole when a role reports device facts
   journal.jsonl        every command, reply and event, appended as it happens
   results.json         written last; absent when the run did not end under the runner's control
+  alignment.json       written by `lab align`, only when asked; absent until then
   script/<file name>   the script that ran, byte for byte
   lab/<file name>      the lab configuration as read, byte for byte
   notes/<file name>    the caller's free-form notes, if any were given
@@ -50,6 +51,16 @@ start a run is in `experiments.md`.
   raised, it holds the traceback. When the run was told to stop, it says so.
 - Nothing is written outside the run directory, and the directory must not
   exist before the run. A run never touches another run.
+- `alignment.json` is not written by the run. `lab align` writes it later,
+  on request, and changes nothing else in the directory (see
+  *`alignment.json`*). A `.alignment.tmp/` directory or an
+  `.alignment.json.tmp` file is an alignment left unfinished, and is not part
+  of the record. The next `align` removes a leftover `.alignment.tmp`,
+  whatever it is (a directory, a file or a link), and a leftover
+  `.alignment.json.tmp` that is a file or a link. It writes through neither
+  and follows no link: removing a link removes the link and never its
+  target. A leftover `.alignment.tmp` it cannot remove is refused with
+  `not_writable`, the detail naming the path that could not be removed.
 
 ### The run's `.gitignore`
 
@@ -70,10 +81,13 @@ reserved the same way.
 
 ### The version rule
 
-`manifest.json`'s `layout` is 1. A new role kind that writes under a reserved
-name, or adds a section of its own beside `captures`, does not change it. A
-reader ignores sections of kinds it does not know. Renaming, removing or
-changing the meaning of anything in layout 1 changes the number.
+`manifest.json`'s `layout` is 1, and `results.json`'s and `alignment.json`'s
+`schema` are each 1. Adding a file or a key changes none of them: a new role
+kind that writes under a reserved name, or adds a section of its own beside
+`captures`, a new key in an entry, a new file beside the others. A reader
+ignores the files, keys and sections of kinds it does not know. Renaming,
+removing or changing the meaning of anything changes the number of the file
+it is in, and of the layout when it is in the layout.
 
 ## Common shapes
 
@@ -261,7 +275,10 @@ later appears here too.
 ```json
 {"play": 1,
  "source": {"name": "clip.wav", "sha256": "…", "frames": 312000, "rate_hz": 16000,
-            "channels": 2, "sample_format": "s16_le", "peak_mb": -602},
+            "channels": 2, "sample_format": "s16_le", "peak_mb": -602,
+            "marker": {"definition": "gold-bpsk-1", "member": 3, "start_code": 6, "end_code": 7,
+                       "start": {"frame": 8000, "frames": 8193},
+                       "end": {"frame": 299807, "frames": 8193}}},
  "output": {"kind": "alsa", "library": {"name": "libasound.so.2", "version": "1.2.13"}},
  "device": {…as in a capture entry…},
  "granted": {"rate_hz": 16000, "channels": 2, "sample_format": "s16_le",
@@ -282,6 +299,14 @@ says what each field means.
 - `source` is the file the script named, as the role read it. `peak_mb` is
   its largest sample magnitude relative to full scale, rounded up, `null` for
   silence.
+- `source.marker` is the harness's marker the file carries, recognised from
+  its samples when the play was judged, before the kept copy was written:
+  the definition's identifier, the member, its start and end codes, and where
+  each marker lies in the kept copy (`frame`, its first frame, and `frames`,
+  its length). `null` when the file carries none, which refuses nothing: an
+  unmarked file, or a marked one altered since (normalised, resampled,
+  trimmed). An entry written before the harness recorded markers has no
+  `marker` key. *The marker* below defines each identifier.
 - `level_mb` is the level at which a full-scale sample is played: the level
   control's volume plus the held controls', from the values read back. It is
   what the cap bounds. **The play's own peak level** is
@@ -355,7 +380,7 @@ them is such a write left unfinished, and is not part of the record.
    "gaps": [], "late": [],
    "loss_free": true, "failure": null,
    "end": {…clock reading…}}],
- "played": {"plays_started": 0, "plays_completed": 0, "frames_handed": 0},
+ "played": {"plays_started": 0, "plays_completed": 0, "plays_marked": 0, "frames_handed": 0},
  "sources": [],
  "roles": {"mic": {"kind": "capture", "commands": 3, "failures": []}},
  "usability": {"assessed": false, "reason": "this harness version makes no usability assessment"}}
@@ -410,12 +435,14 @@ them is such a write left unfinished, and is not part of the record.
   - `end`: the recorder's reading at the stop; `null` for a failed capture.
 - `played` answers "did this run play anything": `plays_started` counts the
   plays whose start was reported, `plays_completed` those of them that ended
-  `completed`, and `frames_handed` sums every play's frames handed to its
-  device. A run with no playback role has all three 0.
+  `completed`, `plays_marked` those of them whose source carries a marker,
+  and `frames_handed` sums every play's frames handed to its device. A run
+  with no playback role has all four 0.
 - `sources`: one record per play whose start was reported, by role and
   number. A play refused at its start has no record.
   - `file`: the pointer to the kept copy. `source`: `{name, sha256}` of the
-    file the script named.
+    file the script named. `marker`: the source entry's `source.marker`, the
+    same object or `null`.
   - `ended`: `completed` (the source was handed over whole and the device
     played its buffer out), `stopped` or `failed`.
   - `stopped_by`: `script`, or `runner` when the runner cut the play at
@@ -485,6 +512,363 @@ the capture kind's, this table holds for a playback role's failure:
 After `write_stalled` the frame log's completeness was not established;
 brenn-pod's `frame-log` tool is the reader that can say more.
 
+## `alignment.json`
+
+Where each marked play lies in each capture, found by searching the captures
+for the plays' markers. `lab align --run <dir>` writes it, only when asked
+(`experiments.md`, *Aligning a run*); the run itself never does. It is written
+to `.alignment.json.tmp`, synced and renamed, and it is the only file `align`
+leaves: `manifest.json`, `results.json` and the journal are not touched, so
+none of them becomes untrue. The report is written into the run, so a run
+directory that cannot be written (a read-only filesystem, a directory without
+write permission) is refused with `not_writable`, before any capture is read,
+and nothing in it changes. So is a run whose leftover `.alignment.tmp/`
+cannot be removed; that leftover may then be partly removed, and nothing
+else in the run changes. The report is its own record. It makes no
+statement of usability, and `results.json`'s `usability.assessed` stays false.
+
+No clock reading is used, for anything: not to decide which pairs are tried,
+not to narrow a search, not to attribute a marker. Every capture is searched
+whole for every marker. Positions come from the sound alone.
+
+```json
+{"schema": 1,
+ "run_id": "…",
+ "harness": {"repository": "brenn-lab", "commit": "…", "dirty": false, "source": "git"},
+ "written": "2026-11-13T21:04:10-05:00",
+ "replaces": null,
+ "reader": {"program": "frame-log", "pinned": true, "path": null},
+ "results_read": true,
+ "clock_readings": "not_used",
+ "marker": {"definition": "gold-bpsk-1", "statistic": "rho", "threshold": 0.25,
+            "band_hz": [500, 3500]},
+ "plays": [{"role": "speaker", "play": 1, "file": {…pointer…}, "state": "marked",
+            "reason": null, "detail": null, "marker": {…the source entry's marker…}}],
+ "captures": [{"role": "mic", "capture": 1, "file": {…pointer…}, "rate_hz": 16000,
+               "layout": ["…"], "exported_frames": 417600,
+               "holes": [{"at_frame": 0, "filled_frames": 0, "basis": "…"}],
+               "tail": "ended", "failure": null}],
+ "pairs": [{"play": {"role": "speaker", "play": 1}, "capture": {"role": "mic", "capture": 1},
+            "tried": true, "not_tried": null,
+            "channels": [{"channel": "raw_mic_0",
+                          "start": {"outcome": "found", "reason": null, "score": 0.81,
+                                    "midpoint_frame": 41234.37, "instances": 1},
+                          "end": {…},
+                          "ratio": 1.0000021, "ratio_basis": "measured", "drift_ppm": 2.1,
+                          "drift_unmeasured": null, "offset_frames": 29138.4}]}],
+ "failures": [{"kind": "marker", "play": {…}, "capture": {…}, "channel": "asr_beam",
+               "marker": "end", "outcome": "not_found", "reason": "below_threshold",
+               "detail": "…"}],
+ "summary": {"plays": 1, "marked": 1, "located": 1, "captures": 1,
+             "marker_failures": 1, "read_failures": 0}}
+```
+
+- `harness`: the revision of the harness that wrote this report, from its
+  build stamp (see *The harness's revision*). It may differ from the
+  manifest's, which is the harness that ran.
+- `written`: local time, with its offset, when the report was made.
+- `replaces`: `null`, or `{harness, written, sha256}` of the `alignment.json`
+  this one replaced, `sha256` being of that file's bytes. When the previous
+  file could not be parsed, `harness` and `written` are `null`.
+- `reader`: the program that read the captures, brenn-pod's `frame-log`.
+  `pinned` true is the one the harness's build carries; false is one named
+  with `--frame-log`, at `path`.
+- `results_read`: false when the run left no `results.json`. Then nothing is
+  known of what was handed to a device, and every marker is tried.
+- `clock_readings`: always `not_used`.
+- `marker`: what was searched for: the marker definition this harness
+  implements, the statistic and the threshold (below), and the band searched,
+  in Hz.
+
+### Plays
+
+Every source entry of every playback role, with its pointer and its record
+copied from the manifest (`marker`, `null` when it is `null` or absent), and
+a `state`:
+
+- `marked`: the record is an object of the definition searched for, and the
+  kept copy bears it out: the copy's frames, rate, channels and format are the
+  entry's, and the marker recognised in its samples is the record.
+- `no_marker`: the record is `null`. Not tried.
+- `no_marker_record`: the entry has no `marker` key; the run was made before
+  the harness recorded markers. Not tried, and not searched for any
+  definition: the run does not say what its sources carried.
+- `failed`, with a `reason` and a `detail`: `copy_missing` (the kept copy is
+  not in the run), `copy_differs` (it is there and differs from the entry or
+  from the record), `unknown_definition` (the record names another
+  definition, which this harness cannot search for).
+
+### Captures
+
+Every capture entry of every capture role, whether or not any play is
+marked, so that the report always says whether each capture is readable.
+A capture is read through `frame-log export-wav`, into
+`.alignment.tmp/export.wav`. One capture's export stands there at a
+time: it is removed once `align` has finished with that capture, before the
+next is exported, and the directory is removed when the alignment ends.
+
+- `rate_hz`, `layout`: the entry's grant and layout. Channels are named by
+  the layout, never by index.
+- `exported_frames`: the frames of the exported file; `holes`: every hole the
+  reader filled, `{at_frame, filled_frames, basis}`, `at_frame` in the
+  capture's frame index; `tail`: the reader's verdict on how the log ends
+  (`ended`, `unterminated`, …). Each `null` when the capture was not read.
+- `failure`: `null`, or `{reason, detail}`: `not_in_run` (the pointer is not
+  in the run), `missing` (no file), `export_refused` (the reader refused it:
+  an overlap, a file past the 4 GiB WAV limit, which six channels of 16-bit at
+  16 kHz reach after about 6.2 hours, a log with no hello), `reader_usage`
+  (the reader refused its command line), `reader_missing` (the reader could
+  not be started), `reader_contract` (its output is not what its contract
+  says: a map without its keys, runs and holes that do not tile the file, a
+  status outside its own), `capture_differs` (the exported file's rate,
+  channel count or sample width is not the entry's grant, or its channel
+  count not the layout's length). `detail` holds the reader's stderr or the
+  reason.
+
+A position in the exported file is reported as a frame of the capture, `run
+first frame + (position − run's position in the file)`, through the run of
+the reader's map that contains it; never in the exported file's frames. The
+recorder's frame index advances across `measured` and `not_sent` holes and
+not across `clock_estimate` and `unknown` ones, so across an unmeasured hole
+the capture's frame index is not a time axis.
+
+### Pairs
+
+Every play is paired with every capture, on every machine. `tried` is true
+when the play is `marked`, the capture was read and its rate is at least
+8000 Hz; otherwise `not_tried` says why, `play_not_marked`,
+`capture_failed` or `capture_rate_too_low`, and `channels` is empty. No
+clock reading decides whether a pair is tried.
+
+In a tried pair every channel of the capture is searched, by its layout name,
+for both of the play's markers, and reported on its own: channels of one
+device differ in what they carry and in delay. A processed channel that
+removes the played sound reports `not_found` beside raw channels that report
+`found`.
+
+For each of `start` and `end`:
+
+- `outcome`: `found`, `not_found`, `ambiguous` or `not_tried`.
+- `reason`: `null` when found; otherwise:
+  - `not_handed` (`not_tried`): the results show the marker was never handed
+    whole to the device: the play's `frames_handed` is not past its last
+    frame. It is not searched for.
+  - `below_threshold` (`not_found`): nothing scored at or above the threshold.
+  - `in_hole` (`not_found`): the instance the marker was attributed overlaps
+    a hole the reader filled.
+  - `instances_exceed_plays`, `count_mismatch`, `shared_across_roles`
+    (`ambiguous`): see *Attribution*.
+- `score`: the instance's `rho` when found; otherwise the largest `rho`
+  anywhere in the channel for that marker's code; `null` when not tried.
+- `midpoint_frame`: the capture frame of the marker's midpoint, fractional,
+  refined between frames; `null` unless found. The midpoint, not the first
+  frame, is reported because a rate offset does not move it.
+- `instances`: how many instances of the marker's code the channel holds;
+  `null` when not tried.
+
+And for the pair on that channel:
+
+- `ratio`: capture frames per source frame, `(end midpoint − start midpoint)
+  / (source frames between the two markers' midpoints in the kept copy)`.
+  `null` unless both markers are found and `drift_unmeasured` is `null`.
+- `drift_ppm`: `(ratio / (capture rate / source rate) − 1) · 10⁶`, in parts
+  per million. Positive means the capture counted more frames between the
+  markers than the nominal rates predict. One device playing and recording on
+  one clock is expected to show none.
+- `drift_unmeasured`: `null`, or why `ratio` and `drift_ppm` are `null` though
+  both markers were found: `capture_hole` (a `clock_estimate` or `unknown`
+  hole lies between the midpoints, so the capture's index skipped time) or
+  `underrun` (the play's results record an underrun between the markers, so
+  the source skipped time).
+- `offset_frames`: the capture frame at which frame 0 of the kept copy lies,
+  fractional: `start midpoint − r · (the start marker's midpoint in the kept
+  copy)`, `r` being `ratio` when it was measured and the nominal
+  `capture rate / source rate` otherwise. `null` unless the start marker is
+  found; it is never derived from the end marker alone.
+- `ratio_basis`: `measured` or `nominal`, which `r` was used. With `nominal`,
+  a 500 ppm offset between the two clocks moves `offset_frames` by about
+  0.4 ms.
+
+### Attribution
+
+For one capture channel and one code, the plays whose marker of that code is
+tried in the capture are matched against the instances of the code found, in
+capture order. No clock is read.
+
+| Plays | Instances | Outcome |
+|---|---|---|
+| one | none | `not_found`, `below_threshold` |
+| one | one | `found` |
+| one | more than one | `ambiguous`, `instances_exceed_plays`: something else sounded this marker |
+| several, all on one role | as many as plays | `found`: the k-th instance for the k-th play by play number, since one role plays its sources one at a time in the order they were started |
+| several | none | `not_found` for each |
+| several | any other count | `ambiguous` for each: `shared_across_roles` when the plays are on more than one role, else `count_mismatch` |
+
+An instance that overlaps a hole is `not_found`, `in_hole`.
+
+A marker not handed whole takes no part. One handed whole and then discarded
+at a cut does: whether it sounded is not something the run knows, and where
+other plays share its code each of them is then `ambiguous`,
+`count_mismatch`. **The remedy is one member per play that may sound in one
+capture**, on every role: a member used twice is attributed only when one
+role plays it and the capture holds every play of it.
+
+### Failures and the summary
+
+- `failures` lists every failure flat: `{"kind": "play", "play", "reason",
+  "detail"}`, `{"kind": "capture", "capture", "reason", "detail"}`, and
+  `{"kind": "marker", "play", "capture", "channel", "marker", "outcome",
+  "reason", "detail"}` for each marker `not_found` or `ambiguous`. A marker
+  `not_tried` is not a failure.
+- `summary`: `plays` and `captures` counted; `marked`, the plays whose state
+  is `marked`; `located`, the marked plays with both markers found on one
+  channel of at least one capture; `marker_failures`; `read_failures`, the
+  play and capture failures.
+- `lab align` exits 0 when `read_failures` is 0 and every marked play is
+  located, and 1 otherwise. A play and a capture that never overlapped in
+  time are tried and are `not_found`, which the report cannot tell from a
+  marker that sounded and was missed without reading a clock; a play located
+  in any one capture counts.
+
+### The statistic and its limits
+
+Each channel is band-passed to 500–3500 Hz (a windowed sinc of
+`round(0.016 · rate) | 1` taps under a Hann window, halves rounded away from
+zero), so hum, rumble and a microphone's offset do not count as energy, and
+correlated with the marker's complex template generated at the capture's own
+rate. Nothing is resampled. The score at each position is
+
+```
+rho = √2 · |correlation| / (‖template‖ · ‖band-passed channel over the template's length‖)
+```
+
+and 0 where that energy is below 10⁻⁹ of the channel's largest. `rho` is 1
+for a clean marker alone, and does not depend on the capture's level or the
+marker's; `rho²` is the share of the energy over the marker's half second
+that the marker accounts for. A position at or above the **threshold, 0.25**,
+is an instance; the strongest suppresses everything within one marker length
+either side.
+
+What that implies, on synthetic signals; **none of it has been measured on a
+played run**:
+
+- Another member's marker scores at most about 0.17, however loud. Noise,
+  level bursts and tones stay near 0.1.
+- A marker is found down to about 12 dB below the other sound in its band
+  over its own half second; below that it is `not_found`.
+- A clock offset between player and capture is tolerated inside one marker up
+  to about ±500 ppm, and measured between the two markers. A path that drifts
+  faster, or inserts or drops frames inside a marker, makes it `not_found`.
+- **How many plays may overlap.** Each member is searched for by its own code,
+  so attribution sets no limit; the score does. `n` markers of equal level
+  that overlap wholly each score `1/√n`: 0.71 for two, 0.58 for three, 0.50
+  for four, 0.35 for eight, and the threshold itself for sixteen. Sixteen is
+  where the rule meets the threshold, not a number of plays to plan for:
+  anything else in the band, the plays' own content included, lowers the
+  score further. Markers that overlap in part score higher. Past the limit
+  nothing is misattributed: each marker under the threshold is `not_found`
+  with the score seen.
+
+**Memory and disk.** `align` holds no array of a capture's length. Each
+channel is read from the exported file twice, block by block: once for its
+largest energy, which the 10⁻⁹ rule needs before any position is scored, and
+once to score every position, keeping only the positions at or above the
+threshold, their neighbours and the largest score. What its memory does grow
+with:
+
+- the number of codes searched for in one capture: one template and one
+  transformed response each, about 4 MB a code;
+- the number of positions at or above the threshold, a few for each marker
+  that sounded.
+
+Searching one channel of 2²² frames at 16 kHz for two codes peaks at about
+44 MB, the same as one of 2²⁰ frames. A channel of ten minutes at 16 kHz
+searched for eight codes took about 2.5 s where it was measured. The 4 GiB limit of the export is
+the one ceiling on a capture's length. The run's filesystem needs room for
+the largest capture's export, in the run's `.alignment.tmp/`.
+
+### A run still in progress, and older runs
+
+`align` locks nothing. On a run still recording, the manifest is whole at
+every instant and a capture still being written exports with an
+`unterminated` tail; the report describes the run so far. A run made before
+the harness recorded markers has no `marker` key in its source entries, and
+its plays are `no_marker_record`. A run made before the playback kind has no
+`sources` in its results; its captures are read as in any other run.
+
+## The marker
+
+A source can carry the harness's marker, so that `lab align` can find where
+it lies in a capture without any clock. `lab mark` writes one
+(`experiments.md`, *Marking a source*). Each definition is stated here under
+its identifier. A definition that a released harness has written into a run
+is never removed from this document; a later one is a new section beside it.
+
+### `gold-bpsk-1`
+
+Half a second of band-limited pseudo-noise: a binary code of 1023 chips,
+phase-keyed onto a 2 kHz carrier. A marked source carries two, one before its
+content and one after, with different codes. The family has 511 members;
+member `m` (0 to 510) uses code `2m` for its start marker and code `2m + 1`
+for its end marker.
+
+**The codes.** Two ten-stage shift registers, both starting all ones (the
+generators of the GPS C/A code):
+
+- `G1`: output is stage 10; the xor of stages 3 and 10 is shifted into stage 1.
+- `G2`: output is stage 10; the xor of stages 2, 3, 6, 8, 9 and 10 is shifted
+  into stage 1.
+- Each is stepped 1023 times. Code `s` (0 to 1021), chip `k` (0 to 1022):
+  `bit = G1[k] xor G2[(k + s) mod 1023]`; the chip `c_k` is `+1` for bit 0 and
+  `−1` for bit 1.
+- Check: code 1018 is GPS PRN 1, whose first ten bits are `1100100000`.
+
+**The waveform**, in continuous time `t` seconds from the marker's start, for
+`0 ≤ t ≤ 0.512`:
+
+```
+Tc   = 1/2000 s                                    one chip
+p(u) = cos²(π·u / (2·Tc))  for |u| < Tc, else 0     a Hann pulse two chips wide
+b(t) = Σ_k c_k · p(t − (k + 1)·Tc)                  k = 0 … 1022
+s(t) = 0.5 · b(t) · cos(2π · 2000 · t)              as a fraction of full scale
+```
+
+**Rounding.** Every `round` in this definition is to the nearest integer,
+with halves rounded away from zero.
+
+**At rate `R`**, the marker is `M = floor(0.512·R) + 1` frames; frame `n`
+holds `round(s(n/R) · 2^(bits − 1))` in the source's sample format, `bits`
+being 16 or 32, the same value on every channel. Its peak is half of full
+scale. A rate below 8000 Hz carries no marker: the marker's band, about 800
+to 3200 Hz, needs it.
+
+**A marked source**, made from `C` content frames at rate `R`:
+
+```
+lead     round(0.5·R)  frames of silence
+start    M frames, the member's start marker
+gap      round(0.25·R) frames of silence
+content  C frames, unchanged
+gap      round(0.25·R) frames of silence
+end      M frames, the member's end marker
+tail     round(0.25·R) frames of silence
+```
+
+Same rate, channels and sample format as the content. The lead keeps the
+start marker clear of what an output does to the first frames of a stream;
+the tail keeps the end marker clear of the close.
+
+**Recognition.** When a play is judged, the playback role reads the source's
+first `lead + M` and last `M + tail` frames. It takes the member from the
+signs of channel 0 at each start chip's centre, `t = (k + 1)·Tc`, where the
+neighbouring pulses are zero and the carrier is at a peak, and then
+regenerates both of that member's markers and compares them with the samples
+of both spans on every frame and every channel, to within one least
+significant bit. Any difference, a file too short, or no member matching:
+the source carries none (`marker: null`).
+
+Any change to this section changes the identifier's trailing number.
+
 ## A recorder left running
 
 The recorder runs in a session of its own, so a Ctrl-C at the runner's
@@ -512,6 +896,8 @@ capture is known to within milliseconds, not frames: the two streams are
 started independently, and nothing the device or ALSA reports ties a frame of
 one to a frame of the other. On a device that samples both on one clock the
 offset is constant across a play with no underrun; correlation finds it once.
+`lab align` is that correlation for a marked source: it reports the offset
+and the drift between the markers in `alignment.json`, reading no clock.
 
 Not measured by this harness: the offset to the frame by any means but
 correlation; the latency from the capture's trigger to its frame 0; whether

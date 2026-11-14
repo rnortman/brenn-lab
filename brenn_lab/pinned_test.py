@@ -18,3 +18,14 @@ def test_every_pinned_program_resolves_to_an_executable() -> None:
         assert os.path.isabs(path), program
         assert os.path.isfile(path), program
         assert os.access(path, os.X_OK), program
+
+
+def test_every_pinned_tool_resolves_to_an_executable() -> None:
+    found = pinned.runner_runfiles()
+    assert pinned.TOOLS.keys() == {"frame_log"}
+    assert not pinned.TOOLS.keys() & pinned.PROGRAMS.keys()
+    for tool, location in pinned.TOOLS.items():
+        path = pinned.locate(found, location)
+        assert path.is_absolute(), tool
+        assert path.is_file(), tool
+        assert os.access(path, os.X_OK), tool

@@ -11,6 +11,8 @@
                           (`captures/<role>/`: what a capture role recorded)
 <run>/logs/runner.log     the runner's own log
 <run>/logs/<role>/        the output of the programs each role calls
+<run>/alignment.json      written by `lab align` after the run, by a temporary
+                          file and a rename
 """
 
 import os
@@ -22,6 +24,39 @@ from brenn_lab.data import JsonObject, to_text
 
 LAYOUT = 1
 GITIGNORE = "*\n"
+
+
+def replace_json(run: Path, name: str, value: JsonObject) -> None:
+    """Write `value` as `<run>/<name>` whole: to `.<name>.tmp`, synced, then
+    renamed over it. Whatever stands under the temporary name is unlinked
+    first, a link and never its target, and the temporary file is then
+    created anew; a link that appears under the name in between makes this
+    raise, and no link is followed.
+    """
+    temporary = run / f".{name}.tmp"
+    temporary.unlink(missing_ok=True)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    with os.fdopen(fd, "w") as f:
+        f.write(to_text(value) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    temporary.replace(run / name)
+
+
+def resolve(run: Path, path: str) -> Path | None:
+    """The file that `path`, relative to the run, names, if it lies inside the
+    run; the inverse of `RunDir.in_run`.
+    """
+    if path == "" or Path(path).is_absolute():
+        return None
+    root = run.resolve()
+    try:
+        resolved = (root / path).resolve()
+    except ValueError:
+        return None
+    if resolved == root or not resolved.is_relative_to(root):
+        return None
+    return resolved
 
 
 class RunDir:
@@ -72,12 +107,7 @@ class RunDir:
         self._replace("results.json", results)
 
     def _replace(self, name: str, value: JsonObject) -> None:
-        temporary = self.path / f".{name}.tmp"
-        with temporary.open("w") as f:
-            f.write(to_text(value) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        temporary.replace(self.path / name)
+        replace_json(self.path, name, value)
 
     def open_journal(self) -> None:
         self._journal = (self.path / "journal.jsonl").open("x", buffering=1)

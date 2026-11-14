@@ -291,7 +291,12 @@ def test_a_kind_the_runner_has_never_seen(tmp_path: Path, toy: None) -> None:
     assert results["captures"] == []
     assert results["recorded"] == {"captures_started": 0, "captures_stopped": 0, "frames": 0}
     assert results["sources"] == []
-    assert results["played"] == {"plays_started": 0, "plays_completed": 0, "frames_handed": 0}
+    assert results["played"] == {
+        "plays_started": 0,
+        "plays_completed": 0,
+        "plays_marked": 0,
+        "frames_handed": 0,
+    }
 
     journal = [json.loads(t) for t in (out / "journal.jsonl").read_text().splitlines()]
     assert [e.get("command", e.get("event")) for e in journal] == [

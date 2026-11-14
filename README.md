@@ -29,12 +29,19 @@ manifest, a journal of every command, reply and event, and results.
   hours that only the lab configuration sets. A lab configuration may state
   that two roles sample on one device clock. Its audible-lane test plays
   through an attached reSpeaker Flex while the capture role records it.
+- **Alignment** finds where each play lies in each capture by the sound
+  alone, reading no clock. `lab mark` puts a marker before and after a
+  source; a play records the marker its source carries; `lab align` searches
+  a run's captures for its plays' markers and writes the offsets and drift
+  into the run directory. It has been tested on synthetic signals and has not
+  yet been measured on a played run.
 
-There is no alignment or run-validity checking yet, no output other than an
-ALSA card, and roles on other machines cannot be reached.
+There is no run-validity checking yet, no output other than an ALSA card, and
+roles on other machines cannot be reached.
 
 - `docs/reference/experiments.md`: the lab configuration, writing a script,
-  the capture and playback roles, the dry run and the run.
+  the capture and playback roles, the dry run and the run, marking a source
+  and aligning a run.
 - `docs/reference/run-directory.md`: what a run leaves behind, file by file
   and key by key.
 

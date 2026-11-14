@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from brenn_lab import runner
+from brenn_lab import marker, runner
 from brenn_lab.buildinfo import Revision
 from brenn_lab.data import encode_object
 from brenn_lab.playback import output
@@ -163,9 +163,11 @@ def test_play_and_record(tmp_path: Path, outputs: list[FakeOutput]) -> None:
     assert record["first"] == entry["first"]
     assert record["last"]["frames_handed"] == RATE // 2
     assert record["restored"] is True and record["failure"] is None
+    assert entry["source"]["marker"] is None and record["marker"] is None
     assert results["played"] == {
         "plays_started": 1,
         "plays_completed": 1,
+        "plays_marked": 0,
         "frames_handed": RATE // 2,
     }
     assert results["recorded"]["captures_started"] == 1
@@ -187,6 +189,37 @@ def test_play_and_record(tmp_path: Path, outputs: list[FakeOutput]) -> None:
     live = outputs[-1]
     assert bytes(live.streams[0].frames) == frames
     assert not live.attached
+
+
+MARKED = """\
+started = speaker.send(playback.Play(source="marked.wav", volume_mb=-3000))
+assert started.source.marker is not None and started.source.marker.member == 12
+lab.wait(1.5)
+speaker.send(playback.Play(source="clip.wav", volume_mb=-3000))
+lab.wait(0.5)
+"""
+
+
+def test_a_marked_play_and_an_unmarked_one(tmp_path: Path, outputs: list[FakeOutput]) -> None:
+    clip(tmp_path / "sources", "clip.wav", 0.1)
+    marked = marker.mark(tmp_path / "sources" / "clip.wav", tmp_path / "sources" / "marked.wav", 12)
+    assert isinstance(marked, marker.Marked)
+    carried = marked.marker
+    lab_path, script_path = lab(tmp_path), script(tmp_path, MARKED)
+
+    report = dry(lab_path, script_path)
+    assert report["problems"] == [], report
+
+    _, manifest, results = do_run(tmp_path, lab_path, script_path)
+    assert results["outcome"] == "completed", results["failure"]
+    marked, unmarked = manifest["roles"]["speaker"]["sources"]
+    assert marked["source"]["marker"] == encode_object(carried)
+    assert unmarked["source"]["marker"] is None
+    first, second = results["sources"]
+    assert first["marker"] == encode_object(carried) and second["marker"] is None
+    assert results["played"]["plays_marked"] == 1
+    assert results["played"]["plays_started"] == 2
+    assert results["usability"]["assessed"] is False
 
 
 LEFT = """\

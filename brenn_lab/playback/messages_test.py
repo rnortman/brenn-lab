@@ -22,6 +22,7 @@ from brenn_lab.data import (
     failure_of,
     loads,
 )
+from brenn_lab.marker import Carried, Span
 from brenn_lab.playback import messages as m
 from brenn_lab.sound import CardIdentity, Granted
 
@@ -49,6 +50,14 @@ SOURCE = m.Source(
     channels=2,
     sample_format="s16_le",
     peak_mb=-602,
+    marker=Carried(
+        definition="gold-bpsk-1",
+        member=3,
+        start_code=6,
+        end_code=7,
+        start=Span(frame=8000, frames=8193),
+        end=Span(frame=303807, frames=8193),
+    ),
 )
 OUTPUT = m.Output(kind="alsa", library=m.Library(name="libasound.so.2", version="1.2.14"))
 LEVEL = m.Control(
@@ -92,7 +101,7 @@ RESULT_BODIES: list[object] = [
         play=0,
         copy=None,
         first=None,
-        source=dataclasses.replace(SOURCE, peak_mb=None),
+        source=dataclasses.replace(SOURCE, peak_mb=None, marker=None),
     ),
     STOPPED,
     dataclasses.replace(STOPPED, last=None, unplayed_frames=320),

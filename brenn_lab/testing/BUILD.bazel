@@ -69,6 +69,17 @@ py_library(
     visibility = ["//brenn_lab:__subpackages__"],
 )
 
+py_library(
+    name = "scenes",
+    testonly = True,
+    srcs = ["scenes.py"],
+    visibility = ["//brenn_lab:__subpackages__"],
+    deps = [
+        "//brenn_lab",
+        "@pypi_lab//numpy",
+    ],
+)
+
 py_pytest_test(
     name = "signals_test",
     size = "small",
@@ -85,6 +96,13 @@ py_library(
     srcs = ["lab_driver.py"],
     visibility = ["//brenn_lab:__subpackages__"],
     deps = [":transcript_files"],
+)
+
+py_binary(
+    name = "export_stand_in",
+    testonly = True,
+    srcs = ["export_stand_in.py"],
+    visibility = ["//brenn_lab:__subpackages__"],
 )
 
 py_binary(

@@ -24,6 +24,7 @@ class _Play:
     play: int
     file: JsonObject | None = None
     source: JsonObject | None = None
+    marker: JsonValue = None
     frames: int | None = None
     ended: str | None = None
     stopped_by: str | None = None
@@ -48,6 +49,7 @@ class _Play:
             "play": self.play,
             "file": self.file,
             "source": self.source,
+            "marker": self.marker,
             "ended": self.ended,
             "stopped_by": self.stopped_by,
             "frames": self.frames,
@@ -95,6 +97,7 @@ class PlaybackAccount:
         record = self._play(started.play)
         record.file = file
         record.source = {"name": started.source.name, "sha256": started.source.sha256}
+        record.marker = encode_value(started.source.marker)
         record.frames = started.source.frames
         record.first = started.first
         entry = encode_object(started)
@@ -143,5 +146,6 @@ def totals(records: list[JsonObject]) -> JsonObject:
     return {
         "plays_started": len(records),
         "plays_completed": sum(1 for r in records if r["ended"] == "completed"),
+        "plays_marked": sum(1 for r in records if r["marker"] is not None),
         "frames_handed": frames,
     }
