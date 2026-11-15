@@ -200,6 +200,10 @@ fn the_stream_is_made_corked_at_0_db_unmuted_on_the_named_sink() {
     assert_eq!(stream["muted"], false);
     let state = b.instruct(json!({"op": "state"}));
     assert_eq!(state["streams"][0]["corked"], true);
+    assert_eq!(
+        state["streams"][0]["positions"],
+        json!(["front-left", "front-right"])
+    );
     // Set once made, as well as asked for at creation.
     assert_eq!(state["streams"][0]["volume_sets"], 1);
     assert_eq!(state["streams_made"], 1);

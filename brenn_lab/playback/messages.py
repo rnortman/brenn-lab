@@ -17,6 +17,8 @@ class Source:
     holds. `peak_mb` is the largest sample magnitude relative to full scale,
     rounded up; null for a source of silence. `marker` is the marker its
     frames carry, recognised from the samples; null when they carry none.
+    `marker_channels` is the channels that carry it, ascending and
+    zero-based; null exactly when `marker` is.
     """
 
     name: str
@@ -27,6 +29,7 @@ class Source:
     sample_format: str
     peak_mb: int | None
     marker: Carried | None
+    marker_channels: tuple[int, ...] | None
 
 
 @dataclass(frozen=True)

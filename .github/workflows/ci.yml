@@ -16,8 +16,6 @@ jobs:
   # Named for its role rather than its contents: the required-status-check rule
   # on the branch embeds this string, so renaming it later silently makes that
   # rule vacuous.
-  # TODO(owner-bootstrap-steps): the ruleset requiring this check is configured
-  # when the repository is first pushed.
   check:
     name: check
     runs-on: ubuntu-latest

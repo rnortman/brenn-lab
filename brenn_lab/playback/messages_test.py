@@ -58,6 +58,7 @@ SOURCE = m.Source(
         start=Span(frame=8000, frames=8193),
         end=Span(frame=303807, frames=8193),
     ),
+    marker_channels=(1,),
 )
 OUTPUT = m.Output(kind="alsa", library=m.Library(name="libasound.so.2", version="1.2.14"))
 LEVEL = m.Control(
@@ -115,7 +116,7 @@ RESULT_BODIES: list[object] = [
         play=0,
         copy=None,
         first=None,
-        source=dataclasses.replace(SOURCE, peak_mb=None, marker=None),
+        source=dataclasses.replace(SOURCE, peak_mb=None, marker=None, marker_channels=None),
     ),
     STOPPED,
     dataclasses.replace(STOPPED, last=None, unplayed_frames=320),

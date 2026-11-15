@@ -34,7 +34,7 @@ def read_wav(path: Path) -> tuple[int, int, str, array.array[int]]:
         return r.getframerate(), r.getnchannels(), sample_format, samples
 
 
-def recognised(path: Path) -> Carried | None:
+def recognised(path: Path) -> tuple[Carried, tuple[int, ...]] | None:
     rate, channels, sample_format, samples = read_wav(path)
     total = len(samples) // channels
     head = samples[: channels * marker.head_frames(rate)]
@@ -164,7 +164,8 @@ def test_mark_then_recognise(
     )
     assert carried.end.frame == first + frames + gap
     assert len(samples) // channels == carried.end.frame + m + gap
-    assert recognised(out) == carried
+    assert marked.marker_channels == tuple(range(channels))
+    assert recognised(out) == (carried, tuple(range(channels)))
 
 
 def test_a_carried_record_round_trips_through_the_codec(tmp_path: Path) -> None:
@@ -208,8 +209,9 @@ def test_a_sample_changed_by_one_is_still_the_marker(marked: Path) -> None:
 
 @pytest.mark.parametrize("which", ["start", "end"])
 def test_a_sample_changed_by_two_carries_none(marked: Path, which: str) -> None:
-    carried = recognised(marked)
-    assert carried is not None
+    found = recognised(marked)
+    assert found is not None
+    carried, _ = found
     span = carried.start if which == "start" else carried.end
     rewrite(marked, 2, span.frame + 4001, 0)
     assert recognised(marked) is None
@@ -222,6 +224,99 @@ def test_one_channel_altered_carries_none(marked: Path) -> None:
     marked.unlink()
     write_wav(marked, list(samples), channels, sample_format, rate)
     assert recognised(marked) is None
+
+
+@pytest.mark.parametrize(
+    ("channels", "carriers"),
+    [(1, (0,)), (4, (0,)), (4, (2,)), (6, (1, 4)), (6, (5, 3)), (3, (0, 1, 2))],
+)
+def test_a_marker_on_stated_channels_is_recognised_with_them(
+    tmp_path: Path, channels: int, carriers: tuple[int, ...]
+) -> None:
+    source = tmp_path / "in.wav"
+    write_wav(source, content(500, channels), channels, "s16_le", 16000)
+    out = tmp_path / "out.wav"
+    marked = marker.mark(source, out, 9, carriers)
+    assert isinstance(marked, Marked)
+    assert marked.marker_channels == tuple(sorted(carriers))
+    assert recognised(out) == (marked.marker, tuple(sorted(carriers)))
+
+
+def test_mark_on_stated_channels_writes_zeros_elsewhere_and_leaves_content(
+    tmp_path: Path,
+) -> None:
+    channels, carriers = 4, (1, 3)
+    source = tmp_path / "in.wav"
+    write_wav(source, content(300, channels), channels, "s32_le", 16000)
+    out = tmp_path / "out.wav"
+    marked = marker.mark(source, out, 2, carriers)
+    assert isinstance(marked, Marked)
+    _, _, _, samples = read_wav(out)
+    carried = marked.marker
+    spans: tuple[tuple[marker.Which, Span], ...] = (("start", carried.start), ("end", carried.end))
+    for which, span in spans:
+        expected = marker.frames(2, which, 16000, "s32_le")
+        for n in range(span.frames):
+            frame = samples[(span.frame + n) * channels : (span.frame + n + 1) * channels]
+            assert list(frame) == [expected[n] if c in carriers else 0 for c in range(channels)]
+    first = carried.start.frame + carried.start.frames + 4000
+    assert list(samples[first * channels : (first + 300) * channels]) == content(300, channels)
+
+
+@pytest.fixture
+def marked_on_two_of_four(tmp_path: Path) -> Path:
+    source = tmp_path / "in.wav"
+    write_wav(source, content(200, 4), 4, "s16_le", 16000)
+    out = tmp_path / "marked.wav"
+    assert isinstance(marker.mark(source, out, 7, (1, 2)), Marked)
+    return out
+
+
+@pytest.mark.parametrize("which", ["start", "end"])
+def test_a_silent_channel_with_one_sample_in_a_span_carries_none(
+    marked_on_two_of_four: Path, which: str
+) -> None:
+    found = recognised(marked_on_two_of_four)
+    assert found is not None
+    span = found[0].start if which == "start" else found[0].end
+    rewrite(marked_on_two_of_four, 1, span.frame + 1000, 3)
+    assert recognised(marked_on_two_of_four) is None
+
+
+def test_a_channel_marked_in_one_span_only_carries_none(marked_on_two_of_four: Path) -> None:
+    found = recognised(marked_on_two_of_four)
+    assert found is not None
+    end = found[0].end
+    rate, channels, sample_format, samples = read_wav(marked_on_two_of_four)
+    for n in range(end.frames):
+        samples[(end.frame + n) * channels + 2] = 0
+    marked_on_two_of_four.unlink()
+    write_wav(marked_on_two_of_four, list(samples), channels, sample_format, rate)
+    assert recognised(marked_on_two_of_four) is None
+
+
+def test_a_file_silent_on_every_channel_carries_none(tmp_path: Path) -> None:
+    path = tmp_path / "a.wav"
+    write_wav(path, [0] * 3 * 40000, 3, "s16_le", 16000)
+    assert recognised(path) is None
+
+
+@pytest.mark.parametrize(
+    ("carriers", "why"),
+    [
+        ((), "channel_range"),
+        ((4,), "channel_range"),
+        ((-1,), "channel_range"),
+        ((1, 1), "channel_repeated"),
+    ],
+)
+def test_mark_refuses_channels_it_cannot_write(
+    tmp_path: Path, carriers: tuple[int, ...], why: str
+) -> None:
+    source = tmp_path / "in.wav"
+    write_wav(source, [0] * 40, 4, "s16_le", 16000)
+    assert reason(marker.mark(source, tmp_path / "out.wav", 0, carriers)) == why
+    assert not (tmp_path / "out.wav").exists()
 
 
 def reason(result: object) -> str:

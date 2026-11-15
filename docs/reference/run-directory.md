@@ -406,7 +406,8 @@ later appears here too.
             "channels": 2, "sample_format": "s16_le", "peak_mb": -602,
             "marker": {"definition": "gold-bpsk-1", "member": 3, "start_code": 6, "end_code": 7,
                        "start": {"frame": 8000, "frames": 8193},
-                       "end": {"frame": 299807, "frames": 8193}}},
+                       "end": {"frame": 299807, "frames": 8193}},
+            "marker_channels": [0, 1]},
  "output": {"kind": "alsa", "library": {"name": "libasound.so.2", "version": "1.2.13"}},
  "device": {…as in a capture entry…},
  "granted": {"rate_hz": 16000, "channels": 2, "sample_format": "s16_le",
@@ -435,6 +436,11 @@ says what each field means.
   its length). `null` when the file carries none, which refuses nothing: an
   unmarked file, or a marked one altered since (normalised, resampled,
   trimmed). *The marker* below defines each identifier.
+- `source.marker_channels` is the channels of the file that carry the
+  marker, ascending and zero-based: every channel of a file marked by
+  `lab mark` without `--channels`, one channel of a file that sounds one
+  speaker. `null` exactly when `source.marker` is. Alignment reads
+  `source.marker` alone.
 - `level_mb` is the level at which a full-scale sample is played: the level
   control's volume plus the held controls', from the values read back. It is
   what the cap bounds. **The play's own peak level** is
@@ -1472,8 +1478,9 @@ with halves rounded away from zero.
 
 **At rate `R`**, the marker is `M = floor(0.512·R) + 1` frames; frame `n`
 holds `round(s(n/R) · 2^(bits − 1))` in the source's sample format, `bits`
-being 16 or 32, the same value on every channel. Its peak is half of full
-scale. A rate below 8000 Hz carries no marker: the marker's band, about 800
+being 16 or 32, the same value on every channel that carries it. At least
+one channel carries it, and every other channel is zero across the
+marker's frames. Its peak is half of full scale. A rate below 8000 Hz carries no marker: the marker's band, about 800
 to 3200 Hz, needs it.
 
 **A marked source**, made from `C` content frames at rate `R`:
@@ -1493,15 +1500,21 @@ start marker clear of what an output does to the first frames of a stream;
 the tail keeps the end marker clear of the close.
 
 **Recognition.** When a play is judged, the playback role reads the source's
-first `lead + M` and last `M + tail` frames. It takes the member from the
-signs of channel 0 at each start chip's centre, `t = (k + 1)·Tc`, where the
-neighbouring pulses are zero and the carrier is at a peak, and then
-regenerates both of that member's markers and compares them with the samples
-of both spans on every frame and every channel, to within one least
-significant bit. Any difference, a file too short, or no member matching:
-the source carries none (`marker: null`).
+first `lead + M` and last `M + tail` frames. A channel is silent when every
+sample of both marker spans is exactly zero. It takes the member from the
+signs of the lowest-numbered channel that is not silent at each start chip's
+centre, `t = (k + 1)·Tc`, where the neighbouring pulses are zero and the
+carrier is at a peak, and then regenerates both of that member's markers and
+compares them with the samples of both spans on every frame of every channel
+that is not silent, to within one least significant bit. Those channels are
+the ones that carry it (`marker_channels`). Every channel silent, any
+difference, a file too short, or no member matching: the source carries none
+(`marker: null`). A channel with dither or an offset across a span is not
+silent.
 
-Any change to this section changes the identifier's trailing number.
+A change to the marker's samples, or one after which a source this section
+recognises is no longer recognised or is given another record, changes the
+identifier's trailing number.
 
 ## A recorder left running
 

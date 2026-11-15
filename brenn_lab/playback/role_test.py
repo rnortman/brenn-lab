@@ -197,7 +197,7 @@ def test_a_play_to_its_end(tmp_path: Path) -> None:
     s = started(b.play())
     assert s.play == 1
     assert s.source.frames == 5600 and s.source.peak_mb == -602
-    assert s.source.marker is None
+    assert s.source.marker is None and s.source.marker_channels is None
     assert s.copy is not None and s.copy.machine == "bench"
     assert s.output.kind == "alsa" and s.output.library == LIBRARY
     assert s.device == CARD
@@ -1837,6 +1837,7 @@ def test_a_marked_source_is_played_with_its_marker_recorded(tmp_path: Path) -> N
     assert started(b.play("marked.wav", dry=True)).source.marker == carried
     s = started(b.play("marked.wav"))
     assert s.source.marker == carried
+    assert s.source.marker_channels == marked.marker_channels
     assert isinstance(b.wait_end(), Ended)
     assert s.copy is not None
     assert bytes(b.output.streams[-1].frames) == frames

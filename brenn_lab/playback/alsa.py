@@ -134,7 +134,6 @@ def library() -> Lib | Failure:
     with _load_lock:
         if _loaded is None:
             try:
-                # TODO(lanes-load-host-alsa-runtime)
                 _loaded = Lib(ctypes.CDLL(LIBRARY, use_errno=True))
             except OSError as e:
                 return Failure("alsa_missing", f"the host's {LIBRARY} could not be loaded: {e}")

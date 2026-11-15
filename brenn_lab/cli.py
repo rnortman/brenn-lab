@@ -109,6 +109,13 @@ def _parser() -> _Parser:
     mark.add_argument(
         "--member", required=True, type=int, help=f"the member, 0 to {marker.MEMBERS - 1}"
     )
+    mark.add_argument(
+        "--channels",
+        nargs="+",
+        type=int,
+        metavar="INDEX",
+        help="the zero-based channels that carry the marker; every channel when omitted",
+    )
     align = commands.add_parser(
         "align", help="find each marked play in each capture of a run", allow_abbrev=False
     )
@@ -246,7 +253,7 @@ def _assess_at_end(run: Path, reader: str, is_pinned: bool, harness: JsonObject)
 def _mark(args: argparse.Namespace) -> tuple[JsonObject, int]:
     """`mark`: the document and the exit status. Resolves nothing pinned."""
     source, out = _path(args.source), _path(args.out)
-    marked = marker.mark(source, out, args.member)
+    marked = marker.mark(source, out, args.member, args.channels)
     if isinstance(marked, Failure):
         return Refused([Problem("mark", marked.reason, marked.detail)]).report(), 2
     document: JsonObject = {
@@ -258,6 +265,7 @@ def _mark(args: argparse.Namespace) -> tuple[JsonObject, int]:
             "sample_format": marked.sample_format,
         },
         "marker": encode_object(marked.marker),
+        "marker_channels": list(marked.marker_channels),
     }
     return document, 0
 

@@ -224,21 +224,37 @@ fn format_of(name: &str) -> Result<SampleFormat, String> {
     }
 }
 
+/// The positions the stand-in knows, by the server's names for them.
+const POSITIONS: [(&str, ChannelPosition); 11] = [
+    ("mono", ChannelPosition::Mono),
+    ("front-left", ChannelPosition::FrontLeft),
+    ("front-right", ChannelPosition::FrontRight),
+    ("front-center", ChannelPosition::FrontCenter),
+    ("rear-left", ChannelPosition::RearLeft),
+    ("rear-right", ChannelPosition::RearRight),
+    ("lfe", ChannelPosition::Lfe),
+    ("side-left", ChannelPosition::SideLeft),
+    ("side-right", ChannelPosition::SideRight),
+    ("aux0", ChannelPosition::Aux0),
+    ("aux1", ChannelPosition::Aux1),
+];
+
 fn position_of(name: &str) -> Result<ChannelPosition, String> {
-    match name {
-        "mono" => Ok(ChannelPosition::Mono),
-        "front-left" => Ok(ChannelPosition::FrontLeft),
-        "front-right" => Ok(ChannelPosition::FrontRight),
-        "front-center" => Ok(ChannelPosition::FrontCenter),
-        "rear-left" => Ok(ChannelPosition::RearLeft),
-        "rear-right" => Ok(ChannelPosition::RearRight),
-        "lfe" => Ok(ChannelPosition::Lfe),
-        "side-left" => Ok(ChannelPosition::SideLeft),
-        "side-right" => Ok(ChannelPosition::SideRight),
-        "aux0" => Ok(ChannelPosition::Aux0),
-        "aux1" => Ok(ChannelPosition::Aux1),
-        _ => Err(format!("the stand-in knows no position {name}")),
-    }
+    POSITIONS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|&(_, p)| p)
+        .ok_or_else(|| format!("the stand-in knows no position {name}"))
+}
+
+/// A position by the server's name. A position the stand-in has no name for
+/// panics rather than be reported under a second spelling.
+fn name_of(position: ChannelPosition) -> &'static str {
+    POSITIONS
+        .iter()
+        .find(|&&(_, p)| p == position)
+        .map(|&(n, _)| n)
+        .unwrap_or_else(|| panic!("the stand-in has no name for position {position:?}"))
 }
 
 fn c_string(s: &str) -> Result<CString, String> {
@@ -805,6 +821,7 @@ impl State {
                 json!({
                     "channel": channel,
                     "sink": sink.map(|k| k.name.to_string_lossy()),
+                    "positions": (&s.map).into_iter().map(name_of).collect::<Vec<_>>(),
                     "volumes": raw(&s.volume),
                     "volume_sets": s.volume_sets,
                     "restore_props": s.restore_props,

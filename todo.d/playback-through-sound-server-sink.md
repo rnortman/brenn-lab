@@ -8,6 +8,6 @@ The desktop's session manager (WirePlumber) still holds a saved stream state und
 
 Until the server's end-of-play messages are measured, an underrun as a play's last write is sent is not on the play's record: the play ends `completed` with no underrun and its markers are assessed `expected`, though frames of the last write may not have sounded. Done for that part = such an underrun is on the record and a test holds it.
 
-A Bluetooth speaker has to be connected for the work and for its audible tests. The owner's question: may the work connect an already-paired speaker itself, or is connecting it the maintainer's step each time? Until the owner has answered, it is treated as the maintainer's step, and nothing else of the desktop's sound or Bluetooth state is changed.
+The work's audible tests need a Bluetooth speaker that is already connected. The work connects none, and changes nothing else of the desktop's sound or Bluetooth state.
 
-Done when the owner has answered, a playback role on a sound-server sink has played under its cap in an agreed window with an audible-lane test that holds each unmeasured item above, and the reference documents state what was measured.
+Done when a playback role on a sound-server sink has played under its cap in an agreed window with an audible-lane test that holds each unmeasured item above, and the reference documents state what was measured.

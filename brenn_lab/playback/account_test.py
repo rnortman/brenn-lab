@@ -39,6 +39,7 @@ STARTED = m.Started(
         sample_format="s16_le",
         peak_mb=-602,
         marker=None,
+        marker_channels=None,
     ),
     copy=Location(machine="bench", path="/runs/r/sources/speaker/0001.wav"),
     output=m.Output(kind="alsa", library=m.Library(name="libasound.so.2", version="1.2.14")),

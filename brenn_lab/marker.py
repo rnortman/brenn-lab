@@ -65,8 +65,8 @@ class Carried:
 
 @dataclass(frozen=True)
 class Marked:
-    """What `mark` read of the source, and the marker the file it wrote
-    carries.
+    """What `mark` read of the source, the marker the file it wrote carries,
+    and the channels that carry it, ascending and zero-based.
     """
 
     frames: int
@@ -74,6 +74,7 @@ class Marked:
     channels: int
     sample_format: str
     marker: Carried
+    marker_channels: tuple[int, ...]
 
 
 def _register(taps: tuple[int, ...]) -> tuple[int, ...]:
@@ -213,14 +214,18 @@ def recognise(
     channels: int,
     sample_format: str,
     total_frames: int,
-) -> Carried | None:
-    """The marker a file carries, from its samples alone, or None.
+) -> tuple[Carried, tuple[int, ...]] | None:
+    """The marker a file carries and the channels that carry it, ascending and
+    zero-based, from its samples alone; or None.
 
     `head` holds the file's first `head_frames(rate_hz)` frames and `tail` its
-    last `tail_frames(rate_hz)`, interleaved. The member is read from the
-    signs of channel 0 at the start marker's chip centres; both of that
-    member's markers are then regenerated, and every sample of both, on every
-    channel, must be within one least significant bit of the file's.
+    last `tail_frames(rate_hz)`, interleaved. A channel is silent when every
+    sample of both marker spans is zero. The member is read from the signs of
+    the lowest-numbered channel that is not silent at the start marker's chip
+    centres; both of that member's markers are then regenerated, and every
+    sample of both, on every channel that is not silent, must be within one
+    least significant bit of the file's. A file whose channels are all silent
+    carries none.
     """
     spans = layout(rate_hz, total_frames)
     if spans is None or sample_format not in TYPECODES or channels < 1:
@@ -230,38 +235,55 @@ def recognise(
         return None
     if len(tail) != channels * tail_frames(rate_hz):
         return None
+    m = length(rate_hz)
+    tail_first = total_frames - tail_frames(rate_hz)
+    regions: tuple[tuple[Which, Sequence[int], int], ...] = (
+        ("start", head, start.frame),
+        ("end", tail, end.frame - tail_first),
+    )
+    sounding = tuple(
+        c
+        for c in range(channels)
+        if any(
+            samples[(first + n) * channels + c] != 0
+            for _, samples, first in regions
+            for n in range(m)
+        )
+    )
+    if not sounding:
+        return None
+    lowest = sounding[0]
     signs = []
     for k in range(CHIPS):
         n = start.frame + _round((k + 1) * rate_hz / CHIP_HZ)
-        sample = head[n * channels]
+        sample = head[n * channels + lowest]
         if sample == 0:
             return None
         signs.append(sample < 0)
     member = _start_members().get(tuple(signs))
     if member is None:
         return None
-    tail_first = total_frames - tail_frames(rate_hz)
-    checks: tuple[tuple[Which, Sequence[int], int], ...] = (
-        ("start", head, start.frame),
-        ("end", tail, end.frame - tail_first),
-    )
-    for which, samples, first in checks:
+    for which, samples, first in regions:
         expected = frames(member, which, rate_hz, sample_format)
         for n, want in enumerate(expected):
             base = (first + n) * channels
-            for c in range(channels):
+            for c in sounding:
                 if abs(samples[base + c] - want) > 1:
                     return None
     start_code, end_code = codes(member)
-    return Carried(DEFINITION, member, start_code, end_code, start, end)
+    return Carried(DEFINITION, member, start_code, end_code, start, end), sounding
 
 
-def mark(source: Path, out: Path, member: int) -> Marked | Failure:
+def mark(
+    source: Path, out: Path, member: int, channels: Sequence[int] | None = None
+) -> Marked | Failure:
     """Write at `out` the source with `member`'s markers around it: lead,
     start marker, gap, the source's frames unchanged, gap, end marker, tail.
-    Same rate, channels and format as the source. Nothing is written on a
-    refusal: `member_range`, `unreadable`, `source_format`,
-    `rate_unsupported` or `out_exists`; nor is anything left when writing
+    Same rate, channels and format as the source. The markers are on
+    `channels`, zero-based, and zero on the source's other channels; None is
+    every channel. Nothing is written on a refusal: `member_range`,
+    `unreadable`, `source_format`, `rate_unsupported`, `channel_range`,
+    `channel_repeated` or `out_exists`; nor is anything left when writing
     `out` raises.
     """
     if not 0 <= member < MEMBERS:
@@ -269,14 +291,17 @@ def mark(source: Path, out: Path, member: int) -> Marked | Failure:
     read = _read_source(source)
     if isinstance(read, Failure):
         return read
-    rate_hz, channels, sample_format, content = read
+    rate_hz, count, sample_format, content = read
     if rate_hz < MIN_RATE_HZ:
         return Failure(
             "rate_unsupported",
             f"{source} is at {rate_hz} Hz; a marker needs at least {MIN_RATE_HZ} Hz",
         )
+    carriers = _carriers(channels, count, source)
+    if isinstance(carriers, Failure):
+        return carriers
     width = SAMPLE_BYTES[sample_format]
-    content_frames = len(content) // (width * channels)
+    content_frames = len(content) // (width * count)
     lead, gap, tail = _padding(rate_hz)
     m = length(rate_hz)
     total = lead + m + gap + content_frames + gap + m + tail
@@ -286,18 +311,18 @@ def mark(source: Path, out: Path, member: int) -> Marked | Failure:
         return Failure("out_exists", f"{out} already exists")
     try:
         with file, wave.open(file, "wb") as writer:
-            writer.setnchannels(channels)
+            writer.setnchannels(count)
             writer.setsampwidth(width)
             writer.setframerate(rate_hz)
             writer.setnframes(total)
             for part in (
-                bytes(width * channels * lead),
-                _interleaved(frames(member, "start", rate_hz, sample_format), channels),
-                bytes(width * channels * gap),
+                bytes(width * count * lead),
+                _interleaved(frames(member, "start", rate_hz, sample_format), count, carriers),
+                bytes(width * count * gap),
                 content,
-                bytes(width * channels * gap),
-                _interleaved(frames(member, "end", rate_hz, sample_format), channels),
-                bytes(width * channels * tail),
+                bytes(width * count * gap),
+                _interleaved(frames(member, "end", rate_hz, sample_format), count, carriers),
+                bytes(width * count * tail),
             ):
                 writer.writeframesraw(part)
     except BaseException:
@@ -307,13 +332,36 @@ def mark(source: Path, out: Path, member: int) -> Marked | Failure:
     assert spans is not None
     start_code, end_code = codes(member)
     carried = Carried(DEFINITION, member, start_code, end_code, *spans)
-    return Marked(content_frames, rate_hz, channels, sample_format, carried)
+    return Marked(content_frames, rate_hz, count, sample_format, carried, carriers)
 
 
-def _interleaved(channel: array.array[int], channels: int) -> bytes:
-    out = array.array(channel.typecode, [0]) * (len(channel) * channels)
-    for c in range(channels):
-        out[c::channels] = channel
+def _carriers(
+    channels: Sequence[int] | None, count: int, source: Path
+) -> tuple[int, ...] | Failure:
+    """The channels `mark` writes the marker on, ascending: `channels`, or
+    every one of the source's `count` when None.
+    """
+    if channels is None:
+        return tuple(range(count))
+    if not channels:
+        return Failure("channel_range", "no channel is named to carry the marker")
+    outside = [c for c in channels if not 0 <= c < count]
+    if outside:
+        return Failure(
+            "channel_range",
+            f"channel {outside[0]} is outside 0 to {count - 1}, the channels of {source}",
+        )
+    if len(set(channels)) != len(channels):
+        repeated = next(c for c in channels if channels.count(c) > 1)
+        return Failure("channel_repeated", f"channel {repeated} is named more than once")
+    return tuple(sorted(channels))
+
+
+def _interleaved(channel: array.array[int], count: int, carriers: tuple[int, ...]) -> bytes:
+    """`channel` on each of `carriers` of `count` channels, zero on the rest."""
+    out = array.array(channel.typecode, [0]) * (len(channel) * count)
+    for c in carriers:
+        out[c::count] = channel
     if sys.byteorder == "big":
         out.byteswap()
     return out.tobytes()

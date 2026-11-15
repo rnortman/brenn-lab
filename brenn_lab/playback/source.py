@@ -86,7 +86,8 @@ def judge(source_dir: str, name: str) -> Judged | Failure:
             hashing.rest()
     except OSError as e:
         return Failure("source_missing", f"{name!r} is not a readable file: {e.strerror}")
-    rate_hz, channels, sample_format, frames, peak, carried = read
+    rate_hz, channels, sample_format, frames, peak, recognised = read
+    carried, carriers = (None, None) if recognised is None else recognised
     bits = 8 * SAMPLE_BYTES[sample_format]
     return Judged(
         path,
@@ -99,6 +100,7 @@ def judge(source_dir: str, name: str) -> Judged | Failure:
             sample_format=sample_format,
             peak_mb=peak_mb(peak, bits),
             marker=carried,
+            marker_channels=carriers,
         ),
     )
 
@@ -198,10 +200,12 @@ def _sync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _read(file: _Hashing, name: str) -> tuple[int, int, str, int, int, Carried | None] | Failure:
-    """Rate, channels, format, frame count, peak magnitude and carried marker
-    of the WAV in `file`. The frames that may hold a marker are kept as they
-    pass and recognised once the whole file is read.
+def _read(
+    file: _Hashing, name: str
+) -> tuple[int, int, str, int, int, tuple[Carried, tuple[int, ...]] | None] | Failure:
+    """Rate, channels, format, frame count, peak magnitude, and the carried
+    marker with its channels, of the WAV in `file`. The frames that may hold a
+    marker are kept as they pass and recognised once the whole file is read.
     """
     try:
         with wave.open(file, "rb") as reader:  # type: ignore[call-overload]

@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from brenn_lab import marker
 from brenn_lab.data import (
     MONOTONIC,
     REALTIME,
@@ -102,18 +103,20 @@ def sinks(**speaker: JsonValue) -> list[JsonObject]:
 
 class Recording(PulseOutput):
     """A `PulseOutput` that keeps every set it made, with the stand-in's
-    state of the sink after it, and the stand-in's streams after each open.
+    state of sink `recorded` after it, and the stand-in's streams after each
+    open.
     """
 
-    def __init__(self, selector: str, server: StandInServer) -> None:
+    def __init__(self, selector: str, server: StandInServer, recorded: str) -> None:
         super().__init__(selector, client_program())
         self.server = server
+        self.recorded = recorded
         self.sets: list[tuple[tuple[Channel, ...], JsonObject]] = []
         self.opened: list[list[JsonObject]] = []
 
     def set(self, control: ControlName, channels: tuple[Channel, ...]) -> Failure | None:
         refused = super().set(control, channels)
-        self.sets.append((channels, self.server.sink_state(SPEAKER)))
+        self.sets.append((channels, self.server.sink_state(self.recorded)))
         return refused
 
     def open(
@@ -142,6 +145,7 @@ class Bench:
         selector: str = "desk speaker",
         cap_mb: int = -1800,
         described: list[JsonObject] | None = None,
+        recorded: str = SPEAKER,
     ) -> None:
         self.server = StandInServer(sinks() if described is None else described, speed)
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(self.server.runtime))
@@ -149,7 +153,7 @@ class Bench:
         self.sources = tmp / "sources"
         self.sources.mkdir(exist_ok=True)
         self.data = tmp / "run" / "talker"
-        self.output = Recording(selector, self.server)
+        self.output = Recording(selector, self.server, recorded)
         self.events: list[Event] = []
         self.started: list[ProcessStarted] = []
         self.ended = threading.Event()
@@ -648,6 +652,72 @@ def test_a_dry_play_makes_one_corked_stream_and_writes_and_sets_nothing(bench: B
     assert bench.server.frames() == b""
     bench.found_again()
     assert isinstance(bench.send(Stop(), dry=True), Stopped)
+
+
+SIX_SINK = "alsa_output.pci-0000_01_00.1.hdmi-surround"
+
+
+def test_a_six_channel_source_plays_in_wav_order_and_keeps_its_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A sink that declares its positions in a sink's own order, not a WAV's.
+    described = [
+        sink(
+            SIX_SINK,
+            "HDMI Surround 5.1",
+            channels=6,
+            positions=[
+                "front-left",
+                "front-right",
+                "rear-left",
+                "rear-right",
+                "front-center",
+                "lfe",
+            ],
+            volumes=[FOUND_RAW] * 6,
+        )
+    ]
+    bench = Bench(
+        tmp_path, monkeypatch, selector="hdmi surround", described=described, recorded=SIX_SINK
+    )
+    try:
+        # Channel k holds 1000 * (k + 1) on every frame of the content.
+        samples = array.array("h", [1000 * (i % 6 + 1) for i in range(6 * 1600)])
+        with wave.open(str(bench.sources / "raw.wav"), "wb") as w:
+            w.setnchannels(6)
+            w.setsampwidth(2)
+            w.setframerate(RATE)
+            w.writeframes(samples.tobytes())
+        marked = marker.mark(bench.sources / "raw.wav", bench.sources / "a.wav", 21, [2])
+        assert isinstance(marked, marker.Marked)
+        with wave.open(str(bench.sources / "a.wav"), "rb") as r:
+            frames = r.readframes(r.getnframes())
+
+        s = started(bench.play())
+        assert s.granted.channels == 6
+        assert s.source.channels == 6
+        assert s.source.marker == marked.marker
+        assert s.source.marker_channels == (2,)
+        [[stream]] = bench.output.opened
+        assert stream["positions"] == [
+            "front-left",
+            "front-right",
+            "front-center",
+            "lfe",
+            "rear-left",
+            "rear-right",
+        ]
+        assert isinstance(bench.wait_end(), Ended)
+        # The server was handed the file's frames byte for byte: index k of
+        # every frame is the source's channel k, under the stream's k-th
+        # position.
+        played = bench.server.frames()
+        assert played == frames
+        content = array.array("h", played)
+        first = marked.marker.start.frame + marked.marker.start.frames + round(marker.GAP_S * RATE)
+        assert list(content[6 * first : 6 * first + 6]) == [1000, 2000, 3000, 4000, 5000, 6000]
+    finally:
+        bench.server.close()
 
 
 def check_failure(

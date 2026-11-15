@@ -420,7 +420,8 @@ def test_mark_writes_a_marked_source(tmp_path: Path) -> None:
     done = start(["mark", "--source", str(source), "--out", str(out), "--member", "7"])
     assert done.returncode == 0, done.stderr
     got = document(done.stdout)
-    assert got.keys() == {"marked", "source", "marker"}
+    assert got.keys() == {"marked", "source", "marker", "marker_channels"}
+    assert got["marker_channels"] == [0, 1]
     assert got["marked"] == str(out)
     assert got["source"] == {
         "frames": 4000,
@@ -439,6 +440,34 @@ def test_mark_writes_a_marked_source(tmp_path: Path) -> None:
     assert spans is not None
     assert carried["start"] == {"frame": spans[0].frame, "frames": spans[0].frames}
     assert carried["end"] == {"frame": spans[1].frame, "frames": spans[1].frames}
+
+
+def test_mark_on_stated_channels(tmp_path: Path) -> None:
+    source, out = source_wav(tmp_path / "in.wav", channels=6), tmp_path / "out.wav"
+    args = ["--source", str(source), "--out", str(out), "--member", "7"]
+    done = start(["mark", *args, "--channels", "4", "2"])
+    assert done.returncode == 0, done.stderr
+    got = document(done.stdout)
+    assert got["marker_channels"] == [2, 4]
+    assert got["source"]["channels"] == 6
+    with wave.open(str(out), "rb") as w:
+        assert w.getnchannels() == 6
+
+
+@pytest.mark.parametrize(
+    ("channels", "why"),
+    [(["6"], "channel_range"), (["-1"], "channel_range"), (["1", "1"], "channel_repeated")],
+)
+def test_mark_refuses_channels_it_cannot_write(
+    tmp_path: Path, channels: list[str], why: str
+) -> None:
+    source, out = source_wav(tmp_path / "in.wav", channels=6), tmp_path / "out.wav"
+    args = ["--source", str(source), "--out", str(out), "--member", "7"]
+    done = start(["mark", *args, "--channels", *channels])
+    assert done.returncode == 2
+    problem = only_problem(document(done.stdout))
+    assert (problem["where"], problem["reason"]) == ("mark", why)
+    assert not out.exists()
 
 
 def test_mark_relative_paths_under_bazel_run(tmp_path: Path) -> None:

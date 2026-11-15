@@ -139,9 +139,8 @@ crate.from_specs(
     lockfile = "//tools/allthechanges:cargo-bazel-lock.json",
 )
 
-# TODO(brenn-bindings-revision-not-on-remote): brenn's Python binding will be
-# built from a brenn commit pinned here, which has to be on brenn's remote
-# first.
+# TODO(pin-brenn-python-binding): brenn's Python binding will be built from a
+# brenn commit pinned here.
 # TODO(off-machine-bus-role-needs-write-deadline): the brenn commit this file
 # will pin must have the attach client's write deadline before any role is
 # driven over the bus to a server on another machine.
@@ -153,8 +152,10 @@ crate.from_specs(
 # tools/brenn_pod/<program>. Unlike every other pin here they are fetched by
 # commit, with the host's git, and not by checksum. BRENN_POD_COMMIT is the one
 # statement of the revision; //tools/pins:pins_test holds every use of it.
-# TODO(pinned-brenn-pod-revision-not-on-main): the commit is the head of a
-# branch on brenn-pod's remote, not on its main.
+# TODO(pin-brenn-pod-bounded-read-and-log-writer): the commit is the head of a
+# branch of brenn-pod's public repository, not on its main; the pin moves to a
+# revision on its main or a tag whose recorder bounds its read of a device's
+# state and whose frame-log writes a capture frame log.
 BRENN_POD_COMMIT = "5a55610ba6e84fe484291ed83a442bccbfd853f2"
 
 BRENN_POD_REMOTE = "https://github.com/rnortman/brenn-pod.git"

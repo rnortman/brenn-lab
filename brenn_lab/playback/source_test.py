@@ -40,7 +40,7 @@ def test_a_16_bit_source(tmp_path: Path) -> None:
     assert s.sha256 == hashlib.sha256(raw).hexdigest()
     assert (s.frames, s.rate_hz, s.channels, s.sample_format) == (3, 16000, 2, "s16_le")
     assert s.peak_mb == -602
-    assert s.marker is None
+    assert s.marker is None and s.marker_channels is None
 
 
 @pytest.mark.parametrize(
@@ -64,6 +64,7 @@ def test_a_marked_source_carries_its_marker(
     carried = marked.marker
     s = judged(tmp_path, "marked.wav").source
     assert s.marker == carried
+    assert s.marker_channels == tuple(range(channels))
     assert s.frames == carried.end.frame + carried.end.frames + round(0.25 * rate)
 
 
@@ -76,6 +77,22 @@ def test_a_marked_source_altered_carries_none(tmp_path: Path) -> None:
     samples[-5000] += 3
     write_wav(tmp_path / "altered.wav", list(samples), 1, 2, 16000)
     assert judged(tmp_path, "altered.wav").source.marker is None
+
+
+def test_a_source_marked_on_one_channel_carries_it_there(tmp_path: Path) -> None:
+    channels = 6
+    write_wav(
+        tmp_path / "raw.wav",
+        [(i * 37) % 2001 - 1000 for i in range(400 * channels)],
+        channels,
+        2,
+        16000,
+    )
+    marked = marker.mark(tmp_path / "raw.wav", tmp_path / "marked.wav", 3, [4])
+    assert isinstance(marked, marker.Marked)
+    s = judged(tmp_path, "marked.wav").source
+    assert s.marker == marked.marker
+    assert s.marker_channels == (4,)
 
 
 def test_a_32_bit_source(tmp_path: Path) -> None:

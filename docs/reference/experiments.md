@@ -493,11 +493,13 @@ volume_mb = 0
   the role's, and the script is not blocked for the length of the source.
   - `play`: the role's play number in the run, from 1; 0 in a dry reply.
   - `source`: `{name, sha256, frames, rate_hz, channels, sample_format,
-    peak_mb, marker}`: the file as named, the hash of its bytes, what it
-    holds, and its largest sample magnitude relative to full scale, rounded
-    up; `peak_mb` is `null` for a source of silence. `marker` is the
-    harness's marker the file's samples carry, as `run-directory.md`, *A
-    source entry*, describes it, or `null`; a dry reply carries it too.
+    peak_mb, marker, marker_channels}`: the file as named, the hash of its
+    bytes, what it holds, and its largest sample magnitude relative to full
+    scale, rounded up; `peak_mb` is `null` for a source of silence. `marker`
+    is the harness's marker the file's samples carry, as `run-directory.md`,
+    *A source entry*, describes it, or `null`; `marker_channels` is the
+    channels that carry it, ascending and zero-based, `null` when `marker`
+    is. A dry reply carries both too.
   - `copy`: the `Location` of the kept copy; `null` in a dry reply.
   - `output`: `{kind, library: {name, version}}`: `"alsa"`, and the host's
     ALSA library with the version it reports; or `"pulse"`, and the pinned
@@ -1180,28 +1182,74 @@ volume; otherwise they are invisible to the role.
   a card's mixer. Two roles on one sink each hold its volume, so the second
   play's set ends the first with `controls_moved`.
 
-**Channels.** The stream's channel map for a source of `n` channels is the
-one PulseAudio's own client library gives a stream that states none: the
-default map of the largest count at or under `n` that has one, then `aux0`,
-`aux1`, … for the rest.
+**Channels.** A source is a WAV file, so the stream's channel map for a
+source of `n` channels is a WAV file's channel order: the order of the
+`WAVEFORMATEXTENSIBLE` channel-mask bits (front-left, front-right,
+front-center, LFE, back-left, back-right, …) for the usual layout of that
+count. A count with no one usual layout takes the map of the largest count
+under it that has one, then `aux0`, `aux1`, … for the rest. A surround pair
+of five and six channels is labelled rear, the name the sound server gives
+the pair of its 5.0 and 5.1 sinks.
 
-| Channels | Positions |
-|---|---|
-| 1 | mono |
-| 2 | front-left, front-right |
-| 3 | the 2-channel map, then aux0 |
-| 4 | the 2-channel map, then rear-left, rear-right |
-| 5 | the 4-channel map, then front-center |
-| 6 | the 5-channel map, then lfe |
-| 7 | the 6-channel map, then aux0 |
-| 8 | the 6-channel map, then side-left, side-right |
-| 9 to 32 | the 8-channel map, then aux0, aux1, … |
+| Channels | Positions | Layout |
+|---|---|---|
+| 1 | mono | |
+| 2 | front-left, front-right | stereo |
+| 3 | the 2-channel map, then aux0 | none in common |
+| 4 | front-left, front-right, rear-left, rear-right | quad |
+| 5 | front-left, front-right, front-center, rear-left, rear-right | 5.0 |
+| 6 | front-left, front-right, front-center, lfe, rear-left, rear-right | 5.1 |
+| 7 | the 6-channel map, then aux0 | none in common |
+| 8 | the 6-channel map, then side-left, side-right | 7.1 |
+| 9 to 32 | the 8-channel map, then aux0, aux1, … | |
 
-A source of more than 32 channels is `params`. The server remixes by
-position onto the sink, and what it does with a channel that has no place
-there (an `aux` one on a stereo sink) is the server's: it may drop it.
-Dropped is quieter than the cap judged, never louder. The role addresses no
-channel of the sink.
+A source of more than 32 channels is `params`. The file's own channel mask
+is not read: a file whose mask states another layout plays by index, channel
+`k` of the file under the stream's `k`-th position. No remix flag is set,
+and the role compares the stream's positions with the sink's nowhere. The
+server remixes by position onto the sink, and what it does with a channel
+that has no place there (an `aux` one on a stereo sink) is the server's: it
+may drop it. Dropped is quieter than the cap judged, never louder. The role
+addresses no channel of the sink.
+
+**A multi-channel sink.** A sink of more than two channels (an HDMI 5.1
+output, say) is a sink like any other: a source's channel `k` goes out under
+the position in row `n` of the table above, so on a six-channel stream index
+0 is front-left, 1 front-right, 2 front-center, 3 lfe, 4 rear-left and 5
+rear-right. To sound one speaker, a source carries its clip on that channel
+and silence on the rest. This makes such a file from a one-channel 16-bit
+clip, in the standard library, with the clip on front-center:
+
+```python
+import wave
+
+CHANNELS, INDEX = 6, 2  # index 2 of six: front-center
+
+with wave.open("clip.wav", "rb") as clip:  # one channel, 16-bit
+    rate, n = clip.getframerate(), clip.getnframes()
+    mono = clip.readframes(n)
+out = bytearray(2 * CHANNELS * n)
+out[2 * INDEX :: 2 * CHANNELS] = mono[0::2]
+out[2 * INDEX + 1 :: 2 * CHANNELS] = mono[1::2]
+with wave.open("six.wav", "wb") as six:
+    six.setnchannels(CHANNELS)
+    six.setsampwidth(2)
+    six.setframerate(rate)
+    six.writeframes(bytes(out))
+```
+
+Then mark it on that channel alone, so the play is recorded as marked and
+the marker sounds from the same speaker:
+
+```
+bazel run //brenn_lab:lab -- mark --source six.wav --out marked.wav --member 12 --channels 2
+```
+
+No play of more than two channels on a real sink has been made or measured.
+Whether a sound on one channel of the stream reaches exactly one speaker is
+the server's and the sink's: the server remixes by position, the role sets no
+flag against it, and nothing compares the stream's positions with the
+sink's. The first play on such a sink is the measurement.
 
 **The kept copy** is what the role handed to the sink. The server converts
 and remixes it on the way to the device, so it is not a copy of any device's
@@ -1466,6 +1514,30 @@ writes nothing there, whatever its script printed. A thread's raise in a
 completed run is in no document a program reads: `results.json` still says
 `completed`.
 
+### Before a run on a bench
+
+A run on real devices needs four things the lab file does not state. Each is
+listed with what is seen without it.
+
+1. **`XDG_RUNTIME_DIR` set in the shell that starts the runner**, when a role
+   plays on a sound-server sink. The role reaches the server at
+   `$XDG_RUNTIME_DIR/pulse/native`, and `lab` takes the environment of the
+   shell it is started from. A desktop session sets it; a remote shell or a
+   service may not. Without it: the role fails `no_server`.
+2. **The sound server leaving a card alone**, when a role records or plays
+   on that card: set the card's profile in the sound server to off. With the
+   card held by the sound server: the role fails `open`.
+3. **No firmware that configures the XVF3800 on a reSpeaker Flex's XIAO
+   ESP32 module**, when a role plays on the Flex's output. With such firmware
+   the board takes every frame written to it and plays nothing: the play
+   ends as if it sounded, and it is in no capture.
+4. **The sources themselves.** The names the examples play (`clip.wav`,
+   `primer.wav`, `marked.wav`, `talker.wav`, `own.wav`) are the
+   experimenter's own files in the role's `source_dir`; the tree ships none
+   of them. The speech clip in the tree,
+   `brenn_lab/testing/speech/arctic_a0001.wav`, serves as a source to mark
+   (*Marking a source*) and, unmarked, as a primer.
+
 ### Exit statuses
 
 | Status | `dry-run` | `run` |
@@ -1697,13 +1769,18 @@ stops cleanly.
 ## Marking a source
 
 ```
-bazel run //brenn_lab:lab -- mark --source <in.wav> --out <out.wav> --member <0…510>
+bazel run //brenn_lab:lab -- mark --source <in.wav> --out <out.wav> --member <0…510> [--channels <index> …]
 ```
 
 writes `<out.wav>`: the source with the harness's marker of member
 `--member` before its content and after it, with silence around both, at the
 source's own rate, channel count and sample format. The content's frames are
-unchanged. `run-directory.md`, *The marker*, defines the marker and the marked
+unchanged. `--channels` names the zero-based channels that carry the marker;
+across the marker's frames the others hold zero. Without it every channel
+carries the marker, so a marked multi-channel file sounds its marker on
+every channel: a source that sounds one speaker of a multi-channel sink is
+marked on that speaker's channel alone (*On a sound-server sink*, **A
+multi-channel sink**). `run-directory.md`, *The marker*, defines the marker and the marked
 file's layout. Play the marked file as any other source; the playback role
 still transforms nothing.
 
@@ -1725,16 +1802,18 @@ stdout is one JSON document:
 {"marked": "<out.wav>",
  "source": {"frames": 312000, "rate_hz": 16000, "channels": 2, "sample_format": "s16_le"},
  "marker": {"definition": "gold-bpsk-1", "member": 3, "start_code": 6, "end_code": 7,
-            "start": {"frame": 8000, "frames": 8193}, "end": {"frame": 336193, "frames": 8193}}}
+            "start": {"frame": 8000, "frames": 8193}, "end": {"frame": 336193, "frames": 8193}},
+ "marker_channels": [0, 1]}
 ```
 
 `source` describes the file given; `marker` is the record a play of the
-marked file will carry, its spans in the marked file's frames.
+marked file will carry, its spans in the marked file's frames, and
+`marker_channels` the channels that carry it, ascending.
 
 | Status | `mark` |
 |---|---|
 | 0 | the marked file was written |
-| 2 | refused, nothing written: `where` `mark`, `reason` `unreadable` (the source cannot be read), `source_format` (not a WAV of 16- or 32-bit integer PCM, as the playback role refuses it), `rate_unsupported` (below 8000 Hz), `member_range` (outside 0 to 510) or `out_exists`; or `where` `arguments`, `reason` `usage` |
+| 2 | refused, nothing written: `where` `mark`, `reason` `unreadable` (the source cannot be read), `source_format` (not a WAV of 16- or 32-bit integer PCM, as the playback role refuses it), `rate_unsupported` (below 8000 Hz), `member_range` (outside 0 to 510), `channel_range` (`--channels` names a channel the source does not have), `channel_repeated` (`--channels` names one channel twice) or `out_exists`; or `where` `arguments`, `reason` `usage` |
 | 3 | the command raised; nothing is left at `<out.wav>` |
 
 ## Aligning a run

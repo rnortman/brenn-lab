@@ -3,6 +3,9 @@
 
 use std::time::Duration;
 
+use ChannelPosition::{
+    FrontCenter, FrontLeft, FrontRight, Lfe, Mono, RearLeft, RearRight, SideLeft, SideRight,
+};
 use pulseaudio::protocol::{ChannelMap, ChannelPosition, SampleFormat, SampleSpec};
 
 /// The most channels the protocol carries in a stream.
@@ -43,35 +46,33 @@ const AUX: [ChannelPosition; 32] = [
     ChannelPosition::Aux31,
 ];
 
-/// The default ALSA-order map's positions, of which the maps for 2, 4, 5, 6
-/// and 8 channels are prefixes.
-const ALSA_ORDER: [ChannelPosition; 8] = [
-    ChannelPosition::FrontLeft,
-    ChannelPosition::FrontRight,
-    ChannelPosition::RearLeft,
-    ChannelPosition::RearRight,
-    ChannelPosition::FrontCenter,
-    ChannelPosition::Lfe,
-    ChannelPosition::SideLeft,
-    ChannelPosition::SideRight,
-];
-
-/// The positions of a stream of `channels` channels: the map PulseAudio's
-/// client library gives a stream that states none, the default ALSA-order
-/// map of the largest count at or under `channels` that has one, then
-/// `aux0`, `aux1`, … for the rest. None for no channels or more than the
-/// protocol carries.
+/// The positions of a stream of `channels` channels, in a WAV file's channel
+/// order: the order of the `WAVEFORMATEXTENSIBLE` channel-mask bits for the
+/// usual layout of each count that has one (stereo `0x3`, quad `0x33`, 5.0
+/// with its pair labelled rear, 5.1 `0x3F`, 7.1 `0x63F`). A count with no
+/// such layout takes the map of the largest count under it that has one,
+/// then `aux0`, `aux1`, … for the rest. None for no channels or more than
+/// the protocol carries.
 pub fn stream_positions(channels: usize) -> Option<Vec<ChannelPosition>> {
     if channels == 0 || channels > MAX_CHANNELS {
         return None;
     }
     let mut positions = match channels {
-        1 => vec![ChannelPosition::Mono],
-        2..=3 => ALSA_ORDER[..2].to_vec(),
-        4 => ALSA_ORDER[..4].to_vec(),
-        5 => ALSA_ORDER[..5].to_vec(),
-        6..=7 => ALSA_ORDER[..6].to_vec(),
-        _ => ALSA_ORDER.to_vec(),
+        1 => vec![Mono],
+        2..=3 => vec![FrontLeft, FrontRight],
+        4 => vec![FrontLeft, FrontRight, RearLeft, RearRight],
+        5 => vec![FrontLeft, FrontRight, FrontCenter, RearLeft, RearRight],
+        6..=7 => vec![FrontLeft, FrontRight, FrontCenter, Lfe, RearLeft, RearRight],
+        _ => vec![
+            FrontLeft,
+            FrontRight,
+            FrontCenter,
+            Lfe,
+            RearLeft,
+            RearRight,
+            SideLeft,
+            SideRight,
+        ],
     };
     let named = positions.len();
     positions.extend_from_slice(&AUX[..channels - named]);
@@ -214,44 +215,44 @@ mod tests {
             &[
                 "front-left",
                 "front-right",
+                "front-center",
                 "rear-left",
                 "rear-right",
-                "front-center",
             ],
             &[
                 "front-left",
                 "front-right",
-                "rear-left",
-                "rear-right",
                 "front-center",
                 "lfe",
+                "rear-left",
+                "rear-right",
             ],
             &[
                 "front-left",
                 "front-right",
-                "rear-left",
-                "rear-right",
                 "front-center",
                 "lfe",
+                "rear-left",
+                "rear-right",
                 "aux0",
             ],
             &[
                 "front-left",
                 "front-right",
-                "rear-left",
-                "rear-right",
                 "front-center",
                 "lfe",
+                "rear-left",
+                "rear-right",
                 "side-left",
                 "side-right",
             ],
             &[
                 "front-left",
                 "front-right",
-                "rear-left",
-                "rear-right",
                 "front-center",
                 "lfe",
+                "rear-left",
+                "rear-right",
                 "side-left",
                 "side-right",
                 "aux0",
@@ -267,6 +268,7 @@ mod tests {
         let got = names(32);
         assert_eq!(got.len(), 32);
         assert_eq!(got[..8], names(8)[..]);
+        assert_eq!(got[2..4], ["front-center", "lfe"]);
         assert_eq!(got[8], "aux0");
         assert_eq!(got[31], "aux23");
         assert_eq!(stream_map(32).expect("a map").num_channels(), 32);

@@ -30,8 +30,7 @@ spelled-out `bazel` invocation; there is no target that runs `pip`, `uv`,
   the build ships none. The pinned recorder loads it, and so does the
   runner's own interpreter when it hosts a playback role, through
   `brenn_lab/playback/alsa.py` and nowhere else. Nothing in `make check`
-  loads it (see Test lanes; the owner's question is
-  `lanes-load-host-alsa-runtime`). A playback role on a sound-server sink
+  loads it (see Test lanes). A playback role on a sound-server sink
   loads no host library: it runs the pinned sink client, which speaks the
   server's protocol itself.
 - For an XVF3800 the pinned recorder reads the chip's state over USB before
