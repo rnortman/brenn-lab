@@ -1,4 +1,4 @@
-# The run directory, layout 4
+# The run directory, layout 5
 
 A run directory is what one run of an experiment script leaves behind. This
 document says what every file and key in it means, so that a reader with the
@@ -22,8 +22,14 @@ start a run is in `experiments.md`.
   sources/<role>/<NNNN>.wav
   streams/<role>/…     reserved
   logs/runner.log
+  logs/lab.stdout.log
+  logs/lab.stderr.log
   logs/<role>/recorder-<NNNN>.stdout.jsonl
   logs/<role>/recorder-<NNNN>.stderr.log
+  logs/<role>/probe-<NNNN>.stdout.jsonl
+  logs/<role>/probe-<NNNN>.stderr.log
+  logs/<role>/pulse-client-<NNNN>.stdout.jsonl
+  logs/<role>/pulse-client-<NNNN>.stderr.log
 ```
 
 - `<NNNN>` counts a role's captures in a run, from `0001`. A role may capture
@@ -43,23 +49,58 @@ start a run is in `experiments.md`.
   source, the cap or quiet hours leaves nothing. A play that fails after
   that, at the open or at the controls, leaves a copy the manifest and
   results name nowhere, and its number is used.
-- `logs/<role>/recorder-<NNNN>.stdout.jsonl` is the recorder's stdout as it
-  printed it, one JSON event line per line. `…stderr.log` is its stderr. Both
-  are copied as they arrive. A device probe (the dry run's `check`) leaves no
-  log files.
-- `logs/runner.log` is the runner's own log. It has one line for every
-  recorder started, `<role>: capture <n>: pod-capture pid <pid>`. When a script
-  raised, it holds the traceback. When a role raised while handling a
-  command the script sent, it holds that traceback, whether or not the script
-  caught the error. A role that raised at the runner's own `release` is not
-  noted here: the runner reports it on stderr and exits with status 3. When
-  the run was told to stop, it says so.
+- **Every process's output is kept under `logs/`, and `results.json`'s
+  `logs` names every file there** (*`results.json`*), with the process, its
+  pid and the journal line that reported its start. Read the index, not the
+  file names. A child's output is copied as the program wrote it, as it
+  arrives; nothing is added to it. A log file exists only for a program that
+  started: one that could not be started leaves none.
+- `logs/<role>/recorder-<NNNN>.stdout.jsonl` is a capture's recorder's stdout
+  as it printed it, one JSON event line per line, `<NNNN>` the capture's
+  number. `…stderr.log` is its stderr.
+- `logs/<role>/probe-<NNNN>.stdout.jsonl` and `…stderr.log` are the
+  recorder's two streams for a `check` a script sent a capture role in a run,
+  numbered per role from `0001`. The probe's frame log is not kept. A dry
+  run, and a dry `check` in a run, keep nothing.
+- `logs/<role>/pulse-client-<NNNN>.stdout.jsonl` and `…stderr.log` are the
+  two streams of a sink client a playback role on a sound-server sink
+  started, numbered per role from `0001`: one client, and one pair, for each
+  `check` and each play that reached the output, refused or not.
+- `logs/lab.stdout.log` and `logs/lab.stderr.log` are what the `lab` process
+  wrote to its file descriptors 1 and 2 from before the script was loaded
+  until `results.json` was written: the script's `print`, a library's own
+  messages (libasound's, say), a program the script started. What the script
+  wrote while it was loaded is at their start. The closing assessment's own
+  output is not in them (*`assessment.json`*). Both exist in every run, empty
+  or not.
+- `logs/runner.log` is the runner's own log, created with the run. It is one
+  JSON object per line, `{"at": <clock reading>, "text": "…"}`, `at` the
+  runner's reading when the entry was written and `text` the entry, its
+  lines joined by `\n`. Its first entry is `run started`. It then holds, each
+  as an entry with its traceback where there is one:
+  - every raise of a role while handling a command, the script's or the
+    runner's `release`, whether or not the script caught it
+    (`role <r> raised on <command>:`);
+  - every raise of a thread of the `lab` process while roles existed
+    (`thread <name> raised:`), a play's thread among them;
+  - what left the script's `run` (`the script raised:`), or the note that it
+    ended on a role's failure, or that the run was told to stop;
+  - the closing assessment's raise (`the closing assessment raised:`), the
+    one entry written after `results.json`;
+  - `the run could not be finished:`, when the runner could not write its own
+    files and raised (*Runs with no `results.json`*).
+
+  If an entry cannot be written, a thread's traceback goes to
+  `logs/lab.stderr.log` instead; that is the one case in which a `log`
+  pointer at `runner.log` (*`results.json`*) names a file without the
+  traceback.
 - Nothing is written outside the run directory, and the directory must not
   exist before the run. A run never touches another run.
 - `alignment.json` and `assessment.json` are written after `results.json`:
   both by the run's closing assessment, which `lab run` makes at the end of a
   run that was not interrupted, and by `lab assess`; `alignment.json` alone by
-  `lab align`. None of them changes anything else in the directory (see
+  `lab align`. None of them changes anything else in the directory, but for
+  the entry the closing assessment's raise appends to `logs/runner.log` (see
   *`alignment.json`* and *`assessment.json`*). An `.assessment.json.tmp` file
   is an assessment left unfinished, and is not part of the record. A
   `.alignment.tmp/` directory or an
@@ -84,14 +125,16 @@ the file.
 ### Reserved names
 
 `streams/` (other recorded streams such as pose, status and faults, per role)
-is **reserved**. Its name and meaning are fixed by layout 4, and no code in
+is **reserved**. Its name and meaning are fixed by layout 5, and no code in
 this version creates it. The manifest's and the results' key `streams` is
 reserved the same way.
 
 ### The version rule
 
-`manifest.json`'s `layout` is 4 and `results.json`'s `schema` is 2;
-`alignment.json`'s and `assessment.json`'s `schema` are each 1. Adding a file
+`manifest.json`'s `layout` is 5 and `results.json`'s `schema` is 3;
+`alignment.json`'s `schema` is 1 and `assessment.json`'s is 2. A dry run's
+report and a refusal, which are not in a run directory, carry `schema` 2
+(`experiments.md`). Adding a file
 or a key changes none of them: a new role kind that writes under a reserved
 name, or adds a section of its own beside `captures`, a new key in an entry,
 a new file beside the others. A reader ignores the files, keys and sections
@@ -136,9 +179,13 @@ first mark of every play; from layout 3 it is `null` for a play with a stated
 start, whose first mark is in `results.json` and in the journal's line for
 the play's end. In layout 3 a capture entry held `device_firmware` and
 `device_configuration`, both always not read, where layout 4 carries the
-recorder's `device.usb` and `device_state`. `lab align` and `lab assess`
-refuse a run of layouts 1 to 3 by its number, as they refuse any layout but
-their own; such a run is read by the harness revision that wrote it.
+recorder's `device.usb` and `device_state`. In layout 4 `logs/runner.log` was
+free text with a line giving each recorder's pid, a role's raise at the
+runner's `release` left no `results.json`, and a play record's `restored` was
+never `null` (`results.json` `schema` 2, `assessment.json` `schema` 1).
+`lab align` and `lab assess` refuse a run of layouts 1 to 4 by its number, as
+they refuse any layout but their own; such a run is read by the harness
+revision that wrote it.
 
 ## Common shapes
 
@@ -178,12 +225,13 @@ own machine writes inside the run, so every capture is `in_run` true.
 
 ### Problems
 
-A run's `failure` is a problem: an object with exactly these seven keys, in
+A run's `failure` is a problem: an object with exactly these eight keys, in
 this order, `null` where a key does not apply.
 
 ```json
 {"where": "role", "reason": "no_card", "detail": "…", "role": "mic",
- "command": "capture.start", "key": null, "data": {…}}
+ "command": "capture.start", "key": null, "data": {…},
+ "log": {"machine": "bench", "path": "logs/mic/recorder-0001.stderr.log", "in_run": true}}
 ```
 
 - `where`: `role`, `script` or `runner` in a run's results.
@@ -194,6 +242,28 @@ this order, `null` where a key does not apply.
   `null` when an event carried the failure, and for anything else.
 - `key`: `null` in a run (it names a configuration key in a dry-run report).
 - `data`: what the reason carries (see *Failure data*); `{}` when nothing.
+- `log`: a pointer to the log behind the failure, or `null`. The reason
+  decides first:
+  - `role_raised`, `script_error` and `role_error` mean that Python raised in
+    the `lab` process: `logs/runner.log`, where the traceback is. A
+    `role_error` is reported by a play's thread, which then raises on; the
+    runner notes the thread's traceback, so the pointer is written before the
+    entry it points at, and the entry is there before the run ends. If the
+    runner could not write that entry, the traceback is in
+    `logs/lab.stderr.log` and the pointer names a file that lacks it.
+  - `interrupted` and `left_running`: `null`.
+  - any other failure, by reply or by event: the stderr log of the **last
+    process the role had started** when the failure reached the runner, or
+    `null` if it had started none. The journal's order says whether the
+    failure followed that process's start: find the `process.started` line
+    whose `seq` the log's entry in `logs` carries. For a failed
+    `capture.stop`, a recorder that died, and every failure of a play or a
+    `check` on a sink, the last process is the one that failed. For a
+    refusal that started nothing it is not: a `capture.start` refused with
+    `already_capturing` names the running recorder's stderr, and a play
+    refused for its source names the previous sink client's.
+
+  A dry run's report and a refusal carry `log` `null`: nothing was kept.
 
 ### What `dirty` means
 
@@ -442,6 +512,18 @@ message:
 - A reply to a role on a machine the runner cannot reach is the runner's own,
   journaled like any other.
 - A command a role raised on, instead of replying, has no reply line.
+- A role reports each program it starts with a `process.started` event, once
+  the program is spawned and before the role reads its output:
+  `{"process": "pod-capture", "pid": 4242, "logs": [{"stream": "stdout",
+  "location": {"machine": "bench", "path": "…"}}, {"stream": "stderr",
+  "location": {…}}]}`, `process` the program's name (`pod-capture` for a
+  recorder or a probe, `pulse-client` for a sink client), `pid` its process
+  id on the role's machine and `logs` where each stream is kept, `path`
+  absolute on that machine as the role wrote it (`results.json`'s `logs`
+  gives the same file as a pointer). The line's `at`
+  is when the program started; the role's command line before it is the
+  command it was handling. So a directory whose runner died still names
+  every child's logs, and a recorder's pid is read here.
 - **Order.** Lines are in the order the runner saw them. A role reports events
   from a thread of its own, so an event line may sit between a command's line
   and its reply's, and an event of a capture may come before the reply to the
@@ -462,12 +544,13 @@ message:
 
 Written last, to a temporary file and then renamed. **A run directory without
 `results.json` is a run that did not end under the runner's control**: the
-runner was killed, or it could not finish its own files. The journal and the
-manifest still stand. A `.results.json.tmp` or `.manifest.json.tmp` beside
-them is such a write left unfinished, and is not part of the record.
+runner was killed, or it could not finish its own files (*Runs with no
+`results.json`*). The journal and the manifest still stand. A
+`.results.json.tmp` or `.manifest.json.tmp` beside them is such a write left
+unfinished, and is not part of the record.
 
 ```json
-{"schema": 2, "run_id": "…",
+{"schema": 3, "run_id": "…",
  "outcome": "completed", "completed": true, "failure": null,
  "started": {…}, "ended": {…},
  "recorded": {"captures_started": 1, "captures_stopped": 1, "frames": 159680},
@@ -481,6 +564,14 @@ them is such a write left unfinished, and is not part of the record.
  "played": {"plays_started": 0, "plays_completed": 0, "plays_marked": 0, "frames_handed": 0},
  "sources": [],
  "roles": {"mic": {"kind": "capture", "commands": 3, "failures": []}},
+ "logs": [
+   {"role": null, "process": "lab", "pid": 4100, "stream": "log",
+    "file": {"machine": "bench", "path": "logs/runner.log", "in_run": true}, "seq": null},
+   {"role": null, "process": "lab", "pid": 4100, "stream": "stdout", "file": {…}, "seq": null},
+   {"role": null, "process": "lab", "pid": 4100, "stream": "stderr", "file": {…}, "seq": null},
+   {"role": "mic", "process": "pod-capture", "pid": 4242, "stream": "stdout",
+    "file": {"machine": "bench", "path": "logs/mic/recorder-0001.stdout.jsonl", "in_run": true}, "seq": 2},
+   {"role": "mic", "process": "pod-capture", "pid": 4242, "stream": "stderr", "file": {…}, "seq": 2}],
  "usability": {"assessed": false,
                "reason": "results.json states no usability assessment; the run's assessment, when one was made, is assessment.json",
                "see": "assessment.json"}}
@@ -501,12 +592,16 @@ them is such a write left unfinished, and is not part of the record.
     - a failure reply or a failure event: `where` `role`, with the role, its
       reason, detail and data, and `command` the command whose reply failed
       (`null` for an event);
-    - a role that raised while handling a command of the script's, instead
-      of replying: `where` `role`, `reason` `role_raised`, `detail`
-      `"<ExceptionType>: <message>"`, the role, and `command` the command;
+    - a role that raised while handling a command, instead of replying:
+      `where` `role`, `reason` `role_raised`, `detail`
+      `"<ExceptionType>: <message>"`, the role, and `command` the command,
+      the script's or the runner's `release` (every other role is still
+      released, and the run is assessed like any failed run);
       the traceback is in `logs/runner.log`. The runner gives this reason;
-      it is not the playback role's `role_error`, which the role reports in
-      a `playback.failed` event when a play's thread raised;
+      it is not `role_error`, which a role reports in a failure event when
+      a thread of its own raised (the playback role's `playback.failed`,
+      when a play's thread raised), and whose traceback is also in
+      `logs/runner.log`;
     - anything else that left the script's `run`: `where` `script`, `reason`
       `script_error`, `detail` `"<ExceptionType>: <message>"`, `role` `null`;
       the traceback is in `logs/runner.log`;
@@ -523,7 +618,11 @@ them is such a write left unfinished, and is not part of the record.
   has `frames` 0 or `captures_stopped` 0 here, whatever else it says.
 - `captures`: one record per capture whose start was reported, by role and
   number. A start that failed has no record.
-  - `ended`: `stopped` or `failed`.
+  - `ended`: `stopped` or `failed`. A capture whose end never reached the
+    run, because the role's clock or the runner's taking of its event raised,
+    is `failed` with the failure `end_not_reported`; the role's failures
+    (`roles.<r>.failures`, and its traceback in `logs/runner.log`) say what
+    was raised.
   - `stopped_by`: `script`, or `runner` when the runner stopped it at
     `release`; `null` for a failed capture.
   - `frames`, `gaps_reported`: the recorder's own counts at the stop. `null`
@@ -538,7 +637,7 @@ them is such a write left unfinished, and is not part of the record.
     and `gaps_reported` is 0. A gap of unknown length cannot be read as no
     gap.
   - `failure`: `null`, or the role's failure as it crossed the seam,
-    `{reason, detail, data}`. It is not a seven-key problem.
+    `{reason, detail, data}`. It is not an eight-key problem.
   - `end`: the recorder's reading at the stop; `null` for a failed capture.
 - `played` answers "did this run play anything": `plays_started` counts the
   plays whose start was reported, `plays_completed` those of them that ended
@@ -551,7 +650,8 @@ them is such a write left unfinished, and is not part of the record.
     file the script named. `marker`: the source entry's `source.marker`, the
     same object or `null`.
   - `ended`: `completed` (the source was handed over whole and the device
-    played its buffer out), `stopped` or `failed`.
+    played its buffer out), `stopped` or `failed`. A play whose end never
+    reached the run is `failed` with `end_not_reported`, as for a capture.
   - `stopped_by`: `script`, or `runner` when the runner cut the play at
     `release`; `null` otherwise.
   - `frames`: the kept copy's frames. `frames_handed`: how many of them were
@@ -599,18 +699,43 @@ them is such a write left unfinished, and is not part of the record.
     mark lay. Both readings are the role's own, on one machine. `null` for a
     play with no stated start or that handed no frame.
   - `restored`: whether the role put every control back as found
-    (`experiments.md`, *The cap*, says what false means).
+    (`experiments.md`, *The cap*, says what false means). `null`, not
+    reported, only in a record whose failure is `end_not_reported`: the
+    role did attempt the restoration, and its raise, noted in
+    `logs/runner.log`, says whether every control was put back.
   - `failure`: `null`, or the role's failure as it crossed the seam.
 - `roles.<r>`:
   - `commands`: every command the role was sent, the runner's `release`
     included: the number of that role's command lines in the journal.
   - `failures`: every failure of the role, in order, first or not.
-    `{"command": "<name>", "reason", "detail", "data"}` for a failure reply,
-    `{"event": "<name>", "reason", "detail", "data"}` for a failure event,
-    `{"command": "<name>", "reason": "role_raised", "detail", "data": {}}`
-    for a command the role raised on. A
+    `{"command": "<name>", "reason", "detail", "data", "log"}` for a failure
+    reply, `{"event": "<name>", "reason", "detail", "data", "log"}` for a
+    failure event, `{"command": "<name>", "reason": "role_raised", "detail",
+    "data": {}, "log"}` for a command the role raised on, the runner's
+    `release` included. `log` is the problem's (*Problems*). A
     capture that dies unasked and is then stopped by the script has two
     entries: the event's and the stop's reply.
+- `logs`: every log the run keeps, one entry per stream, in the order the
+  processes started, the `lab` process first.
+  - `role`: the role that started the process; `null` for the `lab`
+    process.
+  - `process`: `lab`, or the program's name as its `process.started` line
+    gives it (`pod-capture`, `pulse-client`).
+  - `pid`: the process id, on the file's machine.
+  - `stream`: `stdout` or `stderr`; `log` for `logs/runner.log`.
+  - `file`: a pointer (*Pointers*). A log a role on another machine wrote and
+    did not bring over is `in_run` false.
+  - `seq`: the `seq` of the journal's `process.started` line that named the
+    file; `null` for the `lab` process. That line's `at` is when the process
+    started.
+
+  The `lab` process's three, `logs/runner.log`, `logs/lab.stdout.log` and
+  `logs/lab.stderr.log`, are listed in every run. The in-run pointers are
+  exactly the files under `logs/`, with one exception: a process whose
+  `process.started` the runner could not take is killed by its role, and
+  its two files stay under `logs/` named by no entry, since the report that
+  would have named them is what failed. Such a run has that role's
+  `role_raised`, its traceback in `logs/runner.log` saying what was raised.
 - `usability`: `assessed` is false: this file states no assessment of the
   run's usability. `results.json` is the runner's own account, written once.
   `see` names the file that does, `assessment.json` (*`assessment.json`*),
@@ -636,6 +761,7 @@ described in `experiments.md`, *Failure reasons*.
 | `unreachable` | `{machine}`: the role's machine |
 | `not_configured`, `kind_mismatch` | empty |
 | `script_error`, `role_raised`, `left_running`, `interrupted` | empty |
+| `end_not_reported` (a capture's or a play's record only, given by the runner) | empty |
 
 A playback role's reasons carry their own data. Where a name is also one of
 the capture kind's, this table holds for a playback role's failure:
@@ -671,6 +797,21 @@ On a sink (`output = "pulse"`) the reasons the sink output names carry:
 
 After `write_stalled` the frame log's completeness was not established;
 brenn-pod's `frame-log` tool is the reader that can say more.
+
+### Runs with no `results.json`
+
+A run has no `results.json` when the runner was killed, or when it could not
+write its own files (a journal line, a note, the manifest, the results);
+`lab run` then exits with status 3. Such a directory holds:
+
+- `manifest.json` and `journal.jsonl`, whose `process.started` lines name
+  every child's logs;
+- the `lab` process's three logs at their fixed names, `logs/runner.log`,
+  `logs/lab.stdout.log` and `logs/lab.stderr.log`, complete to the last line
+  written;
+- `logs/runner.log` ending in `the run could not be finished:` and the
+  traceback when the runner raised, and without it when the runner was
+  killed, or when that entry could not be written either.
 
 ## `alignment.json`
 
@@ -992,7 +1133,7 @@ the largest capture's export, in the run's `.alignment.tmp/`.
 every instant and a capture still being written exports with an
 `unterminated` tail; the report describes the run so far. A source entry
 with no `marker` key is `no_marker_record`, and results with no `sources`
-are read as a run with no play. A run of layouts 1 to 3 is refused (*The
+are read as a run with no play. A run of layouts 1 to 4 is refused (*The
 version rule*).
 
 ## `assessment.json`
@@ -1004,7 +1145,12 @@ alignment's pass with a measurement attached: each capture is exported once,
 every channel is measured while the export stands, the captures are searched
 for the plays' markers, and the pass writes `alignment.json` and then
 `assessment.json`, each to its `.<name>.tmp`, synced and renamed. Nothing else
-in the run changes. No `assessment.json` means the run was not assessed.
+in the run changes, but for one entry: when the closing assessment `lab run`
+makes raises, its traceback is appended to `logs/runner.log` as well as
+printed. What the `lab` process writes while it assesses, and the reader's
+stderr when the reader succeeds, are kept nowhere: the assessment is a
+reading of a finished run, which `lab assess` can make again at any time. No
+`assessment.json` means the run was not assessed.
 
 The refusals are alignment's (*`alignment.json`*), with one addition:
 `unreadable` also covers a manifest or results holding a key the assessment
@@ -1014,7 +1160,7 @@ and an existing `alignment.json` stays as it was. Such a run can still be
 aligned by `lab align`, which does not read that key.
 
 ```json
-{"schema": 1,
+{"schema": 2,
  "run_id": "…",
  "harness": {"repository": "brenn-lab", "commit": "…", "dirty": false, "source": "git"},
  "written": "2026-11-14T09:12:00-05:00",
@@ -1092,7 +1238,7 @@ length, `null` when it is not known, never 0 for unknown.
 | `play_failed` | the play's record says `ended` `failed` | the record's `failure` |
 | `play_cut_by_runner` | the play ended `stopped` with `stopped_by` `runner` | `{frames_handed, unplayed_frames}` |
 | `play_underrun` | one per underrun, at its frame of the kept copy | `{}` |
-| `controls_not_restored` | the play's `restored` is false | `{}` |
+| `controls_not_restored` | the play's `restored` is false; a `null` gives none, its play's `play_failed` already saying the end was not reported | `{}` |
 | `kept_copy_unusable` | alignment's state of the play is `failed` with `copy_missing` or `copy_differs` | `{reason}` |
 | `play_not_located` | the play is marked, a pair with it was tried, its start marker is `expected`, and `found_in` is empty | `{start, end, pairs_tried, outcomes}`: the two markers' words, the pairs tried, and the count of each marker outcome alignment reported for the play |
 
@@ -1235,7 +1381,8 @@ One entry per source entry of every playback role:
 - `record`: the play's record in `results.json`, `underruns` as a count;
   `null` when there is none. Its `unplayed_frames` means what the results say
   it means for the play's output kind, and is `null` for a kind this harness
-  does not know. `asked_start` and `started_after_us` are copied from the
+  does not know. Its `restored` is `null` when the results' is, for a play
+  whose end was not reported. `asked_start` and `started_after_us` are copied from the
   results record: the start the script stated, and how far after it the
   play's first mark lay. No finding and no threshold rests on them, and the
   assessment reads no clock to give them.
@@ -1268,18 +1415,13 @@ so far, and a capture being written is `log_not_ended`. A run with no
 `results.json`, including one whose runner died while writing it, is
 assessed in part: `run_not_completed` and `results`/`no_results`, every
 capture read and measured, loss stated from the reader alone. A run of
-layouts 1 to 3 is refused by its number (*The version rule*). A `manifest.json` or
+layouts 1 to 4 is refused by its number (*The version rule*). A `manifest.json` or
 `results.json` that is present and damaged is refused, as above; a source
 entry with no `output.kind`, and a capture entry with no `device_state` or
 one whose `outcome` is not `not_attempted`, `unavailable` or `read` (or whose
 `why` or `detail` is not a string when it is not `read`), are such damage,
 refused before any capture is read, though `lab align`, which does not read
-those keys, still aligns the run. One `results.json` the runner writes itself is refused the same way.
-When a capture's recorder reader failed, or a play's end could not be
-reported, and a command of the script's raised that error, the run
-ends `failed` and the record keeps `ended` `null`, a play's `restored` too;
-the run is not assessed
-(`errhandling-assessment-refuses-runner-written-null-ended` in the tracker).
+those keys, still aligns the run.
 
 If `assess` is killed between its two writes, `alignment.json` is new and
 `assessment.json` is the previous one; the new `alignment.json`'s `replaces`
@@ -1367,8 +1509,9 @@ The recorder runs in a session of its own, so a Ctrl-C at the runner's
 terminal reaches the runner alone, and the runner stops every capture at the
 end of a run. If the runner itself is killed outright (SIGKILL, a power
 loss), the recorder keeps recording and keeps the device, and the next start
-on that device fails with `open`. Find its pid in `logs/runner.log` and send
-it SIGTERM. It then stops cleanly and finishes its frame log.
+on that device fails with `open`. Find its pid in the journal's
+`process.started` line that names its logs (*`journal.jsonl`*) and send it
+SIGTERM. It then stops cleanly and finishes its frame log.
 
 ## The same device played and recorded
 

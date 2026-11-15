@@ -36,6 +36,7 @@ was started in, and a run directory inside the workspace is refused.
 """
 
 import argparse
+import io
 import os
 import signal
 import sys
@@ -49,7 +50,7 @@ from python.runfiles import runfiles
 if TYPE_CHECKING:
     from _typeshed import SupportsWrite
 
-from brenn_lab import buildinfo, marker, pinned, runner
+from brenn_lab import buildinfo, marker, pinned, rundir, runner
 from brenn_lab.data import Failure, JsonObject, encode_object, to_text
 from brenn_lab.runner import Problem, Refused
 
@@ -179,7 +180,7 @@ def _experiment(args: argparse.Namespace) -> tuple[JsonObject, int]:
     def assess_run() -> JsonObject:
         return _assess_at_end(run, reader, is_pinned, harness.encode())
 
-    result["usability"] = closing_assessment(str(result["outcome"]), assess_run)
+    result["usability"] = closing_assessment(str(result["outcome"]), assess_run, run, args.machine)
     return result, 0 if result["completed"] is True else 1
 
 
@@ -187,14 +188,17 @@ def _not_assessed(reason: str, detail: str) -> JsonObject:
     return {"answer": "not_assessed", "reason": reason, "detail": detail}
 
 
-def closing_assessment(outcome: str, assess: Callable[[], JsonObject]) -> JsonObject:
-    """The pointer's `usability` for a run whose results are written: what
-    `assess` returns, or why no assessment was made. A run that was
-    interrupted is not assessed. For the length of `assess`, SIGTERM raises
-    `KeyboardInterrupt` as SIGINT does, so that either signal ends the
+def closing_assessment(
+    outcome: str, assess: Callable[[], JsonObject], run: Path, machine: str
+) -> JsonObject:
+    """The pointer's `usability` for the run in `run`, whose results are
+    written: what `assess` returns, or why no assessment was made. A run that
+    was interrupted is not assessed. For the length of `assess`, SIGTERM
+    raises `KeyboardInterrupt` as SIGINT does, so that either signal ends the
     assessment and leaves the run's pointer and exit status; the handler found
-    before is put back afterwards. An `Exception` from `assess` is printed on
-    stderr and named in the pointer.
+    before is put back afterwards. An `Exception` from `assess` is noted in
+    the run's `logs/runner.log`, timed by `machine`'s clock, printed on
+    stderr, and named in the pointer.
     """
     if outcome == "interrupted":
         return _not_assessed(
@@ -209,6 +213,16 @@ def closing_assessment(outcome: str, assess: Callable[[], JsonObject]) -> JsonOb
         )
     except Exception as e:
         traceback.print_exc()
+        try:
+            rundir.note(
+                run,
+                machine,
+                "the closing assessment raised:\n" + "".join(traceback.format_exception(e)),
+            )
+        except Exception:
+            # The run's exit status is its own whatever the assessment did;
+            # the note that could not be written is on stderr instead.
+            traceback.print_exc()
         return _not_assessed("raised", f"{type(e).__name__}: {e}")
     finally:
         signal.signal(signal.SIGTERM, previous)
@@ -306,6 +320,10 @@ def _emit(document: JsonObject) -> None:
 
 
 def main(argv: list[str]) -> int:
+    # Each line a script prints reaches the run's log as it is printed. A
+    # stdout that is not a text file wrapper buffers as its owner chose.
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
     try:
         args = _parser().parse_args(argv)
     except _Usage as e:

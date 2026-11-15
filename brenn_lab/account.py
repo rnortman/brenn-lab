@@ -6,10 +6,20 @@ whose code it ran.
 from collections.abc import Callable
 from typing import Protocol
 
-from brenn_lab.data import Event, JsonObject, Location, Reply
+from brenn_lab.data import Event, Failure, JsonObject, Location, Reply
 
 type Pointer = Callable[[Location], JsonObject]
 """The run's name for a file a role wrote."""
+
+
+def end_not_reported(what: str) -> Failure:
+    """The failure of a record whose end never reached the run, given once
+    every role is released: nothing is running, so its end was lost.
+    """
+    return Failure(
+        "end_not_reported",
+        f"no end of the {what} reached the run; the role's failures say what was raised",
+    )
 
 
 class Account(Protocol):
@@ -31,7 +41,10 @@ class Account(Protocol):
         ...
 
     def records(self) -> list[JsonObject]:
-        """The role's records in the results, in order."""
+        """The role's records in the results, in order. Called once every
+        role is released, so a record with no end is given `ended` `failed`
+        and the failure `end_not_reported`.
+        """
         ...
 
     def repositories(self) -> list[JsonObject]:

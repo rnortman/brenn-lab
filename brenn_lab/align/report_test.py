@@ -14,6 +14,7 @@ import pytest
 from brenn_lab.align import capture, report
 from brenn_lab.data import Failure, JsonObject
 from brenn_lab.marker import Carried
+from brenn_lab.rundir import LAYOUT
 from brenn_lab.testing import scenes
 from brenn_lab.testing.scenes import Capture, Extra, Loss, Play
 
@@ -634,6 +635,7 @@ def test_a_run_that_cannot_be_written_is_refused_and_unchanged(
         ("layout_1", "layout"),
         ("layout_2", "layout"),
         ("layout_3", "layout"),
+        ("layout_4", "layout"),
         ("malformed", "unreadable"),
     ],
 )
@@ -647,7 +649,7 @@ def test_a_run_that_cannot_be_read_is_refused(tmp_path: Path, setup: str, reason
         layout = int(setup.removeprefix("layout_"))
         (run / "manifest.json").write_text(json.dumps({"layout": layout, "roles": {}}))
     elif setup == "malformed":
-        (run / "manifest.json").write_text(json.dumps({"layout": 4, "roles": {"r": {}}}))
+        (run / "manifest.json").write_text(json.dumps({"layout": LAYOUT, "roles": {"r": {}}}))
     refused = report.align(run, READER, True, HARNESS)
     assert isinstance(refused, Failure)
     assert refused.reason == reason

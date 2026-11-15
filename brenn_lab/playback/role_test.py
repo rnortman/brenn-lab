@@ -44,7 +44,7 @@ from brenn_lab.playback.messages import (
     Underrun,
     VolumeRange,
 )
-from brenn_lab.playback.output import Attached, ControlName
+from brenn_lab.playback.output import Attached, ControlName, Keeping
 from brenn_lab.playback.role import PlaybackRole
 from brenn_lab.testing.fake_output import CARD, LIBRARY, Armable, FakeControl, FakeOutput
 
@@ -114,7 +114,7 @@ class Bench:
             device,
             self.output,
             self._sink,
-            Place(self.data, tmp / "logs" / name, lambda _: None),
+            Place(self.data, tmp / "logs" / name),
             clock=self._clock,
             local_now=lambda: self.local,
         )
@@ -297,9 +297,9 @@ def test_a_source_that_changes_before_its_copy_is_refused(tmp_path: Path) -> Non
     b.clip("a.wav", 0.2)
     attach = b.output.attach
 
-    def attach_and_change() -> Attached | Failure:
+    def attach_and_change(keeping: Keeping | None) -> Attached | Failure:
         b.clip("a.wav", 0.2, peak=100)
-        return attach()
+        return attach(keeping)
 
     b.output.attach = attach_and_change  # type: ignore[method-assign]
     assert reason(b.play()) == "source_changed"
@@ -978,7 +978,10 @@ def test_a_clock_that_raises_after_an_earlier_step_is_named_by_the_next_command(
         b.send(Release())
     assert error.value.__cause__ is raised[0]
     assert raised[0] is not None
-    assert raised[0].__notes__ == ["ending the play also raised Unexpected('clock broke')"]
+    assert raised[0].__notes__ == [
+        "ending the play also raised Unexpected('clock broke')",
+        "the play's controls were put back as found",
+    ]
     plays_again(b)
 
 
@@ -1179,7 +1182,10 @@ def test_a_thread_error_carries_what_ending_the_play_raised(
         return
     # The sink's exception is raised on, from the thread's, carrying the set's.
     assert str(error) == "the sink failed" and error.__cause__ is thread_error
-    assert error.__notes__ == ["ending the play also raised Unexpected('set broke')"]
+    assert error.__notes__ == [
+        "ending the play also raised Unexpected('set broke')",
+        "the play's controls were not all put back as found",
+    ]
     assert not b.output.attached
     with pytest.raises(RuntimeError, match="before reporting its end") as next_error:
         b.send(Release())

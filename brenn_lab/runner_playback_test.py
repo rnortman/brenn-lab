@@ -16,13 +16,14 @@ import pytest
 
 from brenn_lab import marker, runner
 from brenn_lab.buildinfo import Revision
-from brenn_lab.data import encode_object
+from brenn_lab.data import ROLE_ERROR, encode_object
 from brenn_lab.playback import output, role
 from brenn_lab.playback.output import ControlName
 from brenn_lab.rundir import RunDir
 from brenn_lab.testing.fake_output import CARD, LIBRARY, FakeControl, FakeOutput
 from brenn_lab.testing.lab_driver import lab_toml, speaker_toml
 from brenn_lab.testing.role_raised import SINK_MESSAGE, check_role_raised
+from brenn_lab.testing.run_logs import check_logs, runner_log
 
 STAND_IN = os.path.abspath(os.environ["STAND_IN"])
 EXAMPLE = Path(os.path.abspath(os.environ["EXAMPLE"]))
@@ -110,6 +111,7 @@ def do_run(tmp_path: Path, lab_path: Path, script_path: Path) -> tuple[Path, Any
     results = json.loads((out / "results.json").read_text())
     assert pointer["outcome"] == results["outcome"]
     assert pointer["completed"] == results["completed"]
+    check_logs(out, sink_client=False)
     return out, manifest, results
 
 
@@ -192,6 +194,7 @@ def test_play_and_record(tmp_path: Path, outputs: list[FakeOutput]) -> None:
 
     assert names(out) == [
         ("command", "capture.start"),
+        ("event", "process.started"),
         ("reply", "capture.start"),
         ("command", "playback.play"),
         ("reply", "playback.play"),
@@ -208,14 +211,16 @@ def test_play_and_record(tmp_path: Path, outputs: list[FakeOutput]) -> None:
     assert not live.attached
 
 
-@pytest.mark.parametrize("catches", [True, False])
+@pytest.mark.parametrize("raised_on", ["caught_stop", "stop", "release"])
 def test_a_role_that_raises_on_a_scripts_command_fails_the_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outputs: list[FakeOutput], catches: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outputs: list[FakeOutput], raised_on: str
 ) -> None:
-    """The play's end cannot be reported; the script's stop, held until then,
-    raises the play thread's error. A stop that reached a live play would get
-    its `Stopped` and no end would be reported.
+    """The play's end cannot be reported; the script's stop, which the
+    script may catch, or the runner's release, held until then, raises the
+    play thread's error. A stop that reached a live play would get its
+    `Stopped` and no end would be reported.
     """
+    held = "release" if raised_on == "release" else "playback.stop"
     real_event = runner._Ledger.event
     real_command = runner._Ledger.command
     refused = threading.Event()
@@ -227,26 +232,88 @@ def test_a_role_that_raises_on_a_scripts_command_fails_the_run(
         real_event(self, event)
 
     def command(self: runner._Ledger, command: Any, by: str) -> None:
-        if command.name == "playback.stop":
+        if command.name == held:
             assert refused.wait(20)
         real_command(self, command, by)
 
     monkeypatch.setattr(runner._Ledger, "event", event)
     monkeypatch.setattr(runner._Ledger, "command", command)
-    # The play's thread raises the sink's error on its way out.
-    monkeypatch.setattr(threading, "excepthook", lambda args: None)
     clip(tmp_path / "sources", "clip.wav", 0.2)
-    play = 'speaker.send(playback.Play(source="clip.wav", volume_mb=-3000))\n'
+    body = 'speaker.send(playback.Play(source="clip.wav", volume_mb=-3000))\n'
     stop = "speaker.send(playback.Stop())\n"
-    body = play + ("try:\n    " + stop + "except Exception:\n    pass\n" if catches else stop)
+    if raised_on == "caught_stop":
+        body += "try:\n    " + stop + "except Exception:\n    pass\n"
+    elif raised_on == "stop":
+        body += stop
     out, _, results = do_run(tmp_path, lab(tmp_path), script(tmp_path, body))
-    check_role_raised(out, results, "speaker", {"playback.stop"})
+    check_role_raised(out, results, "speaker", {held})
+    [record] = results["sources"]
+    assert (record["ended"], record["restored"], record["stopped_by"]) == ("failed", None, None)
+    assert record["failure"]["reason"] == "end_not_reported"
+    [raise_note] = [e for e in runner_log(out) if e["text"].startswith("role speaker raised")]
+    assert "the play's controls were put back as found" in raise_note["text"]
+    if raised_on == "release":
+        assert [p for p in names(out) if p[0] != "event"][-3:] == [
+            ("command", "playback.play"),
+            ("reply", "playback.play"),
+            ("command", "release"),
+        ]
+        assert not outputs[-1].attached
+        return
+    # The play's thread raised the sink's error on its way out, and its
+    # traceback is in the runner's log by the time the run has ended.
+    [thread] = [e for e in runner_log(out) if e["text"].startswith("thread ")]
+    assert thread["text"].startswith("thread playback-speaker-1 raised:\nTraceback")
+    assert SINK_MESSAGE in thread["text"]
     # The play was answered; the stop, held until the end was refused, raised.
     assert [p for p in names(out) if p[0] != "event" and p[1].startswith("playback.")] == [
         ("command", "playback.play"),
         ("reply", "playback.play"),
         ("command", "playback.stop"),
     ]
+
+
+BADLY_TYPED = {
+    "volume": ('playback.Play(source="clip.wav", volume_mb="-3000")', "playback.play.volume_mb"),
+    "source": ("playback.Play(source=None, volume_mb=-3000)", "playback.play.source"),
+}
+
+
+@pytest.mark.parametrize("bad", sorted(BADLY_TYPED))
+@pytest.mark.parametrize("used_first", [False, True])
+def test_a_badly_typed_command_is_the_scripts_error(
+    tmp_path: Path, outputs: list[FakeOutput], bad: str, used_first: bool
+) -> None:
+    """The script's `send` raises `TypeError` and nothing reaches the role or
+    the journal; a role the script had already used is still released.
+    """
+    sent, field = BADLY_TYPED[bad]
+    body = "speaker.send(playback.Clock())\n" if used_first else ""
+    body += (
+        f"try:\n    speaker.send({sent})\n"
+        "except TypeError as e:\n"
+        f"    assert {field + ': '!r} in str(e), str(e)\n"
+        "    raise\n"
+    )
+    out, _, results = do_run(tmp_path, lab(tmp_path), script(tmp_path, body))
+    assert results["outcome"] == "failed"
+    failure = results["failure"]
+    assert (failure["where"], failure["reason"]) == ("script", "script_error")
+    assert failure["detail"].startswith("TypeError: command playback.play.")
+    assert results["roles"]["speaker"]["failures"] == []
+    if used_first:
+        assert names(out) == [
+            ("command", "playback.clock"),
+            ("reply", "playback.clock"),
+            ("command", "release"),
+            ("reply", "release"),
+        ]
+        assert results["roles"]["speaker"]["commands"] == 2
+    else:
+        assert names(out) == []
+        assert results["roles"]["speaker"]["commands"] == 0
+    assert outputs == [] or not any(o.attached for o in outputs)
+    assert "TypeError: command playback.play." in runner_log(out)[-1]["text"]
 
 
 TIMED = """\
@@ -441,6 +508,44 @@ def test_a_play_that_fails(tmp_path: Path, outputs: list[FakeOutput]) -> None:
     assert record["failure"]["reason"] == "controls_moved"
     assert record["restored"] is True
     assert ("event", "playback.failed") in names(out)
+    # An ALSA output starts no process, so no log stands behind the failure.
+    assert failure["log"] is None and failed["log"] is None
+
+
+def test_a_play_whose_thread_raises_points_at_the_runner_log(
+    tmp_path: Path, outputs: list[FakeOutput]
+) -> None:
+    clip(tmp_path / "sources", "clip.wav", 2.0)
+    lab_path = lab(tmp_path)
+    script_path = script(
+        tmp_path, 'speaker.send(playback.Play(source="clip.wav", volume_mb=-3000))\nlab.wait(1.0)\n'
+    )
+
+    real = output.OUTPUTS["alsa"]
+
+    def raises_at_third_write(card: str, programs: Mapping[str, str]) -> output.Output:
+        made = real(card, programs)
+        assert isinstance(made, FakeOutput)
+
+        def on_write(n: int) -> None:
+            if n == 3:
+                raise RuntimeError("the write broke")
+
+        made.on_write = on_write
+        return made
+
+    output.OUTPUTS["alsa"] = raises_at_third_write
+    out, _, results = do_run(tmp_path, lab_path, script_path)
+
+    assert results["outcome"] == "failed"
+    failure = results["failure"]
+    assert (failure["role"], failure["reason"]) == ("speaker", ROLE_ERROR)
+    runner_log_file = {"machine": MACHINE, "path": "logs/runner.log", "in_run": True}
+    assert failure["log"] == runner_log_file
+    [failed] = results["roles"]["speaker"]["failures"]
+    assert (failed["event"], failed["log"]) == ("playback.failed", runner_log_file)
+    [thread] = [e for e in runner_log(out) if e["text"].startswith("thread ")]
+    assert "RuntimeError: the write broke" in thread["text"]
 
 
 def test_a_dry_run_of_a_play_refused_over_the_cap(

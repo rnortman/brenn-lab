@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from brenn_lab.account import Pointer
+from brenn_lab.account import Pointer, end_not_reported
 from brenn_lab.capture.messages import Failed, Gap, Late, Released, Started, Stop, Stopped
 from brenn_lab.data import (
     COMMANDS,
@@ -147,7 +147,10 @@ class CaptureAccount:
         return list(self._entries)
 
     def records(self) -> list[JsonObject]:
-        return [c.encode() for _, c in sorted(self._captures.items()) if c.capture_id is not None]
+        records = [c for _, c in sorted(self._captures.items()) if c.capture_id is not None]
+        for c in records:
+            c.failed(end_not_reported("capture"))
+        return [c.encode() for c in records]
 
     def repositories(self) -> list[JsonObject]:
         return list(self._repositories)

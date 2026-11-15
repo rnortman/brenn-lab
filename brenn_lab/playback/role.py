@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Literal
 
 from brenn_lab.data import (
+    ROLE_ERROR,
     Check,
     ClockReading,
     Command,
@@ -38,7 +39,7 @@ from brenn_lab.data import (
     encode_value,
     now,
 )
-from brenn_lab.place import Place
+from brenn_lab.place import Place, report_started, sink_raised_unwrapped
 from brenn_lab.playback import limits, source
 from brenn_lab.playback.device import PlaybackDevice
 from brenn_lab.playback.messages import (
@@ -65,6 +66,7 @@ from brenn_lab.playback.output import (
     Attached,
     ControlName,
     Element,
+    Keeping,
     Output,
     Stream,
     WriteError,
@@ -186,22 +188,24 @@ class PlaybackRole:
         )
 
     def handle(self, command: Command) -> Reply:
-        body = command.body
+        outcome = sink_raised_unwrapped(partial(self._locked, command))
+        return Reply(role=self._name, command=command.name, dry=command.dry, outcome=outcome)
+
+    def _locked(self, command: Command) -> object:
         with self._lock:
             try:
-                outcome = self._handle(body, command.dry, command.name)
+                return self._handle(command.body, command.dry, command.name)
             except OSError as e:
-                outcome = Failure("role_io", f"{command.name} on role {self._name!r}: {e}")
-        return Reply(role=self._name, command=command.name, dry=command.dry, outcome=outcome)
+                return Failure("role_io", f"{command.name} on role {self._name!r}: {e}")
 
     def _handle(self, body: object, dry: bool, name: str) -> object:
         match body:
             case Check():
-                return self._check()
+                return self._check(self._keeping(dry))
             case Clock():
                 return ClockRead(self._clock())
             case Play():
-                return self._dry_play(body) if dry else self._play(body)
+                return self._dry_play(body) if dry else self._play(body, self._keeping(dry))
             case Stop():
                 return self._dry_stop() if dry else self._stop()
             case Release():
@@ -220,6 +224,21 @@ class PlaybackRole:
 
     def _report(self, body: object) -> None:
         self._sink(Event(role=self._name, body=body))
+
+    def _keeping(self, dry: bool) -> Keeping | None:
+        """How the output keeps what a program it starts writes: in the
+        role's log directory, each start reported as `process.started`;
+        nothing, for a dry command or a role with no place.
+        """
+        if dry or self._place is None:
+            return None
+
+        def started(process: str, pid: int, stdout_log: Path, stderr_log: Path) -> None:
+            report_started(
+                self._sink, self._name, self._machine, process, pid, stdout_log, stderr_log
+            )
+
+        return Keeping(self._place.logs, started)
 
     # Judging a play: nothing written, set or opened.
 
@@ -258,11 +277,11 @@ class PlaybackRole:
             return read
         return tuple(_control(n, channels) for n, channels in zip(self._named, read, strict=True))
 
-    def _judge(self, play: Play) -> _Judged | Failure:
+    def _judge(self, play: Play, keeping: Keeping | None) -> _Judged | Failure:
         judged = source.judge(self._device.source_dir, play.source)
         if isinstance(judged, Failure):
             return judged
-        attached = self._output.attach()
+        attached = self._output.attach(keeping)
         if isinstance(attached, Failure):
             return attached
         try:
@@ -443,10 +462,10 @@ class PlaybackRole:
         after = self._output.read([ControlName(c.element, c.index) for c in found])
         return after == tuple(c.channels for c in found)
 
-    def _check(self) -> Checked | Failure:
+    def _check(self, keeping: Keeping | None) -> Checked | Failure:
         if self._live() is not None:
             return Failure("already_playing", "a play is running; its controls are the role's")
-        attached = self._output.attach()
+        attached = self._output.attach(keeping)
         if isinstance(attached, Failure):
             return attached
         try:
@@ -521,7 +540,7 @@ class PlaybackRole:
         failure = self._own_clock(play.start)
         if failure is not None:
             return failure
-        j = self._judge(play)
+        j = self._judge(play, None)
         if isinstance(j, Failure):
             return j
         try:
@@ -544,18 +563,23 @@ class PlaybackRole:
         return self._started(0, j, None, stream, found, found, level, local_time, play.start, None)
 
     def _settle(self) -> None:
-        """Forget a play whose thread has ended. An error that ended the
-        thread before the play's end was reported is raised here.
+        """Forget a play whose thread has ended, once the thread has. An error
+        that ended the thread before the play's end was reported is raised
+        here.
         """
         p = self._playing
         if p is not None and p.done.is_set():
+            # The thread sets `done` before it raises on; joined, whatever it
+            # raised has reached the thread hook.
+            if p.thread is not None:
+                p.thread.join()
             self._playing = None
             if p.error is not None:
                 raise RuntimeError("the play's thread failed before reporting its end") from (
                     p.error
                 )
 
-    def _play(self, play: Play) -> Started | Failure:
+    def _play(self, play: Play, keeping: Keeping | None) -> Started | Failure:
         if self._live() is not None:
             return Failure("already_playing", "a play is running")
         self._settle()
@@ -564,7 +588,7 @@ class PlaybackRole:
         failure = self._own_clock(play.start)
         if failure is not None:
             return failure
-        j = self._judge(play)
+        j = self._judge(play, keeping)
         if isinstance(j, Failure):
             return j
         return self._begin(play, j, self._place)
@@ -833,17 +857,16 @@ class PlaybackRole:
             except OSError as e:
                 failure = Failure("role_io", f"the kept copy could not be read: {e}")
         except BaseException as e:
-            failure = Failure("role_error", f"the play's thread raised {_repr(e)}")
+            failure = Failure(ROLE_ERROR, f"the play's thread raised {_repr(e)}")
             error = e
         try:
             kept = self._finish(p, failure, ended)
         except BaseException as e:
             # The role's clock or the event's sink raised, so no end reaches
-            # the play's record, which keeps `ended` and `restored` null. `e`
+            # the play's record, which the run gives `end_not_reported`. `e`
             # is the sink's exception or the first that ending the play
-            # raised, and carries every other, the clock's included, as a
-            # note. The controls were restored and the output let go before.
-            # TODO(errhandling-assessment-refuses-runner-written-null-ended)
+            # raised, and carries every other, the clock's included, and how
+            # the controls were left, as notes. The output was let go before.
             p.error = e
             if error is not None:
                 raise e from error
@@ -957,7 +980,7 @@ class PlaybackRole:
         if p.thread is None:
             return kept
         if end is None:
-            raise _carrying(kept[0], kept)
+            raise _restoration(_carrying(kept[0], kept), found is not None, restored)
         last = p.last
         if kept:
             failure = _ended_by(failure, kept)
@@ -1005,9 +1028,22 @@ class PlaybackRole:
                     p.first,
                 )
         except BaseException as e:
-            _carrying(e, kept)
+            _restoration(_carrying(e, kept), found is not None, restored)
             raise
         return kept
+
+
+def _restoration(error: BaseException, had: bool, restored: bool) -> BaseException:
+    """`error`, raised when a play's end cannot be reported, with a note
+    saying how the play left its controls, which nothing else carries.
+    """
+    if not had:
+        error.add_note("the play had read no controls, so had none to put back")
+    elif restored:
+        error.add_note("the play's controls were put back as found")
+    else:
+        error.add_note("the play's controls were not all put back as found")
+    return error
 
 
 LOCALTIME = Path("/etc/localtime")
@@ -1057,7 +1093,7 @@ def _ended_by(failure: Failure | None, kept: list[BaseException]) -> Failure:
     """
     raised = f"ending the play raised {', '.join(_repr(e) for e in kept)}"
     if failure is None:
-        return Failure("role_error", raised)
+        return Failure(ROLE_ERROR, raised)
     return Failure(failure.reason, f"{failure.detail}; {raised}", failure.data)
 
 

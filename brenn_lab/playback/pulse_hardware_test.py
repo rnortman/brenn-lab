@@ -126,7 +126,7 @@ def test_check_on_each_sink_answers_its_identity_and_sets_nothing() -> None:
 def test_two_reads_agree_and_the_client_maps_no_host_sound_library() -> None:
     [name, *_] = [n for n in selectable(listed()) if isinstance(check(n), Checked)]
     output = Guarded(name)
-    attached = output.attach()
+    attached = output.attach(None)
     assert not isinstance(attached, Failure), attached
     try:
         first = output.read((SINK_LEVEL,))

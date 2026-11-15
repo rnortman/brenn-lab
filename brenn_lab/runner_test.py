@@ -24,6 +24,7 @@ from brenn_lab.rundir import RunDir
 from brenn_lab.runner import Refused
 from brenn_lab.testing import transcript_files
 from brenn_lab.testing.role_raised import SINK_MESSAGE, check_role_raised
+from brenn_lab.testing.run_logs import check_logs, runner_log
 from brenn_lab.testing.transcript_files import layout_of
 
 STAND_IN = os.path.abspath(os.environ["STAND_IN"])
@@ -112,7 +113,11 @@ def do_run(
     notes: Path | None = None,
     workspace: Path | None = None,
     pinned: Mapping[str, str] = PINNED,
+    unlisted: frozenset[str] = frozenset(),
 ) -> tuple[Path, Any, Any]:
+    """Run, and hold the run's pointer, its results and its logs; `unlisted`
+    is as for `check_logs`.
+    """
     out = tmp_path / "run"
     pointer = runner.run(
         lab_path, MACHINE, script_path, str(script_path), out, notes, HARNESS, workspace, pinned
@@ -125,22 +130,31 @@ def do_run(
     assert pointer["completed"] == results["completed"]
     assert (out / ".gitignore").read_text() == "*\n"
     assert results["failure"] is None or results["failure"].keys() == PROBLEM_KEYS
+    check_logs(out, sink_client=False, unlisted=unlisted)
     return out, json.loads((out / "manifest.json").read_text()), results
+
+
+def in_run(path: str) -> JsonObject:
+    """The pointer to `path`, a file the run keeps on the runner's machine."""
+    return {"machine": MACHINE, "path": path, "in_run": True}
 
 
 def journal(out: Path) -> list[Any]:
     return [json.loads(t) for t in (out / "journal.jsonl").read_text().splitlines()]
 
 
-PROBLEM_KEYS = {"where", "reason", "detail", "role", "command", "key", "data"}
+PROBLEM_KEYS = {"where", "reason", "detail", "role", "command", "key", "data", "log"}
 
 
 def every_key(report: JsonObject) -> None:
-    """Every problem in `report` has every key a problem has."""
+    """Every problem in `report` has every key a problem has, and points at
+    no log: a dry run and a refusal keep nothing.
+    """
     problems = report["problems"]
     assert isinstance(problems, list)
     for problem in problems:
         assert isinstance(problem, dict) and problem.keys() == PROBLEM_KEYS, problem
+        assert problem["log"] is None, problem
 
 
 def reasons(report: JsonObject) -> list[tuple[JsonValue, JsonValue, JsonValue]]:
@@ -168,8 +182,8 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
     notes.write_text("door shut\n")
     out, manifest, results = do_run(tmp_path, lab_path, EXAMPLE, notes)
 
-    assert manifest["layout"] == 4
-    assert results["schema"] == 2
+    assert manifest["layout"] == 5
+    assert results["schema"] == 3
     assert manifest["harness"] == HARNESS.encode()
     assert manifest["runner"] == {"machine": MACHINE}
     assert (out / manifest["script"]["file"]).read_bytes() == EXAMPLE.read_bytes()
@@ -221,6 +235,14 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
     assert result["loss_free"] is True
     assert result["end"] == reading(stopped_line)
     assert results["roles"]["mic"] == {"kind": "capture", "commands": 3, "failures": []}
+    pid = journal(out)[1]["data"]["pid"]
+    assert [
+        (e["role"], e["process"], e["pid"], e["stream"], e["file"], e["seq"])
+        for e in results["logs"][3:]
+    ] == [
+        ("mic", "pod-capture", pid, "stdout", in_run("logs/mic/recorder-0001.stdout.jsonl"), 2),
+        ("mic", "pod-capture", pid, "stderr", in_run("logs/mic/recorder-0001.stderr.log"), 2),
+    ]
     assert results["usability"] == {
         "assessed": False,
         "reason": (
@@ -231,8 +253,9 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
     }
 
     entries = journal(out)
-    assert [(e.get("command"), "ok" in e, e.get("by")) for e in entries] == [
+    assert [(e.get("command", e.get("event")), "ok" in e, e.get("by")) for e in entries] == [
         ("capture.start", False, "script"),
+        ("process.started", False, None),
         ("capture.start", True, "script"),
         ("capture.stop", False, "script"),
         ("capture.stop", True, "script"),
@@ -240,11 +263,18 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
         ("release", True, "runner"),
     ]
     assert entries[-1]["result"] == {"stopped": None}
-    assert [e["seq"] for e in entries] == list(range(1, 7))
+    assert [e["seq"] for e in entries] == list(range(1, 8))
     assert (out / "logs" / "mic" / "recorder-0001.stdout.jsonl").read_bytes() == (
         transcript_files.path("clean").read_bytes()
     )
-    assert "pid" in (out / "logs" / "runner.log").read_text()
+    process = entries[1]
+    assert process["role"] == "mic"
+    assert process["data"]["process"] == "pod-capture"
+    assert isinstance(process["data"]["pid"], int)
+    assert [(log["stream"], log["location"]) for log in process["data"]["logs"]] == [
+        (stream, {"machine": MACHINE, "path": str(out / "logs" / "mic" / f"recorder-0001.{name}")})
+        for stream, name in (("stdout", "stdout.jsonl"), ("stderr", "stderr.log"))
+    ]
 
 
 @pytest.mark.parametrize("name", ["clean", "state_not_attempted", "state_unavailable"])
@@ -256,7 +286,11 @@ def test_the_device_state_reaches_the_manifest_as_given(tmp_path: Path, name: st
     assert report["ok"] is True, report
     check = report["roles"]["mic"]["check"]["result"]
     assert check["device_state"] == started_line["device_state"]
-    out, manifest, _ = do_run(tmp_path, lab_path, script_path)
+    out, manifest, results = do_run(tmp_path, lab_path, script_path)
+    # Whatever the recorder said of the chip on its stderr is kept and named.
+    stderr = "logs/mic/recorder-0001.stderr.log"
+    assert [e["file"] for e in results["logs"] if e["stream"] == "stderr"][1:] == [in_run(stderr)]
+    assert (out / stderr).is_file()
     [capture] = manifest["roles"]["mic"]["captures"]
     assert capture["device"] == started_line["device"]
     assert capture["device_state"] == started_line["device_state"]
@@ -418,6 +452,8 @@ def test_a_check_while_capturing_is_refused_in_both(tmp_path: Path) -> None:
     assert report["trace"]["complete"] is False
     _, _, results = do_run(tmp_path, lab_path, path)
     assert results["failure"]["reason"] == "already_capturing"
+    # The role's most recent process is the running capture's recorder.
+    assert results["failure"]["log"] == in_run("logs/mic/recorder-0001.stderr.log")
 
 
 def test_a_script_cannot_send_release(tmp_path: Path) -> None:
@@ -431,6 +467,7 @@ def test_a_script_cannot_send_release(tmp_path: Path) -> None:
     failure = results["failure"]
     assert (failure["where"], failure["reason"]) == ("script", "script_error")
     assert "RunnerCommand" in failure["detail"]
+    assert failure["log"] == in_run("logs/runner.log")
     [capture] = results["captures"]
     assert capture["stopped_by"] == "runner"
     assert [e["by"] for e in journal(out) if e.get("command") == "release"] == ["runner"] * 2
@@ -575,6 +612,8 @@ def test_a_start_on_a_missing_card(tmp_path: Path) -> None:
     failure = results["failure"]
     assert (failure["where"], failure["role"], failure["reason"]) == ("role", "mic", "no_card")
     assert failure["data"]["cards"] == failed_line["cards"]
+    # The start that failed had started its recorder, whose stderr it names.
+    assert failure["log"] == in_run("logs/mic/recorder-0001.stderr.log")
     assert [r["repository"] for r in manifest["repositories"]] == ["brenn-lab"]
     assert manifest["roles"]["mic"]["captures"] == []
 
@@ -603,6 +642,9 @@ def test_a_capture_that_fails(tmp_path: Path, card: str, reason: str, by: str) -
     assert capture["failure"]["reason"] == reason
     first = results["roles"]["mic"]["failures"][0]
     assert first["reason"] == reason
+    # By reply or by event, the failure names the stderr of the capture's
+    # recorder, the one process the role started.
+    assert failure["log"] == first["log"] == in_run("logs/mic/recorder-0001.stderr.log")
     if by == "event":
         assert first["event"] == "capture.failed"
         # The script's later stop is answered with the failure the capture failed with.
@@ -681,6 +723,7 @@ def test_a_script_error_releases_the_capture(tmp_path: Path) -> None:
     failure = results["failure"]
     assert (failure["where"], failure["reason"]) == ("script", "script_error")
     assert "RuntimeError: oops" in failure["detail"]
+    assert failure["log"] == in_run("logs/runner.log")
     [capture] = results["captures"]
     assert capture["ended"] == "stopped" and capture["stopped_by"] == "runner"
     assert "Traceback" in (out / "logs" / "runner.log").read_text()
@@ -832,9 +875,154 @@ def test_a_role_that_raises_on_a_scripts_command_fails_the_run(
         else sent
     )
     out, _, results = do_run(
-        tmp_path, lab(tmp_path, {"mic": ("loss", MACHINE)}), script(tmp_path, body)
+        tmp_path,
+        lab(tmp_path, {"mic": ("loss", MACHINE)}),
+        script(tmp_path, body),
+        unlisted=REFUSED_RECORDER,
     )
     check_role_raised(out, results, "mic", {"capture.start", "capture.stop"})
+
+
+def refuse_gap_until(monkeypatch: pytest.MonkeyPatch, held: str) -> None:
+    """The ledger's event sink raises on the recorder's gap, once the
+    capture's start is answered, so the reader fails and no end of the
+    capture reaches the run; every command `held` waits until it has.
+    """
+    real_event = runner._Ledger.event
+    real_command = runner._Ledger.command
+    real_reply = runner._Ledger.reply
+    answered = threading.Event()
+    refused = threading.Event()
+
+    def event(self: runner._Ledger, event: Any) -> None:
+        if event.name == "capture.gap":
+            assert answered.wait(20)
+            refused.set()
+            raise RuntimeError(SINK_MESSAGE)
+        real_event(self, event)
+
+    def reply(self: runner._Ledger, reply: Any, by: str) -> None:
+        real_reply(self, reply, by)
+        if (reply.role, reply.command) == ("mic", "capture.start"):
+            answered.set()
+
+    def command(self: runner._Ledger, command: Any, by: str) -> None:
+        if command.name == held:
+            assert refused.wait(20)
+        real_command(self, command, by)
+
+    monkeypatch.setattr(runner._Ledger, "event", event)
+    monkeypatch.setattr(runner._Ledger, "command", command)
+    monkeypatch.setattr(runner._Ledger, "reply", reply)
+
+
+@pytest.mark.parametrize("raised_on", ["capture.stop", "release"])
+def test_a_capture_whose_end_never_reached_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raised_on: str
+) -> None:
+    """The script's stop, or the runner's release, raises the reader's
+    error. Either way the run has a result, its record an end, and the
+    other role is released.
+    """
+    refuse_gap_until(monkeypatch, raised_on)
+    procs = recorders(monkeypatch)
+    body = (
+        'mic = lab.role("mic")\nother = lab.role("other")\n'
+        "other.send(capture.Start())\nmic.send(capture.Start())\n"
+        "other.send(capture.Stop())\n"
+    )
+    if raised_on == "capture.stop":
+        body += "mic.send(capture.Stop())\n"
+    out, _, results = do_run(
+        tmp_path,
+        lab(tmp_path, {"mic": ("loss", MACHINE), "other": ("clean", MACHINE)}),
+        script(tmp_path, body, '{"mic": "capture", "other": "capture"}'),
+    )
+    check_role_raised(out, results, "mic", {raised_on})
+    by_role = {c["role"]: c for c in results["captures"]}
+    mic = by_role["mic"]
+    assert (mic["ended"], mic["stopped_by"], mic["loss_free"]) == ("failed", None, False)
+    assert mic["failure"]["reason"] == "end_not_reported"
+    assert mic["failure"]["data"] == {}
+    assert "role's failures" in mic["failure"]["detail"]
+    other = by_role["other"]
+    assert (other["ended"], other["stopped_by"]) == ("stopped", "script")
+    releases = [(e["role"], "ok" in e) for e in journal(out) if e.get("command") == "release"]
+    # Released in the order first used; `mic` answers its release only when
+    # its stop already raised.
+    mic_released = [("mic", False)] if raised_on == "release" else [("mic", False), ("mic", True)]
+    assert releases == [("other", False), ("other", True), *mic_released]
+    assert procs and all(p.poll() is not None for p in procs)
+
+
+def test_a_release_raise_whose_note_cannot_be_written_ends_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The role's raise at release is recorded, but its note is not: the
+    runner could not write its own log, so the run has no result, and its
+    log ends saying it could not be finished.
+    """
+    refuse_gap_until(monkeypatch, "release")
+    real_note = RunDir.note
+
+    def note(self: RunDir, text: str) -> None:
+        if text.startswith("role mic raised on release"):
+            raise OSError(28, "No space left on device")
+        real_note(self, text)
+
+    monkeypatch.setattr(RunDir, "note", note)
+    out = tmp_path / "run"
+    with pytest.raises(ExceptionGroup) as raised:
+        runner.run(
+            lab(tmp_path, {"mic": ("loss", MACHINE)}),
+            MACHINE,
+            script(tmp_path, 'lab.role("mic").send(capture.Start())\n'),
+            "script.py",
+            out,
+            None,
+            HARNESS,
+            None,
+            PINNED,
+        )
+    assert [type(e) for e in raised.value.exceptions] == [OSError]
+    assert not (out / "results.json").exists()
+    last = runner_log(out)[-1]["text"]
+    assert last.startswith("the run could not be finished:\n")
+    assert "No space left on device" in last
+
+
+def test_a_run_whose_log_cannot_say_it_could_not_be_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def write_results(self: RunDir, value: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    real_note = RunDir.note
+
+    def note(self: RunDir, text: str) -> None:
+        if text.startswith("the run could not be finished"):
+            raise OSError(5, "Input/output error")
+        real_note(self, text)
+
+    monkeypatch.setattr(RunDir, "write_results", write_results)
+    monkeypatch.setattr(RunDir, "note", note)
+    out = tmp_path / "run"
+    with pytest.raises(OSError, match="No space left") as raised:
+        runner.run(
+            lab(tmp_path, {"mic": ("clean", MACHINE)}),
+            MACHINE,
+            script(tmp_path, START_WAIT_STOP),
+            "script.py",
+            out,
+            None,
+            HARNESS,
+            None,
+            PINNED,
+        )
+    [said] = raised.value.__notes__
+    assert said.startswith("the run could not be finished, and logs/runner.log could not say so:")
+    assert "Input/output error" in said
+    assert not (out / "results.json").exists()
 
 
 CATCH_AND_GO_ON = """\
@@ -848,8 +1036,17 @@ raise ValueError("the script went on")
 """
 
 
+#: The logs of the recorder whose `process.started` `refuse_events` refused:
+#: kept by the role, which then killed it, and named in no `logs` entry.
+REFUSED_RECORDER = frozenset(
+    {"logs/mic/recorder-0001.stdout.jsonl", "logs/mic/recorder-0001.stderr.log"}
+)
+
+
 def refuse_events(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ledger's event sink raises, so the recorder's reader fails."""
+    """The ledger's event sink raises, so the role's report of the recorder
+    it started fails.
+    """
 
     def event(self: runner._Ledger, event: Any) -> None:
         raise RuntimeError(SINK_MESSAGE)
@@ -871,7 +1068,10 @@ def test_a_role_raise_is_recorded_when_its_note_cannot_be_written(
 
     monkeypatch.setattr(RunDir, "note", note)
     out, _, results = do_run(
-        tmp_path, lab(tmp_path, {"mic": ("loss", MACHINE)}), script(tmp_path, CATCH_AND_GO_ON)
+        tmp_path,
+        lab(tmp_path, {"mic": ("loss", MACHINE)}),
+        script(tmp_path, CATCH_AND_GO_ON),
+        unlisted=REFUSED_RECORDER,
     )
     assert results["outcome"] == "failed" and results["completed"] is False
     assert results["failure"]["reason"] == "role_raised"
@@ -894,7 +1094,10 @@ def test_a_stop_during_a_command_a_role_raised_on_stops_the_script(
 
     monkeypatch.setattr(runner._Ledger, "role_raised", role_raised)
     out, _, results = do_run(
-        tmp_path, lab(tmp_path, {"mic": ("loss", MACHINE)}), script(tmp_path, CATCH_AND_GO_ON)
+        tmp_path,
+        lab(tmp_path, {"mic": ("loss", MACHINE)}),
+        script(tmp_path, CATCH_AND_GO_ON),
+        unlisted=REFUSED_RECORDER,
     )
     assert results["outcome"] == "interrupted" and results["completed"] is False
     assert results["failure"]["reason"] == "interrupted"
@@ -916,11 +1119,48 @@ def test_a_capture_left_running_is_released(tmp_path: Path) -> None:
         "mic",
         "left_running",
     )
+    assert failure["log"] is None
     [capture] = results["captures"]
     assert capture["stopped_by"] == "runner"
     assert capture["frames"] == line("clean", "capture_stopped")["frames"]
     released = journal(out)[-1]
     assert released["by"] == "runner" and released["result"]["stopped"]["capture"] == 1
+
+
+def test_a_check_in_a_run_lists_its_probes_logs(tmp_path: Path) -> None:
+    body = 'mic = lab.role("mic")\nmic.send(Check())\nmic.send(capture.Start())\n'
+    body += "mic.send(capture.Stop())\n"
+    out, _, results = do_run(
+        tmp_path, lab(tmp_path, {"mic": ("clean", MACHINE)}), script(tmp_path, body)
+    )
+    assert results["outcome"] == "completed"
+    assert [(e["process"], e["file"]["path"]) for e in results["logs"][3:]] == [
+        ("pod-capture", "logs/mic/probe-0001.stdout.jsonl"),
+        ("pod-capture", "logs/mic/probe-0001.stderr.log"),
+        ("pod-capture", "logs/mic/recorder-0001.stdout.jsonl"),
+        ("pod-capture", "logs/mic/recorder-0001.stderr.log"),
+    ]
+    probe, recorder = results["logs"][3]["pid"], results["logs"][5]["pid"]
+    assert probe != recorder
+
+
+def test_a_run_that_uses_no_role_lists_the_lab_process_alone(tmp_path: Path) -> None:
+    out, _, results = do_run(
+        tmp_path, lab(tmp_path, {"mic": ("clean", MACHINE)}), script(tmp_path, "pass\n")
+    )
+    assert results["outcome"] == "completed"
+    logs = results["logs"]
+    assert [(e["process"], e["stream"]) for e in logs] == [
+        ("lab", "log"),
+        ("lab", "stdout"),
+        ("lab", "stderr"),
+    ]
+    assert {e["pid"] for e in logs} == {os.getpid()}
+    assert sorted(p.name for p in (out / "logs").iterdir()) == [
+        "lab.stderr.log",
+        "lab.stdout.log",
+        "runner.log",
+    ]
 
 
 def created(tmp_path: Path) -> set[str]:
@@ -984,6 +1224,10 @@ def test_a_role_on_an_unreachable_machine(tmp_path: Path) -> None:
     out, _, results = do_run(tmp_path, lab_path, EXAMPLE)
     failure = results["failure"]
     assert (failure["where"], failure["role"], failure["reason"]) == ("role", "mic", "unreachable")
+    # The role started no process.
+    assert failure["log"] is None
+    assert results["roles"]["mic"]["failures"][0]["log"] is None
+    assert [e["process"] for e in results["logs"]] == ["lab"] * 3
     entries = journal(out)
     assert [(e["command"], "ok" in e) for e in entries] == [
         ("capture.start", False),
@@ -1005,6 +1249,7 @@ def test_a_run_interrupted_by_sigterm(tmp_path: Path) -> None:
     assert results["outcome"] == "interrupted" and results["completed"] is False
     assert results["failure"]["where"] == "runner"
     assert results["failure"]["reason"] == "interrupted"
+    assert results["failure"]["log"] is None
     [capture] = results["captures"]
     assert capture["ended"] == "stopped" and capture["stopped_by"] == "runner"
 
@@ -1039,18 +1284,39 @@ def die(tmp_path: Path, lab_path: Path, script_path: Path, how: str) -> Path:
     return out
 
 
-def test_a_runner_that_dies_at_once_leaves_its_gitignore(tmp_path: Path) -> None:
+def test_a_runner_that_dies_at_once_leaves_its_gitignore_and_its_own_logs(tmp_path: Path) -> None:
     lab_path = lab(tmp_path, {"mic": ("clean", MACHINE)})
     out = die(tmp_path, lab_path, EXAMPLE, "die_after_create")
-    assert [p.name for p in out.iterdir()] == [".gitignore"]
+    assert sorted(p.name for p in out.iterdir()) == [".gitignore", "logs"]
     assert (out / ".gitignore").read_text() == "*\n"
+    assert sorted(p.name for p in (out / "logs").iterdir()) == [
+        "lab.stderr.log",
+        "lab.stdout.log",
+        "runner.log",
+    ]
+    assert [e["text"] for e in runner_log(out)] == ["run started"]
 
 
 def test_a_runner_that_dies_leaves_its_journal(tmp_path: Path) -> None:
-    body = 'lab.role("mic").send(Check())\nimport os\nos._exit(9)\n'
+    body = (
+        'lab.role("mic").send(Check())\nimport os\nos.write(1, b"said before dying\\n")\n'
+        "os._exit(9)\n"
+    )
     out = die(tmp_path, lab(tmp_path, {"mic": ("clean", MACHINE)}), script(tmp_path, body), "-")
+    assert (out / "logs" / "lab.stdout.log").read_text() == "said before dying\n"
     assert not (out / "results.json").exists()
     assert (out / ".gitignore").read_text() == "*\n"
     assert (out / "manifest.json").is_file()
     entries = journal(out)
-    assert [(e["command"], "ok" in e) for e in entries] == [("check", False), ("check", True)]
+    assert [(e.get("command", e.get("event")), "ok" in e) for e in entries] == [
+        ("check", False),
+        ("process.started", False),
+        ("check", True),
+    ]
+    # The probe's logs, named by the journal, survive the runner.
+    for log in entries[1]["data"]["logs"]:
+        assert Path(log["location"]["path"]).is_file()
+    assert sorted(p.name for p in (out / "logs" / "mic").iterdir()) == [
+        "probe-0001.stderr.log",
+        "probe-0001.stdout.jsonl",
+    ]

@@ -286,7 +286,14 @@ def test_a_kind_the_runner_has_never_seen(tmp_path: Path, toy: None) -> None:
         runner.Problem("role", "broke", "it broke", role="t")
     )
     assert results["roles"]["t"]["failures"] == [
-        {"event": "toy.broke", "reason": "broke", "detail": "it broke", "data": {}}
+        {"event": "toy.broke", "reason": "broke", "detail": "it broke", "data": {}, "log": None}
+    ]
+    # A role that started no process: its failure points at no log, and
+    # only the `lab` process's are listed.
+    assert [(e["process"], e["stream"]) for e in results["logs"]] == [
+        ("lab", "log"),
+        ("lab", "stdout"),
+        ("lab", "stderr"),
     ]
     assert results["toys"] == [{"role": "t", "ping": 1, "file": file, "broke": True}]
     assert results["toyed"] == {"pings": 1}

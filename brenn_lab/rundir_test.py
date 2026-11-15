@@ -10,6 +10,7 @@ import pytest
 
 from brenn_lab import rundir
 from brenn_lab.data import JsonObject
+from brenn_lab.testing.run_logs import runner_log
 
 
 @pytest.fixture
@@ -120,8 +121,30 @@ def test_replace_report_returns_the_hash_of_what_it_wrote_and_names_what_it_repl
 
 
 def test_writing_the_manifest_twice_leaves_one_file_and_no_temporary(tmp_path: Path) -> None:
-    made = rundir.RunDir.create(tmp_path / "run")
+    made = rundir.RunDir.create(tmp_path / "run", "bench")
     made.write_manifest({"n": 1})
     made.write_manifest({"n": 2})
     assert written(made.path, "manifest.json") == {"n": 2}
-    assert sorted(p.name for p in made.path.iterdir()) == [".gitignore", "manifest.json"]
+    assert sorted(p.name for p in made.path.iterdir()) == [".gitignore", "logs", "manifest.json"]
+
+
+def test_a_new_run_directory_has_its_runner_log_and_its_first_entry(tmp_path: Path) -> None:
+    made = rundir.RunDir.create(tmp_path / "run", "bench")
+    [entry] = runner_log(made.path)
+    assert entry["text"] == "run started"
+    assert entry["at"]["machine"] == "bench"
+
+
+def test_a_note_is_one_timed_json_line_whatever_its_text(tmp_path: Path) -> None:
+    made = rundir.RunDir.create(tmp_path / "run", "bench")
+    made.note("two\nlines\n\n")
+    rundir.note(made.path, "other", "after the directory was closed")
+    lines = (made.path / rundir.RUNNER_LOG).read_text().splitlines()
+    assert len(lines) == 3
+    entries = runner_log(made.path)
+    assert [e["text"] for e in entries] == [
+        "run started",
+        "two\nlines",
+        "after the directory was closed",
+    ]
+    assert [e["at"]["machine"] for e in entries] == ["bench", "bench", "other"]

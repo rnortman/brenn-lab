@@ -383,6 +383,34 @@ def test_a_play_ending(tmp_path: Path, ending: dict[str, Any], expected: list[st
         assert done["plays"][0]["record"]["as_sent"] is False
 
 
+END_NOT_REPORTED: JsonObject = {
+    "reason": "end_not_reported",
+    "detail": "no end reached the run",
+    "data": {},
+}
+
+
+def test_a_run_whose_ends_were_not_reported_is_assessed(tmp_path: Path) -> None:
+    """A capture and a play the runner gave `end_not_reported`, the play's
+    `restored` null: the capture is measured, each failure is a finding,
+    and no finding says the controls were not put back.
+    """
+    play = Play("speaker", 1, 1, at=2000.0, ended="failed", restored=None, failure=END_NOT_REPORTED)
+    c = Capture(account=Account("failed", None, None, (), failure=END_NOT_REPORTED))
+    done = assess(scenes.build(tmp_path / "run", [play], [c], outcome="failed").run)
+    assert sorted(names(done)) == ["capture_failed", "play_failed", "run_not_completed"]
+    assert all(
+        f["data"] == END_NOT_REPORTED
+        for f in done["findings"]
+        if f["finding"] in ("capture_failed", "play_failed")
+    )
+    assert unexamined(done) == []
+    assert done["captures"][0]["read"] is True
+    assert done["plays"][0]["record"]["restored"] is None
+    assert done["plays"][0]["marker"]["state"] == "marked"
+    assert done["schema"] == 2
+
+
 def test_a_timed_play_s_start_is_copied_and_judged_by_nothing(tmp_path: Path) -> None:
     asked: JsonObject = {
         "machine": "bench",

@@ -32,9 +32,6 @@ Last, the Flex's microphones record while a dry run opens the Flex's output.
 Every run directory and exported capture is kept in the test's outputs.
 """
 
-# TODO(audible-lane-not-run-on-moved-pin): this bench has not run on the pinned
-# recorder that reads the Flex's state before a capture starts.
-
 import array
 import json
 import os
@@ -54,6 +51,7 @@ from brenn_lab.playback.limits import peak_mb
 from brenn_lab.testing import bench
 from brenn_lab.testing.bench import FlexOut, Heard, SinkOut, Stop, Window
 from brenn_lab.testing.lab_driver import HELD_MB, document, dry_args, run_args
+from brenn_lab.testing.run_logs import check_logs
 
 LAB = os.path.abspath(os.environ["LAB"])
 FRAME_LOG = os.path.abspath(os.environ["FRAME_LOG"])
@@ -234,6 +232,14 @@ def measure(run: Path, manifest: Any) -> tuple[Heard, ...]:
     return tuple(heard)
 
 
+def logs_listed(run: Path, sink_client: bool) -> None:
+    """A run that left a `results.json` lists exactly the logs it keeps,
+    with a sink client's iff one was expected.
+    """
+    if (run / "results.json").exists():
+        check_logs(run, sink_client)
+
+
 def step(
     ramp_dir: Path, index: int, level: int, out: FlexOut | SinkOut, agreed: Window, folder: Path
 ) -> Step | str:
@@ -249,6 +255,7 @@ def step(
         lab.write_text(bench.lab_text(agreed, CARD, folder, [out]))
         done = start(run_args(lab, LEVEL_STEP, run))
         print(f"run {index}, {level} mB: lab run exited {done.returncode}")
+        logs_listed(run, sink_client=isinstance(out, SinkOut))
         if done.returncode != 0 or not (run / "alignment.json").exists():
             return f"run exited {done.returncode}: {done.stdout}"
         alignment = read_json(run / "alignment.json")
@@ -525,14 +532,16 @@ def run_failed_over_cap(out: Path) -> None:
     assert not (out / "sources").exists()
 
 
-def refused_silent(here: Path, reference: Step, role: str) -> None:
+def refused_silent(here: Path, reference: Step, role: str, sink_client: bool) -> None:
     """Run `here`'s `refused.py` under `here`'s lab file: the play over the
     cap is refused, and the capture is silent against the primer the ramp
     heard at the level it found, where that primer stood clear of the room.
+    `sink_client` is whether the refused play starts a sink client.
     """
     out = here / "run"
     try:
         done = start(run_args(here / "lab.toml", here / "refused.py", out))
+        logs_listed(out, sink_client)
         assert done.returncode == 1, done.stdout
         run_failed_over_cap(out)
         assert read_json(out / "results.json")["failure"]["role"] == role
@@ -584,6 +593,7 @@ def flex_marked_play(
     run.parent.mkdir()
     try:
         done = start(run_args(lab, play, run))
+        logs_listed(run, sink_client=False)
         assert done.returncode == 0, done.stdout
         manifest, results = read_json(run / "manifest.json"), read_json(run / "results.json")
         assert (results["outcome"], results["failure"]) == ("completed", None), results
@@ -696,7 +706,7 @@ def test_flex_over_cap_is_refused_and_silent(
     (here / "lab.toml").write_text(bench.lab_text(agreed, CARD, sources, [FlexOut(CARD, cap)]))
     script(here / "refused.py", "speaker", REFUSED.format(role="speaker", level=flex_level))
     print(f"flex: asking {flex_level} mB under a cap of {cap} mB")
-    refused_silent(here, flex_ramp.steps[-1], "speaker")
+    refused_silent(here, flex_ramp.steps[-1], "speaker", sink_client=False)
 
 
 @pytest.fixture(scope="session")
@@ -779,7 +789,9 @@ def test_sink_over_cap_is_refused_and_silent(
     script(here / "refused.py", "speaker", REFUSED.format(role="speaker", level=sink_level))
     print(f"sink: asking {sink_level} mB under a cap of {cap} mB")
     try:
-        refused_silent(here, sink_ramp.steps[-1], "speaker")
+        # The play is judged over its cap once the output is attached, so one
+        # client starts and exits inside the refused play.
+        refused_silent(here, sink_ramp.steps[-1], "speaker", sink_client=True)
     finally:
         sink_back(root, "sink_after_refused", agreed, sources, sink, sink_start)
 
@@ -851,6 +863,7 @@ def scenario(
     try:
         primed = start(run_args(lab, priming, here / "priming"))
         print(f"anchoring: priming run on the sink at {talker_mb} mB exited {primed.returncode}")
+        logs_listed(here / "priming", sink_client=True)
         if primed.returncode != 0:
             return Scenario(run, f"priming run exited {primed.returncode}: {primed.stdout}")
         done = start(run_args(lab, ANCHORING, run))
@@ -858,6 +871,7 @@ def scenario(
             f"anchoring: speaker at {speaker_mb} mB, talker at {talker_mb} mB:"
             f" lab run exited {done.returncode}"
         )
+        logs_listed(run, sink_client=True)
         if done.returncode != 0 or not (run / "alignment.json").exists():
             return Scenario(run, f"run exited {done.returncode}: {done.stdout}")
         return Scenario(run, None)
@@ -1142,6 +1156,7 @@ def test_flex_output_open_is_recorded(
         finally:
             out, err = recording.communicate(timeout=TIMEOUT_S)
             print(err, end="")
+        logs_listed(run, sink_client=False)
         assert dry.returncode == 0, dry.stdout
         assert document(dry.stdout)["ok"] is True, dry.stdout
         assert recording.returncode == 0, out

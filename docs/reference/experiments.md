@@ -241,6 +241,25 @@ records it:
   of the failure's form. A kind cannot register an event whose `failure`
   field is anything else. That is where the runner, and anything else that
   reads a role's events, finds a failure in an event of any kind.
+- **`role_error`** is the seam's reason for a failure event that reports a
+  raise in a thread of the role's own. Its traceback is wherever the run
+  keeps tracebacks: in a run, `logs/runner.log`.
+- **`process.started`** is an event of every kind:
+  `{process, pid, logs}`, each of `logs` `{stream, location}`, `stream`
+  `stdout` or `stderr` and `location` `{machine, path}`. A role reports it in
+  a run each time it starts a program whose output it keeps, once the
+  program is spawned and before it reads the program's output for meaning;
+  the runner journals it like any event and lists the logs in
+  `results.json` (`run-directory.md`, *`results.json`*). A dry run reports
+  none. If the run refuses the report (it raised taking it), the role kills
+  the program it just started and raises on, so the failure is the runner's
+  `role_raised`, never the role's `role_io`.
+- **A command's fields are checked against its own wire form** when the
+  command is made: each field, encoded and decoded as its declared type,
+  must come back equal. `playback.Play(source="clip.wav",
+  volume_mb="-3000")` raises `TypeError` naming `playback.play.volume_mb` from
+  the script's `send`, before anything is journaled or reaches the role; the
+  run's failure is the script's `script_error`.
 
 The registered names:
 
@@ -248,7 +267,7 @@ The registered names:
 |---|---|
 | Commands | `check`, `release`, `capture.start`, `capture.stop`, `playback.play`, `playback.stop`, `playback.clock` |
 | Results | `capture.started`, `capture.stopped`, `capture.checked`, `capture.released`, `playback.started`, `playback.stopped`, `playback.checked`, `playback.released`, `playback.clock_read` |
-| Events | `capture.gap`, `capture.late`, `capture.failed`, `playback.ended`, `playback.underrun`, `playback.failed` |
+| Events | `process.started`, `capture.gap`, `capture.late`, `capture.failed`, `playback.ended`, `playback.underrun`, `playback.failed` |
 
 ## The capture kind
 
@@ -265,7 +284,8 @@ carries none. On a host without it the loader ends the recorder with exit
 status 127 before it prints a line, and the role reports `recorder_exited`
 with `data.exit_status` 127, from `check` as from `start`. The failure does
 not carry the loader's message: a dry run keeps the recorder's stderr nowhere,
-and a run keeps it in `logs/<role>/recorder-<NNNN>.stderr.log`. Its build
+and a run keeps it in `logs/<role>/recorder-<NNNN>.stderr.log`, or
+`probe-<NNNN>.stderr.log` for a `check`. Its build
 reports the commit the build pins, with
 `source` `declared` and `dirty` `null` (see `run-directory.md`, *What `dirty`
 means*).
@@ -324,7 +344,13 @@ chip cannot be read before anything is recorded.
   replies from what the start reported. A probe opens the device, so it is
   refused with `already_capturing` while a capture is running (or, in a dry
   run, while the dry state is capturing). The device's open, the parameter
-  grant and the destination are exercised exactly as in a run.
+  grant and the destination are exercised exactly as in a run. A `check` a
+  script sends in a run keeps the probe's two streams as
+  `logs/<role>/probe-<NNNN>.stdout.jsonl` and `…stderr.log`, numbered per
+  role from `0001`, and reports `process.started`; a dry run keeps nothing.
+- Each recorder a capture starts is reported with `process.started`
+  (`pod-capture`, its pid, and `logs/<role>/recorder-<NNNN>.stdout.jsonl` and
+  `…stderr.log`). A recorder that could not be started leaves no log file.
 - A dry `capture.start` or `capture.stop` checks the order of commands against
   a dry state of the role's own and answers with the probe's `capture.started`
   and `capture.stopped`, running the probe first if none has run. Where the
@@ -371,7 +397,7 @@ The role's own:
 | `already_capturing` | a capture is running |
 | `not_capturing` | no capture is running |
 | `unknown_command` | the command is not one the capture kind has |
-| `role_io` | the role could not write a file of its own: its directories in the run, its copies of the recorder's output, the pid note, the probe's scratch directory. Not `destination`, which is the recorder's own file |
+| `role_io` | the role could not write a file of its own: its directories in the run, its copies of the recorder's output, the probe's scratch directory. Not `destination`, which is the recorder's own file, and not the run's refusal of `process.started`, which is the runner's `role_raised` |
 
 From the runner, with no role behind it: `not_configured` (the role is not in
 the configuration), `kind_mismatch` (the configuration binds it to another
@@ -1087,6 +1113,15 @@ quiet_hours = [["22:00", "07:00"]]
   server. It authenticates with the cookie at `$HOME/.config/pulse/cookie`
   when there is one. A fault in the client ends one play with `client`, and
   the runner and every other role go on.
+- In a run, the role keeps both streams of every client it starts, as
+  `logs/<role>/pulse-client-<NNNN>.stdout.jsonl` and `…stderr.log`, numbered
+  per role from `0001`: one client, and one pair, for each `check` and each
+  play that reaches the output, refused or not (a play judged over its cap
+  is judged after the output is attached). Each line is copied to its file
+  as it is read, and each client is reported with `process.started`
+  (`pulse-client`). A copy that fails ends the client, and the role's next
+  request fails with `client`: a client whose output was not kept is not one
+  the run can explain. A dry run keeps nothing.
 
 **The control.** A sink's volume and mute are one control, `sink` index 0,
 a channel per sink channel named by its position (`front-left`, …; a
@@ -1394,9 +1429,42 @@ stdout carries one JSON document and nothing else, prose goes to stderr:
   `interrupted`; `lab assess` assesses it when wanted), `refused` (the
   assessment refused the run directory; `detail` gives its reason and
   detail), `raised` (the assessment raised; the traceback is on stderr and
-  `detail` is `"<Type>: <message>"`) or `assessment_interrupted` (SIGINT or
-  SIGTERM arrived during it).
+  in the run's `logs/runner.log`, and `detail` is `"<Type>: <message>"`) or
+  `assessment_interrupted` (SIGINT or SIGTERM arrived during it).
 - a refusal: `{"ok": false, "problems": […]}`. Nothing was created.
+
+**What a script and the libraries write.** The runner holds the `lab`
+process's file descriptors 1 and 2 from before the script is loaded, so
+whatever is written to them, by the script's `print`, by `os.write`, by a
+library such as libasound or by a program the script starts, never reaches
+stdout ahead of or beside the document:
+
+- in a run, it is kept in the run as `logs/lab.stdout.log` and
+  `logs/lab.stderr.log`, what the script wrote while it was loaded first,
+  until `results.json` is written. The closing assessment runs after that,
+  with the terminal's own streams: what the process writes while it
+  assesses is not kept (`run-directory.md`, *`assessment.json`*);
+- in a dry run, and in a refused `run`, which keep nothing, it is written
+  to stderr when the command ends, what went to descriptor 1 first.
+
+stdout is line-buffered, so a script's `print` reaches its file as it is
+printed. The programs the roles start are given pipes of their own and are
+kept by their roles (`process.started`). A program the script starts while
+it is loaded, before the run directory exists, keeps the descriptors it was
+given: what it writes once `logs/lab.stdout.log` and `logs/lab.stderr.log`
+exist is not kept anywhere. A program the script starts from `run` writes
+to those two files.
+
+**What a person at the terminal sees** during a run: nothing. After it,
+`lab run` writes one line to stderr, `lab run: …`, when the run did not
+complete (naming the outcome, `results.json` and the run's `logs/`
+directory), or when a thread of the `lab` process raised during the run,
+whatever the outcome (saying how many tracebacks `logs/runner.log` holds,
+and naming `logs/lab.stderr.log` for any it could not note); a run that did
+both gets one line saying both. A completed run in which no thread raised
+writes nothing there, whatever its script printed. A thread's raise in a
+completed run is in no document a program reads: `results.json` still says
+`completed`.
 
 ### Exit statuses
 
@@ -1407,8 +1475,8 @@ stdout carries one JSON document and nothing else, prose goes to stderr:
 | 2 | refused: no report could be made | refused before anything was created |
 | 3 | the runner raised instead of returning | the runner raised instead of returning |
 
-**Exit status 2** prints the refusal. Its problems have the seven keys of a
-dry-run problem (below), and `where` is one of:
+**Exit status 2** prints the refusal. Its problems have the eight keys of a
+dry-run problem (below), `log` `null`, and `where` is one of:
 
 | `where` | `reason` | Command |
 |---|---|---|
@@ -1446,14 +1514,22 @@ devices. It happens:
   `assessment_interrupted`;
 - when a probe's recorder reader fails in a way the role cannot turn into a
   reply;
-- when a run could not write its own files or a role's release raised. Every
-  role the run used has then already been sent its `release`, and the run
-  directory has no `results.json`. A release raises, among other cases, for
-  a capture whose recorder reader failed, or a play whose end could not be
-  reported, when no command of the script's has raised that
-  error first: the role's next start, stop or play raises it, as a
-  `RuntimeError` and not a `RoleFailure`, and the run then ends `failed`
-  with exit status 1, whether or not the script catches the error.
+- when a run could not write its own files (a journal line, a note, the
+  manifest, the results, or its logs at the start). Every role the run used
+  has then already been sent its `release`, the run directory has no
+  `results.json`, and its `logs/runner.log` ends with `the run could not be
+  finished:` and the traceback, where that entry could still be written
+  (`run-directory.md`, *Runs with no `results.json`*).
+
+A role that raises on the runner's `release` is not status 3: the raise is
+that role's `role_raised` failure with `command` `release`, its traceback in
+`logs/runner.log`, every other role is still released, the run is `failed`
+and assessed, and `lab run` exits 1. A release raises, among other cases,
+for a capture whose recorder reader failed, or a play whose end could not
+be reported, when no command of the script's has raised that error first;
+the role's next start, stop or play raises it, as a `RuntimeError` and not a
+`RoleFailure`, with the same result whether or not the script catches it.
+Such a capture's or play's record ends `failed` with `end_not_reported`.
 
 ## The dry run
 
@@ -1505,13 +1581,14 @@ only on a real reading is not checked.
 ```json
 {"schema": 2, "ok": false,
  "problems": [{"where": "role", "reason": "no_card", "detail": "…", "role": "mic",
-               "command": "check", "key": null, "data": {"at_frame": null, "at": {…}, "cards": […]}}],
+               "command": "check", "key": null, "data": {"at_frame": null, "at": {…}, "cards": […]},
+               "log": null}],
  "roles": {"mic": {"kind": "capture", "machine": "bench", "check": {…the whole reply…}}},
  "trace": {"complete": false, "commands": 1, "stopped_at": "RoleFailure: … at ten_seconds.py:11"}}
 ```
 
 - `ok`: true when `problems` is empty.
-- Every problem has exactly seven keys, in this order, `null` where a key does
+- Every problem has exactly eight keys, in this order, `null` where a key does
   not apply:
   - `where`: the step that found it (below).
   - `reason`, `detail`.
@@ -1522,6 +1599,9 @@ only on a real reading is not checked.
     fault (the empty string for the whole file).
   - `data`: what the reason carries (`run-directory.md`, *Failure data*), `{}`
     when nothing.
+  - `log`: always `null`: a dry run keeps no log. In a run it points at the
+    log behind the failure (`run-directory.md`, *Problems*).
+- The report's `schema` is 2, unchanged by layout 5.
 - `roles.<r>`: `kind`, the kind the script's `ROLES` expects; `machine`, the
   configured machine, or `null` when the role is not configured; `check`, the
   whole encoded reply to `check`, `result_type` included, or `null` for a role
@@ -1555,7 +1635,9 @@ only on a real reading is not checked.
    `unreachable`.
 2. Create the run directory, its `.gitignore` first; copy the script, the
    configuration and the notes into it; write the first manifest; open the
-   journal.
+   journal; create `logs/runner.log` with its first entry, `run started`,
+   and `logs/lab.stdout.log` and `logs/lab.stderr.log`, holding what the
+   script wrote while it was loaded, and point descriptors 1 and 2 at them.
 3. Call `run(lab)`. Every command, reply and event is journaled as it
    happens.
 4. When `run` returns, or anything at all leaves it, send `release` to every
@@ -1563,7 +1645,8 @@ only on a real reading is not checked.
    machine is sent none. A release is journaled with `by` `runner`. A file
    of its own that the runner cannot write does not keep any role from its
    release.
-5. Write `results.json`.
+5. Write `results.json`, whose `logs` names every log the run kept, and put
+   descriptors 1 and 2 back.
 6. Unless the run was interrupted, assess it (*Assessing a run*), writing
    `alignment.json` and `assessment.json`, and put the assessment's answer in
    the pointer's `usability`. Nothing the assessment does changes the exit
@@ -1608,7 +1691,8 @@ The runner stops every capture it started when the script ends, however it
 ends. If the runner is killed outright (SIGKILL, a power loss), the recorder,
 which runs in a session of its own, keeps recording and keeps the device. The
 next start on that device fails with `open`. The recorder's pid is in the
-run's `logs/runner.log`. Send it SIGTERM and it stops cleanly.
+journal's `process.started` line that names its logs. Send it SIGTERM and it
+stops cleanly.
 
 ## Marking a source
 
@@ -1689,7 +1773,7 @@ verdict on the run.
 |---|---|
 | 0 | a report was written; every capture and play was read and every marked play located in some capture. A run with no marked play aligns with 0 |
 | 1 | a report was written that says otherwise |
-| 2 | refused, no report written: `where` `run`, `reason` `unreadable` (no directory, no `manifest.json` or `results.json` that is JSON of the expected shape), `layout` (not layout 4) or `not_writable` (the run directory cannot be written: a read-only disk, a directory without write permission, or a leftover `.alignment.tmp/` that cannot be removed, which the detail names; decided after the run is read and before any capture is read); or `where` `arguments`, `reason` `usage` |
+| 2 | refused, no report written: `where` `run`, `reason` `unreadable` (no directory, no `manifest.json` or `results.json` that is JSON of the expected shape), `layout` (not layout 5) or `not_writable` (the run directory cannot be written: a read-only disk, a directory without write permission, or a leftover `.alignment.tmp/` that cannot be removed, which the detail names; decided after the run is read and before any capture is read); or `where` `arguments`, `reason` `usage` |
 | 3 | the command raised; a `.alignment.tmp/` left in the run is not part of the record, and the next `align` clears it, or refuses with `not_writable` if it cannot |
 
 `align` writes its report and its scratch into the run and nowhere else. To

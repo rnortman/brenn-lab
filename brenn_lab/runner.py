@@ -8,6 +8,7 @@ explain what happened.
 """
 
 import hashlib
+import os
 import signal
 import sys
 import threading
@@ -20,11 +21,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from brenn_lab import labconfig
+from brenn_lab import labconfig, streams
 from brenn_lab.account import Account
 from brenn_lab.buildinfo import Revision
 from brenn_lab.data import (
     COMMANDS,
+    ROLE_ERROR,
     Check,
     Command,
     Event,
@@ -32,6 +34,7 @@ from brenn_lab.data import (
     JsonObject,
     JsonValue,
     Location,
+    ProcessStarted,
     Release,
     Reply,
     Request,
@@ -44,12 +47,19 @@ from brenn_lab.data import (
 from brenn_lab.labconfig import Installed, LabConfig
 from brenn_lab.place import Place
 from brenn_lab.roles import KINDS, Role
-from brenn_lab.rundir import LAYOUT, RunDir
+from brenn_lab.rundir import LAYOUT, LOGS, RUNNER_LOG, RunDir
 from brenn_lab.script import Lab, RoleFailure
 
-SCHEMA = 2
+REPORT_SCHEMA = 2
+"""A dry run's report and a refusal's."""
+RESULTS_SCHEMA = 3
+"""`results.json`'s."""
 
 UNREACHABLE = "this build has no transport"
+
+ROLE_RAISED = "role_raised"
+"""The reason of a role's failure that is a raise of the role in place of a
+reply; its traceback is in `runner.log`."""
 
 
 @dataclass(frozen=True)
@@ -58,7 +68,9 @@ class Problem:
 
     `where` says what found it. `role`, `command` (the command whose reply
     failed) and `key` (the configuration's key at fault) are null where they
-    do not apply; `data` is whatever the reason carries.
+    do not apply; `data` is whatever the reason carries. `log` points at the
+    run's log behind the failure, null where nothing was kept or no log
+    applies.
     """
 
     where: str
@@ -68,10 +80,26 @@ class Problem:
     command: str | None = None
     key: str | None = None
     data: JsonObject = field(default_factory=dict)
+    log: JsonObject | None = None
 
 
 def _role_problem(role: str, failure: Failure, command: str | None = None) -> Problem:
+    """A role's failure where nothing was kept: in a dry run or a refusal."""
     return Problem("role", failure.reason, failure.detail, role, command, None, failure.data)
+
+
+def _log_entry(
+    role: str | None, process: str, pid: int, stream: str, file: JsonObject, seq: int | None
+) -> JsonObject:
+    """One entry of `results.json`'s `logs`."""
+    return {
+        "role": role,
+        "process": process,
+        "pid": pid,
+        "stream": stream,
+        "file": file,
+        "seq": seq,
+    }
 
 
 @dataclass(frozen=True)
@@ -253,13 +281,19 @@ def dry_run(
 
     Must be called on the main thread: for the length of the dry run SIGTERM
     raises `KeyboardInterrupt`, as SIGINT does, so that a probe interrupted
-    either way kills its recorder before the exception leaves.
+    either way kills its recorder before the exception leaves. What the
+    process writes to its descriptors 1 and 2 meanwhile is held, and written
+    to stderr when the dry run ends.
     """
-    previous = signal.signal(signal.SIGTERM, signal.default_int_handler)
+    held = streams.hold()
     try:
-        return _dry_run(lab_path, machine, script_path, pinned)
+        previous = signal.signal(signal.SIGTERM, signal.default_int_handler)
+        try:
+            return _dry_run(lab_path, machine, script_path, pinned)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        held.release()
 
 
 def _no_events(event: Event) -> None:
@@ -280,7 +314,7 @@ def _dry_run(
 
     def report(roles: JsonObject, trace: JsonObject | None) -> JsonObject:
         return {
-            "schema": SCHEMA,
+            "schema": REPORT_SCHEMA,
             "ok": not problems,
             "problems": [encode_object(p) for p in problems],
             "roles": roles,
@@ -398,6 +432,22 @@ class _Ledger:
             r: KINDS[kind].account(r, self.pointer) for r, kind in roles.items()
         }
         self.first: Problem | None = None
+        self._runner_log = self._in_run(RUNNER_LOG)
+        # Every log the run keeps, in the order its process started: the
+        # `lab` process's own three, then each process a role reported.
+        pid = os.getpid()
+        self.logs: list[JsonValue] = [
+            _log_entry(None, "lab", pid, "log", self._runner_log, None),
+            *(
+                _log_entry(None, "lab", pid, s, self._in_run(f"{LOGS}/{streams.log_name(s)}"), None)
+                for s in streams.STREAMS
+            ),
+        ]
+        # The stderr log of the last process each role reported starting.
+        self._last_stderr: dict[str, JsonObject | None] = dict.fromkeys(roles)
+
+    def _in_run(self, path: str) -> JsonObject:
+        return {"machine": self._machine, "path": path, "in_run": True}
 
     def _journal(self, message: Command | Reply | Event, by: str | None) -> None:
         self._seq += 1
@@ -413,10 +463,33 @@ class _Ledger:
 
     def _role_failure(self, role: str, failure: Failure, by: str, name: str) -> None:
         """A failure of `role`, carried by the reply to command `name` (`by`
-        "command") or by event `name` (`by` "event").
+        "command") or by event `name` (`by` "event"). A raise in the `lab`
+        process points at `runner.log`, where its traceback is noted; any
+        other failure at the stderr log of the last process the role started.
         """
-        self.failures[role].append({by: name, **encode_object(failure)})
-        self._fail(_role_problem(role, failure, name if by == "command" else None))
+        if failure.reason in (ROLE_RAISED, ROLE_ERROR):
+            log: JsonObject | None = self._runner_log
+        else:
+            log = self._last_stderr[role]
+        self.failures[role].append({by: name, **encode_object(failure), "log": log})
+        command = name if by == "command" else None
+        self._fail(
+            Problem("role", failure.reason, failure.detail, role, command, None, failure.data, log)
+        )
+
+    def _started(self, role: str, started: ProcessStarted) -> None:
+        """Index the logs of a process `role` started, as the journal line
+        just written names them.
+        """
+        stderr: JsonObject | None = None
+        for kept in started.logs:
+            file = self.pointer(kept.location)
+            self.logs.append(
+                _log_entry(role, started.process, started.pid, kept.stream, file, self._seq)
+            )
+            if kept.stream == "stderr":
+                stderr = file
+        self._last_stderr[role] = stderr
 
     def command(self, command: Command, by: str) -> None:
         with self._lock:
@@ -446,6 +519,8 @@ class _Ledger:
     def event(self, event: Event) -> None:
         with self._lock:
             self._journal(event, None)
+            if isinstance(event.body, ProcessStarted):
+                self._started(event.role, event.body)
             failure = failure_of(event.body)
             if failure is not None:
                 self._role_failure(event.role, failure, "event", event.name)
@@ -458,7 +533,7 @@ class _Ledger:
         """
         with self._lock:
             first = self.first is None
-            self._fail(Problem("script", "script_error", _describe(e)))
+            self._fail(Problem("script", "script_error", _describe(e), log=self._runner_log))
             return first
 
     def role_raised(self, command: Command, e: BaseException) -> None:
@@ -467,7 +542,7 @@ class _Ledger:
         that cannot be written leaves it recorded.
         """
         with self._lock:
-            failure = Failure("role_raised", _describe(e))
+            failure = Failure(ROLE_RAISED, _describe(e))
             self._role_failure(command.role, failure, "command", command.name)
         self._rundir.note(
             f"role {command.role} raised on {command.name}:\n"
@@ -535,6 +610,51 @@ class _Stop:
         raise Interrupted
 
 
+class _ThreadRaises:
+    """`threading.excepthook` while a run's roles exist: a thread's traceback
+    is noted in `logs/runner.log`, or, when the note cannot be written, handed
+    to the hook found before, which writes it to stderr.
+    """
+
+    def __init__(self, rundir: RunDir):
+        self._rundir = rundir
+        self._lock = threading.Lock()
+        self._previous = threading.excepthook
+        self.raised = 0
+        self.noted = 0
+
+    # TODO(thread-raise-in-completed-run-not-in-results): a run in which a
+    # thread raised and nothing failed says `completed` and names the
+    # traceback nowhere in `results.json`.
+    def __call__(self, args: threading.ExceptHookArgs) -> None:
+        if args.exc_type is SystemExit:
+            # The hook found before ignores it, as Python's own does.
+            self._previous(args)
+            return
+        with self._lock:
+            self.raised += 1
+        name = "<unknown>" if args.thread is None else args.thread.name
+        try:
+            self._rundir.note(
+                f"thread {name} raised:\n"
+                + "".join(
+                    traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+                )
+            )
+        except Exception:
+            self._previous(args)
+            return
+        with self._lock:
+            self.noted += 1
+
+    def __enter__(self) -> _ThreadRaises:
+        threading.excepthook = self
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        threading.excepthook = self._previous
+
+
 class _Live:
     """The session a run's script sends through."""
 
@@ -555,11 +675,14 @@ class _Live:
         self._stop.check()
         self._stop.in_call = True
         try:
+            # A body that cannot cross the seam raises here, before the role
+            # is used: nothing reached it, so there is nothing to release.
+            command = Command(role=role, body=body)
             # Used from the moment it is sent: whatever then fails, a role
             # that may have started something is released.
             if role not in self.used:
                 self.used.append(role)
-            reply = self.exchange(Command(role=role, body=body), "script")
+            reply = self.exchange(command, "script")
         finally:
             self._stop.in_call = False
             # A stop that arrived during the command is raised whether the
@@ -583,9 +706,10 @@ class _Live:
         return reply
 
     def release(self, role: str) -> list[Exception]:
-        """Send the runner's `release` to a hosted role, and return what was
-        raised on the way. The role is sent its `release` whether or not the
-        command's journal line could be written.
+        """Send the runner's `release` to a hosted role, and return what the
+        runner could not write on the way. The role is sent its `release`
+        whether or not the command's journal line could be written. What the
+        role raises is recorded as its `role_raised`.
         """
         errors: list[Exception] = []
         command = Command(role=role, body=Release())
@@ -596,7 +720,10 @@ class _Live:
         try:
             reply = self._hosted[role].handle(command)
         except Exception as e:
-            errors.append(e)
+            try:
+                self._ledger.role_raised(command, e)
+            except Exception as unwritten:
+                errors.append(unwritten)
             return errors
         try:
             self._ledger.reply(reply, "runner")
@@ -625,7 +752,78 @@ def run(
 
     Must be called on the main thread: it takes SIGINT and SIGTERM for the
     length of the run.
+
+    What the process writes to its descriptors 1 and 2, from before the
+    script is loaded until the results are written, is kept in the run's
+    `logs/lab.stdout.log` and `logs/lab.stderr.log`; when no run directory
+    was made, it is written to stderr once this ends. After that, one line
+    goes to stderr when the run did not complete or a thread raised during
+    it, saying where to look.
     """
+    held = streams.hold()
+    try:
+        ran = _held_run(
+            lab_path,
+            machine,
+            script_path,
+            script_given_as,
+            out,
+            notes_path,
+            harness,
+            workspace,
+            pinned,
+            held,
+        )
+    finally:
+        held.release()
+    if isinstance(ran, Refused):
+        return ran
+    pointer, raises = ran
+    told = _told(pointer, raises)
+    if told is not None:
+        sys.stderr.write(told + "\n")
+        sys.stderr.flush()
+    return pointer
+
+
+def _told(pointer: JsonObject, raises: _ThreadRaises) -> str | None:
+    """The line for stderr after a run, if the run did not complete or a
+    thread raised during it.
+    """
+    run = Path(str(pointer["run"]))
+    said: list[str] = []
+    if pointer["completed"] is not True:
+        said.append(
+            f"the run did not complete (outcome {pointer['outcome']}): see "
+            f"{pointer['results']} and the logs in {run / LOGS}"
+        )
+    if raises.raised:
+        said.append(
+            f"{raises.raised} thread(s) raised during the run; {raises.noted} "
+            f"traceback(s) are in {run / RUNNER_LOG}"
+            + (
+                f", the rest in {run / LOGS / streams.log_name('stderr')}"
+                if raises.noted < raises.raised
+                else ""
+            )
+        )
+    if not said:
+        return None
+    return "lab run: " + "; ".join(said)
+
+
+def _held_run(
+    lab_path: Path,
+    machine: str,
+    script_path: Path,
+    script_given_as: str,
+    out: Path,
+    notes_path: Path | None,
+    harness: Revision,
+    workspace: Path | None,
+    pinned: Mapping[str, str],
+    held: streams.Held,
+) -> tuple[JsonObject, _ThreadRaises] | Refused:
     out = out.absolute()
     reads = [(lab_path, "lab configuration"), (script_path, "script")]
     if notes_path is not None:
@@ -661,8 +859,9 @@ def run(
     if problems:
         return Refused(problems)
 
-    rundir = RunDir.create(out)
+    rundir = RunDir.create(out, machine)
     try:
+        held.settle(rundir.path / LOGS)
         return _run(
             rundir,
             config,
@@ -676,6 +875,15 @@ def run(
             unreachable,
             pinned,
         )
+    except BaseException as e:
+        try:
+            rundir.note("the run could not be finished:\n" + "".join(traceback.format_exception(e)))
+        except Exception as unwritten:
+            e.add_note(
+                f"the run could not be finished, and {RUNNER_LOG} could not say so: "
+                f"{_describe(unwritten)}"
+            )
+        raise
     finally:
         rundir.close()
 
@@ -714,7 +922,7 @@ def _run(
     harness: Revision,
     unreachable: dict[str, Failure],
     pinned: Mapping[str, str],
-) -> JsonObject:
+) -> tuple[JsonObject, _ThreadRaises]:
     run_id = str(uuid.uuid4())
     started = now(machine)
     script_file = rundir.keep("script", source[0], source[1])
@@ -753,11 +961,81 @@ def _run(
     rundir.open_journal()
 
     ledger = _Ledger(rundir, machine, manifest, script.roles)
+    with _ThreadRaises(rundir) as raises:
+        returned, stop = _script_and_release(rundir, config, pinned, script, unreachable, ledger)
+
+    if stop.requested:
+        failure: Problem | None = Problem("runner", "interrupted", "the runner was told to stop")
+        outcome = "interrupted"
+    else:
+        failure = ledger.first
+        outcome = "completed" if returned and failure is None else "failed"
+    completed = outcome == "completed"
+
+    sections: JsonObject = {}
+    for kind_name, of_kind in KINDS.items():
+        records = [
+            record
+            for name in sorted(script.roles)
+            if script.roles[name] == kind_name
+            for record in ledger.accounts[name].records()
+        ]
+        sections[of_kind.totals_key] = of_kind.totals(records)
+        sections[of_kind.section] = list[JsonValue](records)
+    results: JsonObject = {
+        "schema": RESULTS_SCHEMA,
+        "run_id": run_id,
+        "outcome": outcome,
+        "completed": completed,
+        "failure": None if failure is None else encode_object(failure),
+        "started": encode_value(started),
+        "ended": encode_value(now(machine)),
+        **sections,
+        "roles": {
+            name: {
+                "kind": kind,
+                "commands": ledger.commands[name],
+                "failures": ledger.failures[name],
+            }
+            for name, kind in script.roles.items()
+        },
+        "logs": ledger.logs,
+        "usability": {
+            "assessed": False,
+            "reason": (
+                "results.json states no usability assessment; the run's assessment, "
+                "when one was made, is assessment.json"
+            ),
+            "see": "assessment.json",
+        },
+    }
+    rundir.write_results(results)
+    pointer: JsonObject = {
+        "run": str(rundir.path),
+        "outcome": outcome,
+        "completed": completed,
+        "results": str(rundir.path / "results.json"),
+    }
+    return pointer, raises
+
+
+def _script_and_release(
+    rundir: RunDir,
+    config: LabConfig,
+    pinned: Mapping[str, str],
+    script: Script,
+    unreachable: dict[str, Failure],
+    ledger: _Ledger,
+) -> tuple[bool, _Stop]:
+    """Make the hosted roles, run the script, and release every role it
+    used: whether the script returned, and the stop. Raises once every role
+    is released if the runner could not write its own files.
+    """
     hosted: dict[str, Role] = {}
     for name, kind in script.roles.items():
         if name not in unreachable:
             data = rundir.data(KINDS[kind].section, name)
-            place = Place(data=data, logs=rundir.logs(name), note=rundir.note)
+            place = Place(data=data, logs=rundir.logs(name))
             hosted[name] = _make_role(config, pinned, name, ledger.event, place)
 
     stop = _Stop()
@@ -804,55 +1082,4 @@ def _run(
             signal.signal(s, handler)
     if errors:
         raise ExceptionGroup("the run could not be finished", errors)
-
-    if stop.requested:
-        failure: Problem | None = Problem("runner", "interrupted", "the runner was told to stop")
-        outcome = "interrupted"
-    else:
-        failure = ledger.first
-        outcome = "completed" if returned and failure is None else "failed"
-    completed = outcome == "completed"
-
-    sections: JsonObject = {}
-    for kind_name, of_kind in KINDS.items():
-        records = [
-            record
-            for name in sorted(script.roles)
-            if script.roles[name] == kind_name
-            for record in ledger.accounts[name].records()
-        ]
-        sections[of_kind.totals_key] = of_kind.totals(records)
-        sections[of_kind.section] = list[JsonValue](records)
-    results: JsonObject = {
-        "schema": SCHEMA,
-        "run_id": run_id,
-        "outcome": outcome,
-        "completed": completed,
-        "failure": None if failure is None else encode_object(failure),
-        "started": encode_value(started),
-        "ended": encode_value(now(machine)),
-        **sections,
-        "roles": {
-            name: {
-                "kind": kind,
-                "commands": ledger.commands[name],
-                "failures": ledger.failures[name],
-            }
-            for name, kind in script.roles.items()
-        },
-        "usability": {
-            "assessed": False,
-            "reason": (
-                "results.json states no usability assessment; the run's assessment, "
-                "when one was made, is assessment.json"
-            ),
-            "see": "assessment.json",
-        },
-    }
-    rundir.write_results(results)
-    return {
-        "run": str(rundir.path),
-        "outcome": outcome,
-        "completed": completed,
-        "results": str(rundir.path / "results.json"),
-    }
+    return returned, stop

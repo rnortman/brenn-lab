@@ -102,6 +102,25 @@ def _name_in(table: Mapping[str, type], body: object, what: str) -> str:
     return name
 
 
+def _survives_wire(name: str, body: object) -> None:
+    """`TypeError` naming command `name` and the field, unless each of the
+    body's fields decodes from its own JSON encoding to a value equal to it.
+    """
+    assert dataclasses.is_dataclass(body) and not isinstance(body, type)
+    hints = typing.get_type_hints(type(body))
+    for f in dataclasses.fields(body):
+        value = getattr(body, f.name)
+        where = f"{name}.{f.name}"
+        try:
+            back = decode_value(hints[f.name], encode_value(value), where)
+        except (TypeError, DecodeError) as e:
+            raise TypeError(f"command {where}: {value!r} does not survive a wire: {e}") from e
+        if back != value:
+            raise TypeError(
+                f"command {where}: {value!r} does not survive a wire: it decodes as {back!r}"
+            )
+
+
 MONOTONIC = "CLOCK_MONOTONIC"
 REALTIME = "CLOCK_REALTIME"
 
@@ -162,12 +181,41 @@ class Failure:
     data: JsonObject = field(default_factory=dict)
 
 
+# The reason of a failure event by which a role reports that a thread of its
+# own raised; the traceback is wherever the run keeps tracebacks.
+ROLE_ERROR = "role_error"
+
+
 @dataclass(frozen=True)
 class Location:
     """Where a role wrote a file: an absolute path on the named machine."""
 
     machine: str
     path: str
+
+
+@dataclass(frozen=True)
+class StreamLog:
+    """Where one output stream of a process a role started is kept.
+    `stream` is "stdout" or "stderr".
+    """
+
+    stream: str
+    location: Location
+
+
+@event("process.started")
+@dataclass(frozen=True)
+class ProcessStarted:
+    """A role started a program whose output it keeps: the program's name,
+    its process id on the role's machine, and where each stream is kept.
+    Reported once the program is spawned and before the role reads its
+    output for meaning; any kind's role reports it.
+    """
+
+    process: str
+    pid: int
+    logs: tuple[StreamLog, ...]
 
 
 @command("check")
@@ -196,10 +244,8 @@ class Command:
     dry: bool = False
 
     def __post_init__(self) -> None:
-        # TODO(correctness-script-type-error-attributed-to-role): the body's
-        # fields are not checked against their types, so a badly typed field
-        # raises inside the role and the run's failure names the role.
-        _name_in(_COMMANDS, self.body, "command")
+        name = _name_in(_COMMANDS, self.body, "command")
+        _survives_wire(name, self.body)
 
     @property
     def name(self) -> str:

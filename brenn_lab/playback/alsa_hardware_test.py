@@ -98,7 +98,7 @@ class Guarded(alsa.AlsaOutput):
 
 def mixer_now() -> dict[ControlName, tuple[Channel, ...]]:
     output = alsa.AlsaOutput(CARD)
-    attached = output.attach()
+    attached = output.attach(None)
     assert not isinstance(attached, Failure), attached
     try:
         read = output.read((LEVEL, HELD))

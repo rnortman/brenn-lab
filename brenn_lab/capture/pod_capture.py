@@ -48,6 +48,7 @@ from brenn_lab.data import (
     decode_value,
     encode_value,
 )
+from brenn_lab.place import create_logs, discard_logs
 from brenn_lab.sound import Granted
 
 PROGRAM = "pod-capture"
@@ -80,8 +81,8 @@ REASONS: dict[str, str] = {
 @dataclass(frozen=True)
 class Spec:
     """One start of the recorder: which program, what to demand of which card,
-    the stream's source name, the file to write, and where to copy the
-    recorder's stdout and stderr (nowhere when None).
+    the stream's source name, the file to write, and the two files to copy
+    the recorder's stdout and stderr to (nowhere when None).
     """
 
     program: str
@@ -89,8 +90,7 @@ class Spec:
     device: CaptureDevice
     pod_id: str
     out: Path
-    stdout_log: Path | None
-    stderr_log: Path | None
+    logs: tuple[Path, Path] | None
 
 
 # The event lines, as far as brenn-lab reads them. Keys beyond these are
@@ -285,28 +285,24 @@ def start(
     spec: Spec,
     capture: int,
     report: Callable[[object], None],
-    note: Callable[[str], None],
+    spawned: Callable[[int], None],
 ) -> Running | Failure:
     """Start capture number `capture`. Returns the running capture once the
     recorder says it started, or the failure. `report` receives the capture's
     `Gap`, `Late` and `Failed` events, from a thread of the adapter's, and is
-    never called while the adapter holds a lock; `note` receives the
-    recorder's pid.
+    never called while the adapter holds a lock; `spawned` receives the
+    recorder's pid once it is spawned, before any of its output is read.
 
-    An `OSError` creating a log file or from `note` is raised, and so is
-    anything that interrupts the wait for the first line; a recorder already
-    spawned is killed, and has exited, before it is.
+    The log files exist only for a recorder that was spawned: a spawn that
+    fails removes them. An `OSError` creating a log file is raised, and so is
+    whatever `spawned` raises and anything that interrupts the wait for the
+    first line; a recorder already spawned is killed, and has exited, before
+    it is.
     """
     args = argv(spec)
     if isinstance(args, Failure):
         return args
-    stdout_log = _create(spec.stdout_log)
-    try:
-        stderr_log = _create(spec.stderr_log)
-    except OSError:
-        if stdout_log is not None:
-            stdout_log.close()
-        raise
+    logs = None if spec.logs is None else create_logs(spec.logs)
     try:
         proc = subprocess.Popen(
             args,
@@ -316,17 +312,22 @@ def start(
             start_new_session=True,
         )
     except OSError as e:
-        for f in (stdout_log, stderr_log):
-            if f is not None:
-                f.close()
+        if spec.logs is not None and logs is not None:
+            discard_logs(spec.logs, logs)
         return Failure(
             "recorder_missing",
             f"cannot start {spec.program}: {e.strerror}",
             {"program": spec.program},
         )
+    stdout_log, stderr_log = (None, None) if logs is None else logs
     running = Running(proc, spec, capture, report, stdout_log, stderr_log)
     try:
-        note(f"{spec.pod_id}: capture {capture}: {PROGRAM} pid {proc.pid}")
+        try:
+            spawned(proc.pid)
+        finally:
+            # Read whatever `spawned` did, so that an abort below is seen
+            # through to the recorder's exit.
+            running.read()
         return running.await_start()
     except BaseException:
         running.abort()
@@ -343,7 +344,9 @@ def io_failure(e: OSError, doing: str) -> Failure:
 
 
 class Running:
-    """One recorder process, from its start to its exit."""
+    """One recorder process, from its start to its exit. Its output is read
+    from `read` on.
+    """
 
     def __init__(
         self,
@@ -374,6 +377,9 @@ class Running:
         self._stderr = bytearray()
         self._stderr_thread = threading.Thread(target=self._copy_stderr, daemon=True)
         self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
+
+    def read(self) -> None:
+        """Start reading the recorder's output."""
         self._stderr_thread.start()
         self._stdout_thread.start()
 
@@ -600,8 +606,7 @@ class Running:
             # An end nobody asked for is reported before the capture reads as
             # ended, so that no one can find it ended and not yet reported.
             # With the reader's error held, no end reaches the capture's
-            # record, which keeps `ended` null.
-            # TODO(errhandling-assessment-refuses-runner-written-null-ended)
+            # record, which the run gives `end_not_reported`.
             if begun and not asked and self._error is None:
                 self._report(
                     Failed(
@@ -675,11 +680,6 @@ def _unasked(outcome: Stopped | Failure) -> Failure:
 
 def _contract(why: str, data: dict[str, JsonValue]) -> Failure:
     return Failure("recorder_contract", f"the recorder broke its contract: {why}", data)
-
-
-def _create(path: Path | None) -> IO[bytes] | None:
-    """`path` created for writing bytes, or nothing when `path` is None."""
-    return None if path is None else path.open("xb")
 
 
 @contextlib.contextmanager

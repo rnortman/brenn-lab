@@ -40,12 +40,15 @@ from brenn_lab.data import (
     Event,
     Failure,
     JsonObject,
+    Location,
+    ProcessStarted,
     Release,
     Reply,
     Request,
+    StreamLog,
     encode_value,
 )
-from brenn_lab.place import Place
+from brenn_lab.place import Place, create_logs
 from brenn_lab.testing import transcript_files
 from brenn_lab.testing.transcript_files import layout_of, line
 
@@ -59,13 +62,22 @@ def reading(value: JsonObject) -> JsonObject:
 
 
 class Sink:
+    """Every event reported: `started` the `process.started` events, `events`
+    the rest.
+    """
+
     def __init__(self) -> None:
         self.events: list[Event] = []
+        self.started: list[ProcessStarted] = []
         self._cond = threading.Condition()
 
     def __call__(self, event: Event) -> None:
         with self._cond:
-            self.events.append(event)
+            if isinstance(event.body, ProcessStarted):
+                assert event.role == ROLE
+                self.started.append(event.body)
+            else:
+                self.events.append(event)
             self._cond.notify_all()
 
     def wait_for(self, n: int) -> list[Event]:
@@ -83,20 +95,14 @@ class Bench:
         program: str = STAND_IN,
         hosted: bool = True,
         sink: Callable[[Event], None] | None = None,
-        note: Callable[[str], None] | None = None,
     ):
         if layout is None:
             layout = layout_of(card)
         self.run = tmp_path / "run"
-        self.notes: list[str] = []
         self.sink = Sink()
         place = None
         if hosted:
-            place = Place(
-                data=self.run / "captures" / ROLE,
-                logs=self.run / "logs" / ROLE,
-                note=self.notes.append if note is None else note,
-            )
+            place = Place(data=self.run / "captures" / ROLE, logs=self.run / "logs" / ROLE)
         device = CaptureDevice(card=card, rate_hz=16000, sample_format="s16_le", layout=layout)
         self.role = CaptureRole(
             ROLE, MACHINE, program, device, self.sink if sink is None else sink, place
@@ -150,7 +156,12 @@ def test_a_clean_capture(tmp_path: Path) -> None:
         transcript_files.path("clean").read_bytes()
     )
     assert (logs / "recorder-0001.stderr.log").exists()
-    assert any("pid" in n for n in bench.notes)
+    [process] = bench.sink.started
+    assert process.process == "pod-capture" and process.pid > 0
+    assert process.logs == (
+        StreamLog("stdout", Location(MACHINE, str(logs / "recorder-0001.stdout.jsonl"))),
+        StreamLog("stderr", Location(MACHINE, str(logs / "recorder-0001.stderr.log"))),
+    )
 
     assert bench.send(Release()) == Released(stopped=None)
     assert failure(bench.send(Stop()), "not_capturing")
@@ -177,6 +188,35 @@ def test_check_probes_without_leaving_anything(tmp_path: Path) -> None:
         assert list(checked.layout) == started_line["layout"]
         assert checked.device_state == started_line["device_state"]
     assert not bench.run.exists()
+    assert bench.sink.started == []
+
+
+def test_a_check_in_a_run_keeps_its_probes_output(tmp_path: Path) -> None:
+    bench = Bench(tmp_path, "clean")
+    for _ in range(2):
+        assert isinstance(bench.send(Check()), Checked)
+    # A dry command in a run keeps nothing either.
+    assert isinstance(bench.send(Check(), dry=True), Checked)
+    logs = bench.run / "logs" / ROLE
+    assert sorted(p.name for p in logs.iterdir()) == [
+        f"probe-{n:04d}.{stream}" for n in (1, 2) for stream in ("stderr.log", "stdout.jsonl")
+    ]
+    assert (logs / "probe-0001.stdout.jsonl").read_bytes() == (
+        transcript_files.path("clean").read_bytes()
+    )
+    assert [(p.process, [s.location.path for s in p.logs]) for p in bench.sink.started] == [
+        (
+            "pod-capture",
+            [str(logs / f"probe-{n:04d}.stdout.jsonl"), str(logs / f"probe-{n:04d}.stderr.log")],
+        )
+        for n in (1, 2)
+    ]
+    # The probe's frame log is not kept, and no capture is numbered for it.
+    assert not (bench.run / "captures").exists()
+    started = bench.send(Start())
+    assert isinstance(started, Started) and started.capture == 1
+    assert isinstance(bench.send(Stop()), Stopped)
+    assert bench.sink.events == []
 
 
 @pytest.mark.parametrize("name", ["clean", "state_not_attempted", "state_unavailable"])
@@ -407,13 +447,29 @@ def test_a_comma_in_a_channel_name_is_refused_before_anything_starts(tmp_path: P
     for body in (Check(), Start()):
         f = failure(bench.send(body), "recorder_usage")
         assert "left,right" in f.detail
-    assert bench.notes == []
+    assert bench.sink.started == []
+    assert list((bench.run / "logs" / ROLE).iterdir()) == []
 
 
-def test_a_missing_recorder(tmp_path: Path) -> None:
+def test_a_missing_recorder_leaves_no_log(tmp_path: Path) -> None:
     bench = Bench(tmp_path, "clean", program=str(tmp_path / "pod-capture"))
     for body in (Check(), Start()):
         failure(bench.send(body), "recorder_missing")
+    assert list((bench.run / "logs" / ROLE).iterdir()) == []
+    assert bench.sink.started == []
+
+
+@pytest.mark.parametrize(("body", "stem"), [(Start(), "recorder-0001"), (Check(), "probe-0001")])
+def test_a_stderr_log_that_cannot_be_created_leaves_no_stdout_log(
+    tmp_path: Path, body: Request[object], stem: str
+) -> None:
+    bench = Bench(tmp_path, "clean")
+    logs = bench.run / "logs" / ROLE
+    logs.mkdir(parents=True)
+    (logs / f"{stem}.stderr.log").write_bytes(b"")
+    failure(bench.send(body), "role_io")
+    assert [p.name for p in logs.iterdir()] == [f"{stem}.stderr.log"]
+    assert bench.sink.started == []
 
 
 def test_a_layout_other_than_the_one_sent_is_a_contract_break(tmp_path: Path) -> None:
@@ -543,18 +599,22 @@ def test_a_probe_with_no_scratch_directory_is_role_io(
         failure(bench.send(Check(), dry=dry), "role_io")
 
 
-def test_a_pid_that_cannot_be_noted_is_role_io(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("body", [Start(), Check()])
+def test_a_start_the_sink_refuses_is_raised_not_role_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: Request[object]
 ) -> None:
-    def full(text: str) -> None:
-        raise OSError(errno.ENOSPC, "No space left on device", "runner.log")
+    def full(event: Event) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device", "journal.jsonl")
 
     spawned = Spawned(monkeypatch)
-    bench = Bench(tmp_path, "clean", note=full)
-    f = failure(bench.send(Start()), "role_io")
-    assert f.data["path"] == "runner.log"
+    bench = Bench(tmp_path, "clean", sink=full)
+    with pytest.raises(OSError, match="No space left") as raised:
+        bench.send(body)
+    assert raised.value.filename == "journal.jsonl"
     assert spawned.gone()
-    assert bench.sink.events == []
+    assert spawned.procs[-1].returncode == -signal.SIGKILL
+    # The role goes on: nothing of the refused start is left running.
+    assert bench.send(Release()) == Released(stopped=None)
 
 
 class _FullLog(io.BytesIO):
@@ -566,14 +626,17 @@ class _FullLog(io.BytesIO):
 def test_a_log_that_cannot_be_written_fails_the_capture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
 ) -> None:
-    real = pod_capture._create
+    real = create_logs
 
-    def create(path: Path | None) -> Any:
-        if path is not None and which in path.name:
-            return _FullLog()
-        return real(path)
+    def create(paths: tuple[Path, Path]) -> Any:
+        out, err = real(paths)
+        if which == "stdout":
+            out.close()
+            return _FullLog(), err
+        err.close()
+        return out, _FullLog()
 
-    monkeypatch.setattr(pod_capture, "_create", create)
+    monkeypatch.setattr(pod_capture, "create_logs", create)
     # The no_card transcript prints its line at once, and the stand-in's
     # refusal of an unknown card writes stderr: each log gets a copy.
     card = "no_card" if which == "stdout" else "names_no_transcript"
@@ -584,7 +647,8 @@ def test_a_log_that_cannot_be_written_fails_the_capture(
 
 def test_a_reader_that_fails_does_not_hang_the_role(tmp_path: Path) -> None:
     def broken(event: Event) -> None:
-        raise RuntimeError("the sink failed")
+        if not isinstance(event.body, ProcessStarted):
+            raise RuntimeError("the sink failed")
 
     bench = Bench(tmp_path, "loss", sink=broken)
     # The gap line may be read before or after the start is answered, so
@@ -603,6 +667,8 @@ def test_a_reader_that_fails_unseen_is_raised_by_the_next_command(
     answered = threading.Event()
 
     def broken(event: Event) -> None:
+        if isinstance(event.body, ProcessStarted):
+            return
         # Held until the start is answered, so that the error lands on a
         # running capture that nobody then stops.
         assert answered.wait(20)

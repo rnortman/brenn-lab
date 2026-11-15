@@ -17,7 +17,11 @@ The run spine and two device role kinds. A script declares the roles it uses
 and sends them commands; a lab configuration says which machines and devices
 there are. The runner dry-runs a script against a lab, probing every device it
 needs without recording anything, and runs it, writing a run directory with a
-manifest, a journal of every command, reply and event, and results.
+manifest, a journal of every command, reply and event, and results. The run
+directory also keeps every process's output: the runner's own stdout,
+stderr and timed log, and both streams of every program a role starts.
+`results.json` names each of these logs, with the process and its pid, and
+each failure names the log behind it.
 
 - **Capture** records a device through brenn-pod's recorder, `pod-capture`:
   the one this repository's build pins, or one installed where the lab
@@ -40,7 +44,7 @@ manifest, a journal of every command, reply and event, and results.
   clock is refused, and across machines the gap is left to alignment.
   On a sink the role runs a sound server client this repository builds,
   loads no host sound library, and holds the sink's volume; it has played on
-  one Bluetooth speaker.
+  one Bluetooth speaker, with every client's output kept in the run.
 - **Examples**: `examples/anchoring_scenario.py` plays a talker on one output
   and the robot's own sound on another, overlapping, while a capture records;
   the tree carries one known speech clip, from CMU ARCTIC, to use as the

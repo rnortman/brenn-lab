@@ -28,7 +28,7 @@ from brenn_lab.marker import Span
 from brenn_lab.playback.output import OUTPUTS, PLAYS_ON_AFTER_UNDERRUN
 
 REPORT = "assessment.json"
-SCHEMA = 1
+SCHEMA = 2
 UNREADABLE = frozenset({"missing", "export_refused", "capture_differs", "reader_contract"})
 """Capture read failures in which the capture is in the run and could not be
 read: each is a finding as well as a capture not assessed.
@@ -67,7 +67,7 @@ class _PlayRecord:
     unplayed_frames: int | None
     underruns: tuple[int, ...]
     as_sent: bool
-    restored: bool
+    restored: bool | None
     failure: JsonObject | None
     asked_start: JsonObject | None
     started_after_us: int | None
@@ -204,7 +204,7 @@ def _play_record(record: JsonValue, where: str) -> _PlayRecord:
             for u in get(record, "underruns", list, where)
         ),
         get(record, "as_sent", bool, where),
-        get(record, "restored", bool, where),
+        get_or_null(record, "restored", bool, where),
         get_or_null(record, "failure", dict, where),
         get_or_null(record, "asked_start", dict, where),
         get_or_null(record, "started_after_us", int, where),
@@ -663,7 +663,9 @@ class _Report:
                 play=n,
                 at_frame=at,
             )
-        if not record.restored:
+        # Null when the play's end was not reported, which `play_failed`
+        # already says.
+        if record.restored is False:
             self.finding(
                 "controls_not_restored",
                 "the role did not put every control back as found",

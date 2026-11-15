@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from brenn_lab.account import Pointer
+from brenn_lab.account import Pointer, end_not_reported
 from brenn_lab.data import (
     ClockReading,
     Event,
@@ -143,7 +143,13 @@ class PlaybackAccount:
         return list(self._entries)
 
     def records(self) -> list[JsonObject]:
-        return [p.encode() for _, p in sorted(self._plays.items()) if p.file is not None]
+        records = [p for _, p in sorted(self._plays.items()) if p.file is not None]
+        for p in records:
+            if p.ended is None:
+                # `restored` stays null: how the controls were left was not
+                # reported either.
+                p.ended, p.failure = "failed", end_not_reported("play")
+        return [p.encode() for p in records]
 
     def repositories(self) -> list[JsonObject]:
         return []

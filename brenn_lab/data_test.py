@@ -1,4 +1,6 @@
 import dataclasses
+from pathlib import Path
+from typing import Any, Literal
 
 import pytest
 
@@ -19,14 +21,18 @@ from brenn_lab.data import (
     JsonObject,
     JsonValue,
     Location,
+    ProcessStarted,
     Release,
     Reply,
+    Request,
+    StreamLog,
     decode,
     dumps,
     encode,
     failure_of,
     loads,
 )
+from brenn_lab.data import command as register_command
 from brenn_lab.data import event as register_event
 from brenn_lab.sound import Granted
 
@@ -57,7 +63,40 @@ GRANTED = Granted(
 STOPPED = m.Stopped(capture=1, frames=159680, gaps_reported=0, end=AT)
 FAILURE = Failure("no_card", "no card matches", {"cards": [{"name": "x", "index": 0}]})
 
-COMMAND_BODIES = [Check(), Release(), m.Start(), m.Stop()]
+
+@register_command("test.shapes")
+@dataclasses.dataclass(frozen=True)
+class Shapes(Request[object]):
+    """A command registered by this test alone, with a field of each shape
+    the decoder knows.
+    """
+
+    count: int
+    name: str
+    flag: bool
+    maybe: int | None
+    mode: Literal["a", "b"]
+    names: tuple[str, ...]
+    table: dict[str, int]
+    at: ClockReading
+    free: JsonValue
+    state: JsonObject
+
+
+SHAPES = Shapes(
+    count=3,
+    name="x",
+    flag=True,
+    maybe=None,
+    mode="a",
+    names=("l", "r"),
+    table={"k": 1},
+    at=AT,
+    free=[1, "two", None],
+    state={"outcome": "read"},
+)
+
+COMMAND_BODIES = [Check(), Release(), m.Start(), m.Stop(), SHAPES]
 RESULT_BODIES: list[object] = [
     m.Started(
         capture=1,
@@ -86,6 +125,14 @@ EVENT_BODIES: list[object] = [
     m.Late(capture=1, at_frame=80000, backlog_frames=640, at=AT),
     m.Failed(capture=1, failure=FAILURE, stopped=None),
     m.Failed(capture=1, failure=Failure("stopped_unasked", "stopped"), stopped=STOPPED),
+    ProcessStarted(
+        process="pod-capture",
+        pid=4242,
+        logs=(
+            StreamLog("stdout", Location("bench", "/runs/r/logs/mic/recorder-0001.stdout.jsonl")),
+            StreamLog("stderr", Location("bench", "/runs/r/logs/mic/recorder-0001.stderr.log")),
+        ),
+    ),
 ]
 
 
@@ -240,6 +287,40 @@ def test_unregistered_bodies_are_refused() -> None:
         Reply(role="mic", command="capture.start", dry=False, outcome=Stray())
     with pytest.raises(TypeError):
         Reply(role="mic", command="capture.record", dry=False, outcome=STOPPED)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("count", "3"),
+        ("count", 3.0),
+        ("count", True),
+        ("name", None),
+        ("name", Path("x")),
+        ("flag", 1),
+        ("maybe", "1"),
+        ("mode", "c"),
+        ("names", ["l", "r"]),
+        ("names", ("l", 2)),
+        ("table", {"k": "1"}),
+        ("table", {1: 1}),
+        ("at", {"machine": "bench"}),
+        ("free", ("a",)),
+        ("free", float("nan")),
+        ("free", {"k": object()}),
+        ("state", []),
+    ],
+)
+def test_a_command_whose_body_does_not_survive_a_wire_is_refused(field: str, value: Any) -> None:
+    changed: dict[str, Any] = {field: value}
+    body = dataclasses.replace(SHAPES, **changed)
+    with pytest.raises(TypeError, match=f"command test.shapes.{field}: "):
+        Command(role="mic", body=body)
+
+
+def test_every_registered_command_passes_the_wire_check() -> None:
+    for body in COMMAND_BODIES:
+        assert Command(role="mic", body=body).body is body
 
 
 def test_a_failure_event_carries_its_failure_in_failure() -> None:

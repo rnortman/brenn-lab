@@ -21,7 +21,7 @@ from typing import Any
 
 from brenn_lab.data import Failure, JsonValue, encode_value
 from brenn_lab.playback.messages import Channel, Library, VolumeRange
-from brenn_lab.playback.output import Attached, ControlName, Element, WriteError
+from brenn_lab.playback.output import Attached, ControlName, Element, Keeping, WriteError
 from brenn_lab.sound import SAMPLE_BYTES, CardIdentity, Granted
 
 LIBRARY = "libasound.so.2"
@@ -391,7 +391,8 @@ class AlsaOutput:
         self._mixer: ctypes.c_void_p | None = None
         self._pcm_name = ""
 
-    def attach(self) -> Attached | Failure:
+    def attach(self, keeping: Keeping | None) -> Attached | Failure:
+        # An ALSA output starts no program: `keeping` has nothing to keep.
         assert self._mixer is None
         lib = library()
         if isinstance(lib, Failure):

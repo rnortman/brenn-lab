@@ -7,6 +7,7 @@ Every level is an integer number of millibels.
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from brenn_lab.data import Failure
@@ -20,6 +21,19 @@ class ControlName:
 
     element: str
     index: int
+
+
+@dataclass(frozen=True)
+class Keeping:
+    """Where an output keeps the output of a program it starts, and what it
+    tells once it has started one: `started(process, pid, stdout_log,
+    stderr_log)`, called once the program is spawned and before any of its
+    output is read for meaning. What `started` raises, the output raises,
+    having killed the program.
+    """
+
+    logs: Path
+    started: Callable[[str, int, Path, Path], None]
 
 
 @dataclass(frozen=True)
@@ -92,7 +106,12 @@ class Output(Protocol):
     @property
     def kind(self) -> str: ...
 
-    def attach(self) -> Attached | Failure: ...
+    def attach(self, keeping: Keeping | None) -> Attached | Failure:
+        """Resolve the device. An output that starts a program to reach it
+        keeps the program's output as `keeping` says, and keeps nothing when
+        it is None.
+        """
+        ...
 
     def detach(self) -> None:
         """Let the device go. After it the output can be attached again,

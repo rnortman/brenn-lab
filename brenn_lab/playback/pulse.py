@@ -18,22 +18,27 @@ read after `attach` is set to the raw volume it had then.
 """
 
 import collections
+import contextlib
 import json
 import math
 import os
 import queue
 import subprocess
 import threading
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
 from brenn_lab.data import DecodeError, Failure, JsonObject, JsonValue, get, get_or_null
+from brenn_lab.place import create_logs, discard_logs, log_paths
 from brenn_lab.playback.device import SINK_LEVEL
 from brenn_lab.playback.messages import Channel, Library, SinkIdentity, VolumeRange
-from brenn_lab.playback.output import Attached, ControlName, Element, WriteError
+from brenn_lab.playback.output import Attached, ControlName, Element, Keeping, WriteError
 from brenn_lab.sound import SAMPLE_BYTES, Granted
+
+PROGRAM = "pulse-client"
+"""The sink client's name, as the run names the process."""
 
 NORM = 65536
 """The raw volume of 0 dB."""
@@ -214,9 +219,16 @@ class _Broken(Exception):
 
 
 class _Client:
-    """The running client: one request at a time, each answered by one line."""
+    """The running client: one request at a time, each answered by one line.
 
-    def __init__(self, program: str, socket: Path) -> None:
+    With `logs`, each line of its stdout and of its stderr is copied to the
+    first and the second file as it is read, flushed; a copy that fails
+    breaks the client. Its output is read from `read` on.
+    """
+
+    def __init__(
+        self, program: str, socket: Path, logs: tuple[IO[bytes], IO[bytes]] | None = None
+    ) -> None:
         self._process = subprocess.Popen(
             [program, "--socket", str(socket)],
             stdin=subprocess.PIPE,
@@ -227,34 +239,77 @@ class _Client:
         self._stdin: IO[bytes] = self._process.stdin
         self._lines: queue.Queue[bytes] = queue.Queue()
         self._stderr: collections.deque[str] = collections.deque(maxlen=STDERR_LINES)
+        out, err = (None, None) if logs is None else logs
         self._readers = [
-            threading.Thread(target=self._read_stdout, args=(self._process.stdout,), daemon=True),
-            threading.Thread(target=self._read_stderr, args=(self._process.stderr,), daemon=True),
+            threading.Thread(
+                target=self._read_stdout, args=(self._process.stdout, out), daemon=True
+            ),
+            threading.Thread(
+                target=self._read_stderr, args=(self._process.stderr, err), daemon=True
+            ),
         ]
-        for reader in self._readers:
-            reader.start()
+        self._broken_lock = threading.Lock()
         self.broken: str | None = None
 
     @property
     def pid(self) -> int:
         return self._process.pid
 
-    def _read_stdout(self, stream: IO[bytes]) -> None:
-        for line in stream:
-            self._lines.put(line)
+    def read(self) -> None:
+        """Start reading the client's output."""
+        for reader in self._readers:
+            reader.start()
+
+    def _copy(self, log: IO[bytes] | None, line: bytes, what: str) -> IO[bytes] | None:
+        """Copy `line` to `log`; the log to copy to next, None once a copy
+        failed, which breaks the client: a client whose output was not kept
+        is not one the run can explain.
+        """
+        if log is None:
+            return None
+        try:
+            log.write(line)
+            log.flush()
+        except OSError as e:
+            self._break(f"the client's {what} could not be kept: {e}")
+            return None
+        return log
+
+    def _read_stdout(self, stream: IO[bytes], log: IO[bytes] | None) -> None:
+        keeping = log is not None
+        with _closing(log):
+            for line in stream:
+                log = self._copy(log, line, "stdout")
+                if keeping and log is None:
+                    # Not kept, so not taken: the client is broken.
+                    continue
+                self._lines.put(line)
         self._lines.put(b"")
 
-    def _read_stderr(self, stream: IO[bytes]) -> None:
-        for line in stream:
-            self._stderr.append(line.decode(errors="replace").rstrip("\n"))
+    def _read_stderr(self, stream: IO[bytes], log: IO[bytes] | None) -> None:
+        with _closing(log):
+            for line in stream:
+                log = self._copy(log, line, "stderr")
+                self._stderr.append(line.decode(errors="replace").rstrip("\n"))
 
     def stderr(self) -> str:
         return " | ".join(self._stderr)
 
     def _break(self, why: str) -> _Broken:
-        self.broken = why
+        """Kill the client; it stays broken for the first reason given."""
+        with self._broken_lock:
+            if self.broken is None:
+                self.broken = why
+            reason = self.broken
         self._process.kill()
-        return _Broken(why)
+        return _Broken(reason)
+
+    def abort(self) -> None:
+        """Kill the client and wait for it and its readers, for a caller
+        that cannot go on with it.
+        """
+        self._process.kill()
+        self.close()
 
     def answer(self, timeout_s: float = REPLY_TIMEOUT_S) -> JsonObject:
         """The next line, which carries `ok`; `_Refused` for a refusal."""
@@ -305,6 +360,18 @@ class _Client:
             self._process.wait()
         for reader in self._readers:
             reader.join()
+
+
+@contextlib.contextmanager
+def _closing(f: IO[bytes] | None) -> Iterator[None]:
+    try:
+        yield
+    finally:
+        if f is not None:
+            # Every copy is flushed as it is made, so only a log whose copy
+            # failed, which has already broken the client, can fail here.
+            with contextlib.suppress(OSError):
+                f.close()
 
 
 def _client_failure(client: _Client, e: _Broken | DecodeError) -> Failure:
@@ -395,6 +462,7 @@ class PulseOutput:
         self._selector = selector
         self._program = program
         self._client: _Client | None = None
+        self._clients = 0
         self._sink_name = ""
         self._kept: dict[str, _Kept] | None = None
         self._streaming = False
@@ -404,18 +472,38 @@ class PulseOutput:
         """The running client's process id; None when not attached."""
         return None if self._client is None else self._client.pid
 
-    def attach(self) -> Attached | Failure:
+    def attach(self, keeping: Keeping | None) -> Attached | Failure:
+        """Start a client and resolve the sink. With `keeping`, the client
+        is the output's next, numbered from 1, and its stdout and stderr are
+        kept as `pulse-client-<NNNN>.stdout.jsonl` and `.stderr.log` in its
+        log directory; files that exist only for a client that started.
+        """
         assert self._client is None
         runtime = os.environ.get("XDG_RUNTIME_DIR")
         if not runtime:
             return Failure("no_server", "XDG_RUNTIME_DIR is not set: no sound server to reach")
         socket = Path(runtime) / "pulse" / "native"
+        paths = None if keeping is None else self._log_paths(keeping.logs)
+        logs = None if paths is None else create_logs(paths)
         try:
-            client = _Client(self._program, socket)
+            client = _Client(self._program, socket, logs)
         except OSError as e:
+            if paths is not None and logs is not None:
+                discard_logs(paths, logs)
             return Failure(
                 "client_missing", f"the sink client {self._program} could not be run: {e}"
             )
+        try:
+            try:
+                if keeping is not None and paths is not None:
+                    keeping.started(PROGRAM, client.pid, *paths)
+            finally:
+                # Read whatever `started` did, so that the abort below is
+                # seen through to the client's exit.
+                client.read()
+        except BaseException:
+            client.abort()
+            raise
         attached = self._start(client)
         if isinstance(attached, Failure):
             client.close()
@@ -463,6 +551,11 @@ class PulseOutput:
             base_volume_mb=reading_mb(sink.base_volume),
         )
         return Attached(identity, record)
+
+    def _log_paths(self, logs: Path) -> tuple[Path, Path]:
+        """The next client's stdout and stderr log in `logs`, which is made."""
+        self._clients += 1
+        return log_paths(logs, f"{PROGRAM}-{self._clients:04d}")
 
     def detach(self) -> None:
         client = self._client

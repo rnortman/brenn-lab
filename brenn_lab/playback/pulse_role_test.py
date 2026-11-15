@@ -4,6 +4,7 @@ the real sink client and the stand-in server.
 
 import array
 import dataclasses
+import errno
 import os
 import shutil
 import signal
@@ -27,6 +28,7 @@ from brenn_lab.data import (
     Failure,
     JsonObject,
     JsonValue,
+    ProcessStarted,
     Reply,
     now,
 )
@@ -149,6 +151,7 @@ class Bench:
         self.data = tmp / "run" / "talker"
         self.output = Recording(selector, self.server)
         self.events: list[Event] = []
+        self.started: list[ProcessStarted] = []
         self.ended = threading.Event()
         # The role's clock reads this, while it is set, and the machine's clock otherwise.
         self.at: ClockReading | None = None
@@ -167,7 +170,7 @@ class Bench:
             device,
             self.output,
             self._sink,
-            Place(self.data, tmp / "logs" / "talker", lambda _: None),
+            Place(self.data, tmp / "logs" / "talker"),
             clock=lambda: self.at if self.at is not None else now("bench"),
         )
         self.dry_role = role_module.PlaybackRole(
@@ -175,9 +178,27 @@ class Bench:
         )
 
     def _sink(self, event: Event) -> None:
+        if isinstance(event.body, ProcessStarted):
+            self.started.append(event.body)
+            return
         self.events.append(event)
         if isinstance(event.body, Ended | Failed):
             self.ended.set()
+
+    def clients(self) -> list[tuple[int, Path, Path]]:
+        """Each client the role reported starting: its pid and its two logs,
+        which exist.
+        """
+        out = []
+        for p in self.started:
+            assert p.process == "pulse-client"
+            [stdout, stderr] = p.logs
+            assert (stdout.stream, stderr.stream) == ("stdout", "stderr")
+            assert stdout.location.machine == stderr.location.machine == "bench"
+            paths = Path(stdout.location.path), Path(stderr.location.path)
+            assert all(path.is_file() for path in paths)
+            out.append((p.pid, *paths))
+        return out
 
     def clip(self, seconds: float, name: str = "a.wav") -> bytes:
         return write_clip(self.sources / name, seconds)
@@ -283,6 +304,53 @@ def test_check_answers_the_sink_and_sets_nothing(bench: Bench) -> None:
     )
     assert control.channels == channels(FOUND_MB, False)
     bench.nothing_done()
+    [(pid, stdout, stderr)] = bench.clients()
+    assert (stdout.name, stderr.name) == (
+        "pulse-client-0001.stdout.jsonl",
+        "pulse-client-0001.stderr.log",
+    )
+    # Every line the client answered: its first, and one per request.
+    assert len(stdout.read_text().splitlines()) >= 2
+    assert pid > 0
+
+
+def test_every_client_a_run_starts_is_kept_and_a_dry_one_is_not(bench: Bench) -> None:
+    bench.clip(0.35)
+    assert isinstance(bench.send(CheckCommand(), dry=True), Checked)
+    assert isinstance(bench.play(dry=True), Started)
+    assert bench.started == []
+    assert isinstance(bench.send(CheckCommand()), Checked)
+    started(bench.play())
+    assert isinstance(bench.wait_end(), Ended)
+    # Refused over its cap once the output is attached: a client started.
+    assert reason(bench.play(volume_mb=0)) == "over_cap"
+    clients = bench.clients()
+    assert [(stdout.name, stderr.name) for _, stdout, stderr in clients] == [
+        (f"pulse-client-{n:04d}.stdout.jsonl", f"pulse-client-{n:04d}.stderr.log")
+        for n in (1, 2, 3)
+    ]
+    assert len({pid for pid, _, _ in clients}) == 3
+    logs = clients[0][1].parent
+    assert sorted(p.name for p in logs.iterdir()) == sorted(
+        name for _, stdout, stderr in clients for name in (stdout.name, stderr.name)
+    )
+
+
+def test_a_client_start_the_sink_refuses_is_raised_and_the_client_killed(
+    bench: Bench,
+) -> None:
+    def full(event: Event) -> None:
+        if isinstance(event.body, ProcessStarted):
+            raise OSError(errno.ENOSPC, "No space left on device", "journal.jsonl")
+
+    bench.role._sink = full
+    for body in (CheckCommand(), Play(source="a.wav", volume_mb=-1800, start=None)):
+        bench.clip(0.35)
+        with pytest.raises(OSError, match="No space left"):
+            bench.send(body)
+        assert bench.output.client_pid is None
+    assert bench.server.state()["streams_made"] == 0
+    bench.found_again()
 
 
 def test_a_play_to_its_end(bench: Bench) -> None:
@@ -645,7 +713,7 @@ def test_a_server_that_answers_nothing_is_no_server_naming_the_socket(
             listener.bind(str(path))
             listener.listen(1)
             started_at = time.monotonic()
-            failure = PulseOutput("desk", client_program()).attach()
+            failure = PulseOutput("desk", client_program()).attach(None)
             took = time.monotonic() - started_at
         assert isinstance(failure, Failure) and failure.reason == "no_server", failure
         assert str(path) in failure.detail

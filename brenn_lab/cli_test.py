@@ -22,7 +22,7 @@ from brenn_lab.testing.scenes import Play
 LAB = os.path.abspath(os.environ["LAB"])
 STAND_IN = os.path.abspath(os.environ["STAND_IN"])
 EXPORT_STAND_IN = os.path.abspath(os.environ["EXPORT_STAND_IN"])
-PROBLEM_KEYS = {"where", "reason", "detail", "role", "command", "key", "data"}
+PROBLEM_KEYS = {"where", "reason", "detail", "role", "command", "key", "data", "log"}
 
 SHORT = """\
 mic = lab.role("mic")
@@ -117,14 +117,124 @@ def test_a_dry_run_and_a_run(tmp_path: Path) -> None:
     assert manifest["script"]["given_as"] == str(script)
 
 
+PRINTS = """\
+import os
+import sys
+
+from brenn_lab import capture
+from brenn_lab.script import Lab
+
+ROLES = {"mic": capture.KIND}
+
+print("loaded, printed")
+print("loaded, printed to stderr", file=sys.stderr)
+os.write(1, b"loaded, written\\n")
+os.write(2, b"loaded, written to stderr\\n")
+
+
+def run(lab: Lab) -> None:
+    print("ran, printed")
+    print("ran, printed to stderr", file=sys.stderr)
+    os.write(1, b"ran, written\\n")
+    os.write(2, b"ran, written to stderr\\n")
+    mic = lab.role("mic")
+    mic.send(capture.Start())
+    mic.send(capture.Stop())
+"""
+
+PRINTED_OUT = "loaded, printed\nloaded, written\nran, printed\nran, written\n"
+PRINTED_ERR = (
+    "loaded, printed to stderr\nloaded, written to stderr\n"
+    "ran, printed to stderr\nran, written to stderr\n"
+)
+
+
+def test_what_a_script_prints_is_kept_in_a_run_and_is_on_stderr_in_a_dry_run(
+    tmp_path: Path,
+) -> None:
+    lab, script = lab_file(tmp_path), tmp_path / "script.py"
+    script.write_text(PRINTS)
+    out = tmp_path / "run"
+    done = start(run_args(lab, script, out))
+    assert done.returncode == 0, done.stderr
+    assert document(done.stdout)["completed"] is True
+    assert done.stderr == ""
+    assert (out / "logs" / "lab.stdout.log").read_text() == PRINTED_OUT
+    assert (out / "logs" / "lab.stderr.log").read_text() == PRINTED_ERR
+
+    dry = start(dry_args(lab, script))
+    assert dry.returncode == 0, dry.stderr
+    assert document(dry.stdout)["ok"] is True
+    assert dry.stderr == PRINTED_OUT + PRINTED_ERR
+
+    refused = start(run_args(lab, script, out))
+    assert refused.returncode == 2
+    assert only_problem(document(refused.stdout))["reason"] == "out_exists"
+    assert refused.stderr == "loaded, printed\nloaded, written\n" + (
+        "loaded, printed to stderr\nloaded, written to stderr\n"
+    )
+
+
 def test_a_run_that_does_not_complete(tmp_path: Path) -> None:
     out = tmp_path / "run"
     done = start(run_args(lab_file(tmp_path, card="no_card"), script_file(tmp_path), out))
     assert done.returncode == 1, done.stderr
+    assert done.stderr == (
+        "lab run: the run did not complete (outcome failed): see "
+        f"{out / 'results.json'} and the logs in {out / 'logs'}\n"
+    )
     pointer = document(done.stdout)
     assert (pointer["outcome"], pointer["completed"]) == ("failed", False)
     assert (out / "results.json").is_file()
     assert pointer["usability"]["answer"] == "findings"
+    assessed = json.loads((out / "assessment.json").read_text())
+    assert assessed["findings"][0]["finding"] == "run_not_completed"
+
+
+# The script replaces the capture role's release with one that stops the
+# capture and then raises, so the stop's reply never reaches the run.
+RELEASE_RAISES = """\
+from brenn_lab.capture.role import CaptureRole
+
+released = CaptureRole._release
+
+
+def release(self, dry):
+    released(self, dry)
+    raise RuntimeError("the release went wrong")
+
+
+CaptureRole._release = release
+lab.role("mic").send(capture.Start())
+lab.wait(0.2)
+"""
+
+
+def test_a_run_whose_role_raises_at_release_has_a_result(tmp_path: Path) -> None:
+    out = tmp_path / "run"
+    done = start(run_args(lab_file(tmp_path), script_file(tmp_path, RELEASE_RAISES), out))
+    assert done.returncode == 1, done.stderr
+    assert done.stderr == (
+        "lab run: the run did not complete (outcome failed): see "
+        f"{out / 'results.json'} and the logs in {out / 'logs'}\n"
+    )
+    pointer = document(done.stdout)
+    assert (pointer["outcome"], pointer["completed"]) == ("failed", False)
+    assert pointer["results"] == str(out / "results.json")
+    results = json.loads((out / "results.json").read_text())
+    failure = results["failure"]
+    assert (failure["reason"], failure["role"], failure["command"]) == (
+        "role_raised",
+        "mic",
+        "release",
+    )
+    assert failure["log"] == {"machine": "bench", "path": "logs/runner.log", "in_run": True}
+    [capture] = results["captures"]
+    assert (capture["ended"], capture["failure"]["reason"]) == ("failed", "end_not_reported")
+    runner_log = (out / "logs" / "runner.log").read_text()
+    assert "role mic raised on release:" in runner_log
+    assert "the release went wrong" in runner_log
+    assert pointer["usability"]["assessment"] == str(out / "assessment.json")
     assessed = json.loads((out / "assessment.json").read_text())
     assert assessed["findings"][0]["finding"] == "run_not_completed"
 
@@ -433,6 +543,7 @@ def test_align_relative_run_under_bazel_run(tmp_path: Path) -> None:
         ("not_json", "unreadable"),
         ("layout_2", "layout"),
         ("layout_3", "layout"),
+        ("layout_4", "layout"),
         ("read_only", "not_writable"),
     ],
 )
@@ -515,6 +626,7 @@ def test_assess_twice_names_the_report_replaced(tmp_path: Path) -> None:
         ("results_without_restored", "unreadable"),
         ("layout_2", "layout"),
         ("layout_3", "layout"),
+        ("layout_4", "layout"),
         ("read_only", "not_writable"),
     ],
 )

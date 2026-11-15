@@ -77,7 +77,7 @@ class Play:
     ended: str = "completed"
     stopped_by: str | None = None
     unplayed: int | None = 0
-    restored: bool = True
+    restored: bool | None = True
     failure: JsonObject | None = None
     result: bool = True
     output: str | None = "alsa"
@@ -251,14 +251,14 @@ def build(
         if c.recorded:
             accounts.append(account)
     manifest: JsonObject = {
-        "layout": 4,
+        "layout": 5,
         "run_id": RUN_ID,
         "roles": {**sections, **(roles or {})},
     }
     (run / "manifest.json").write_text(json.dumps(manifest) + "\n")
     if results:
         out: JsonObject = {
-            "schema": 2,
+            "schema": 3,
             "run_id": RUN_ID,
             "outcome": outcome,
             "completed": outcome == "completed",

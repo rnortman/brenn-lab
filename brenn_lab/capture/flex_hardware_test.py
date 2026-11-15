@@ -14,7 +14,6 @@ over its ambient capture, where it must find no marker.
 import hashlib
 import json
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -45,7 +44,7 @@ LAYOUT = list(layout_of("clean"))
 SCRIPT_SECONDS = 10.0  # the example's wait between start and stop
 STOP_SLACK_S = 1.0
 TIMEOUT_S = 120
-PID_LINE = re.compile(r"^mic: capture 1: pod-capture pid (\d+)$", re.MULTILINE)
+RECORDER_LOG = "/logs/mic/recorder-0001.stdout.jsonl"
 
 
 def lab_file(tmp: Path, card: str = CARD) -> Path:
@@ -353,7 +352,7 @@ def test_loss() -> None:
         text=True,
     )
     try:
-        pid = recorder_pid(out / "logs" / "runner.log", run)
+        pid = recorder_pid(out / "journal.jsonl", run)
         time.sleep(5)
         os.kill(pid, signal.SIGSTOP)
         time.sleep(1)
@@ -404,17 +403,23 @@ def test_loss() -> None:
     assert document(stdout)["usability"]["answer"] == "findings"
 
 
-def recorder_pid(log: Path, run: subprocess.Popen[str]) -> int:
-    """The recorder's pid, from the runner's log line for capture 1."""
+def recorder_pid(journal: Path, run: subprocess.Popen[str]) -> int:
+    """The pid of capture 1's recorder, from the journal's `process.started`
+    line that names its logs.
+    """
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         assert run.poll() is None, "the run ended before its recorder started"
-        if log.is_file():
-            found = PID_LINE.search(log.read_text())
-            if found is not None:
-                return int(found.group(1))
+        if journal.is_file():
+            # Only whole lines: the runner may be writing the last.
+            for text in journal.read_text().splitlines(keepends=True):
+                entry = json.loads(text) if text.endswith("\n") else {}
+                if entry.get("event") == "process.started" and any(
+                    log["location"]["path"].endswith(RECORDER_LOG) for log in entry["data"]["logs"]
+                ):
+                    return int(entry["data"]["pid"])
         time.sleep(0.05)
-    raise AssertionError(f"no recorder pid in {log}")
+    raise AssertionError(f"no recorder pid in {journal}")
 
 
 def test_no_card() -> None:

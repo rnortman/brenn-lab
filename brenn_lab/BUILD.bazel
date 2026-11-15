@@ -37,6 +37,7 @@ py_library(
         "runner.py",
         "script.py",
         "sound.py",
+        "streams.py",
     ],
     imports = [".."],
     visibility = ["//visibility:public"],
@@ -230,6 +231,7 @@ py_pytest_test(
     deps = [
         ":brenn_lab",
         ":cli",
+        "//brenn_lab/testing:run_logs",
     ],
 )
 
@@ -255,7 +257,21 @@ py_pytest_test(
     deps = [
         ":brenn_lab",
         "//brenn_lab/testing:role_raised",
+        "//brenn_lab/testing:run_logs",
         "//brenn_lab/testing:transcript_files",
+    ],
+)
+
+py_pytest_test(
+    name = "runner_streams_test",
+    size = "small",
+    srcs = ["runner_streams_test.py"],
+    data = ["//brenn_lab/testing:stand_in"],
+    env = {"STAND_IN": "$(rootpath //brenn_lab/testing:stand_in)"},
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:lab_driver",
+        "//brenn_lab/testing:run_logs",
     ],
 )
 
@@ -285,6 +301,7 @@ py_pytest_test(
         "//brenn_lab/testing:fake_output",
         "//brenn_lab/testing:lab_driver",
         "//brenn_lab/testing:role_raised",
+        "//brenn_lab/testing:run_logs",
     ],
 )
 
@@ -313,6 +330,7 @@ py_pytest_test(
         "//brenn_lab/testing:fake_output",
         "//brenn_lab/testing:lab_driver",
         "//brenn_lab/testing:pulse_stand_in",
+        "//brenn_lab/testing:run_logs",
         "//brenn_lab/testing:sink_client",
     ],
 )
@@ -502,7 +520,10 @@ py_pytest_test(
     name = "rundir_test",
     size = "small",
     srcs = ["rundir_test.py"],
-    deps = [":brenn_lab"],
+    deps = [
+        ":brenn_lab",
+        "//brenn_lab/testing:run_logs",
+    ],
 )
 
 # The audible bench: the playback role on the Flex's own output and on a sink
@@ -546,5 +567,6 @@ py_pytest_test(
         ":brenn_lab",
         "//brenn_lab/testing:bench",
         "//brenn_lab/testing:lab_driver",
+        "//brenn_lab/testing:run_logs",
     ],
 )

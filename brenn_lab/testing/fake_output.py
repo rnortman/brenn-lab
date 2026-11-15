@@ -21,7 +21,7 @@ from typing import Literal
 
 from brenn_lab.data import Failure
 from brenn_lab.playback.messages import Channel, Library, VolumeRange
-from brenn_lab.playback.output import Attached, ControlName, Element, WriteError
+from brenn_lab.playback.output import Attached, ControlName, Element, Keeping, WriteError
 from brenn_lab.sound import SAMPLE_BYTES, CardIdentity, Granted
 
 CARD = CardIdentity(
@@ -200,7 +200,7 @@ class FakeOutput:
             self.raised.append(call)
         raise error
 
-    def attach(self) -> Attached | Failure:
+    def attach(self, keeping: Keeping | None) -> Attached | Failure:
         if self.attach_failure is not None:
             return self.attach_failure
         assert not self.attached

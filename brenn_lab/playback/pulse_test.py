@@ -5,6 +5,8 @@ becomes; and, against a stub client program, a client that answers what it
 cannot mean or nothing.
 """
 
+import errno
+import io
 import json
 import math
 import os
@@ -13,13 +15,15 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import IO, Any
 
 import pytest
 
+from brenn_lab import place
 from brenn_lab.data import Failure, JsonObject
 from brenn_lab.playback import pulse
 from brenn_lab.playback.messages import Channel
-from brenn_lab.playback.output import OUTPUTS, PLAYS_ON_AFTER_UNDERRUN, ControlName
+from brenn_lab.playback.output import OUTPUTS, PLAYS_ON_AFTER_UNDERRUN, ControlName, Keeping
 from brenn_lab.playback.pulse import (
     MAX_MB,
     MIN_MB,
@@ -372,14 +376,25 @@ def test_the_element_is_the_sink_over_the_whole_range() -> None:
 
 def test_no_server_without_a_runtime_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    failure = PulseOutput("desk", "/nonexistent/pulse-client").attach()
+    failure = PulseOutput("desk", "/nonexistent/pulse-client").attach(None)
     assert isinstance(failure, Failure) and failure.reason == "no_server"
 
 
 def test_a_client_that_cannot_be_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_RUNTIME_DIR", "/nonexistent")
-    failure = PulseOutput("desk", "/nonexistent/pulse-client").attach()
+    failure = PulseOutput("desk", "/nonexistent/pulse-client").attach(None)
     assert isinstance(failure, Failure) and failure.reason == "client_missing"
+
+
+def test_a_client_that_cannot_be_run_leaves_no_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/nonexistent")
+    keeping = Recorded(tmp_path / "logs")
+    failure = PulseOutput("desk", "/nonexistent/pulse-client").attach(keeping.keeping)
+    assert isinstance(failure, Failure) and failure.reason == "client_missing"
+    assert list((tmp_path / "logs").iterdir()) == []
+    assert keeping.started == []
 
 
 def streaming(volumes: tuple[int, ...] = (NORM, NORM)) -> tuple[PulseOutput, FakeClient]:
@@ -490,6 +505,8 @@ def test_a_grant_missing_a_key_is_client() -> None:
 STUB = """\
 import json, os, sys, time
 lines = json.loads(os.environ["STUB_LINES"])
+sys.stderr.write(os.environ.get("STUB_STDERR", ""))
+sys.stderr.flush()
 for i, line in enumerate(lines):
     if i:
         sys.stdin.readline()
@@ -498,8 +515,9 @@ for i, line in enumerate(lines):
 while sys.stdin.readline():
     pass
 """
-"""A client that answers its start and each request after with the next of
-`STUB_LINES`, then nothing until its stdin closes.
+"""A client that writes `STUB_STDERR` to its stderr, answers its start and
+each request after with the next of `STUB_LINES`, then nothing until its
+stdin closes.
 """
 
 FIRST = json.dumps(
@@ -539,8 +557,10 @@ def stub(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[str, list[pulse._Cli
         made: list[pulse._Client] = []
 
         class Kept(pulse._Client):
-            def __init__(self, program: str, socket: Path) -> None:
-                super().__init__(program, socket)
+            def __init__(
+                self, program: str, socket: Path, logs: tuple[IO[bytes], IO[bytes]] | None = None
+            ) -> None:
+                super().__init__(program, socket, logs)
                 made.append(self)
 
         monkeypatch.setattr(pulse, "_Client", Kept)
@@ -568,7 +588,7 @@ def test_a_client_that_answers_what_it_cannot_mean_is_client_and_is_reaped(
 ) -> None:
     program, made = stub
     monkeypatch.setenv("STUB_LINES", json.dumps(lines))
-    failure = PulseOutput("desk", program).attach()
+    failure = PulseOutput("desk", program).attach(None)
     assert isinstance(failure, Failure) and failure.reason == "client", failure
     assert says in failure.detail
     [client] = made
@@ -581,6 +601,7 @@ def test_a_client_that_answers_nothing_is_broken_and_killed(
     program, _ = stub
     monkeypatch.setenv("STUB_LINES", "[]")
     client = pulse._Client(program, Path("/nonexistent"))
+    client.read()
     with pytest.raises(pulse._Broken, match="answered nothing in 0.2 s"):
         client.answer(timeout_s=0.2)
     client.close()
@@ -597,7 +618,7 @@ def test_a_stub_client_that_answers_well_attaches(
         "STUB_LINES", json.dumps([FIRST, json.dumps({"ok": True, "sinks": [SINK_LINE]})])
     )
     output = PulseOutput("desk", program)
-    attached = output.attach()
+    attached = output.attach(None)
     assert not isinstance(attached, Failure), attached
     output.detach()
     [client] = made
@@ -612,7 +633,7 @@ def test_a_detach_whose_close_raises_leaves_the_output_attachable(
         "STUB_LINES", json.dumps([FIRST, json.dumps({"ok": True, "sinks": [SINK_LINE]})])
     )
     output = PulseOutput("desk", program)
-    assert not isinstance(output.attach(), Failure)
+    assert not isinstance(output.attach(None), Failure)
     [first] = made
     close = first.close
 
@@ -623,8 +644,126 @@ def test_a_detach_whose_close_raises_leaves_the_output_attachable(
     with pytest.raises(RuntimeError, match="close broke"):
         output.detach()
     assert output.client_pid is None
-    assert not isinstance(output.attach(), Failure)
+    assert not isinstance(output.attach(None), Failure)
     assert len(made) == 2 and output.client_pid == made[1].pid
     output.detach()
     assert made[1]._process.returncode == 0
     close()
+
+
+class Recorded:
+    """A `Keeping` into `logs` that records every start it is told of, and
+    raises `raises` when it is told of one, if set.
+    """
+
+    def __init__(self, logs: Path) -> None:
+        logs.mkdir(parents=True, exist_ok=True)
+        self.started: list[tuple[str, int, Path, Path]] = []
+        self.raises: Exception | None = None
+        self.keeping = Keeping(logs, self._started)
+
+    def _started(self, process: str, pid: int, stdout_log: Path, stderr_log: Path) -> None:
+        # The files exist when the start is told.
+        assert stdout_log.exists() and stderr_log.exists()
+        self.started.append((process, pid, stdout_log, stderr_log))
+        if self.raises is not None:
+            raise self.raises
+
+
+WELL = json.dumps([FIRST, json.dumps({"ok": True, "sinks": [SINK_LINE]})])
+
+
+def test_each_kept_client_has_its_own_two_logs(
+    stub: tuple[str, list[pulse._Client]], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    program, made = stub
+    monkeypatch.setenv("STUB_LINES", WELL)
+    monkeypatch.setenv("STUB_STDERR", "a line of the client's stderr\n")
+    keeping = Recorded(tmp_path / "logs")
+    output = PulseOutput("desk", program)
+    for _ in range(2):
+        assert not isinstance(output.attach(keeping.keeping), Failure)
+        output.detach()
+    logs = tmp_path / "logs"
+    assert keeping.started == [
+        (
+            "pulse-client",
+            client.pid,
+            logs / f"pulse-client-{n:04d}.stdout.jsonl",
+            logs / f"pulse-client-{n:04d}.stderr.log",
+        )
+        for n, client in enumerate(made, 1)
+    ]
+    for _, _, stdout_log, stderr_log in keeping.started:
+        # The first line and the answer to `sinks`: every line it wrote.
+        assert stdout_log.read_text().splitlines() == json.loads(WELL)
+        assert stderr_log.read_text() == "a line of the client's stderr\n"
+
+
+def test_an_unkept_client_leaves_nothing(
+    stub: tuple[str, list[pulse._Client]], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    program, _ = stub
+    monkeypatch.setenv("STUB_LINES", WELL)
+    monkeypatch.chdir(tmp_path)
+    output = PulseOutput("desk", program)
+    assert not isinstance(output.attach(None), Failure)
+    output.detach()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_start_that_cannot_be_told_kills_the_client(
+    stub: tuple[str, list[pulse._Client]], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    program, made = stub
+    monkeypatch.setenv("STUB_LINES", WELL)
+    keeping = Recorded(tmp_path / "logs")
+    keeping.raises = OSError(errno.ENOSPC, "No space left on device", "journal.jsonl")
+    output = PulseOutput("desk", program)
+    with pytest.raises(OSError, match="No space left"):
+        output.attach(keeping.keeping)
+    [client] = made
+    assert client._process.returncode is not None
+    assert output.client_pid is None
+
+
+class _FullLog(io.BytesIO):
+    def write(self, data: Any) -> int:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+
+@pytest.mark.parametrize("which", ["stdout", "stderr"])
+def test_a_log_that_cannot_be_written_breaks_the_client(
+    stub: tuple[str, list[pulse._Client]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    which: str,
+) -> None:
+    program, made = stub
+    monkeypatch.setenv("STUB_LINES", WELL)
+    monkeypatch.setenv("STUB_STDERR", "a line of the client's stderr\n")
+    real = place.create_logs
+
+    def create(paths: tuple[Path, Path]) -> tuple[IO[bytes], IO[bytes]]:
+        out, err = real(paths)
+        if which == "stdout":
+            out.close()
+            return _FullLog(), err
+        err.close()
+        return out, _FullLog()
+
+    monkeypatch.setattr(pulse, "create_logs", create)
+    output = PulseOutput("desk", program)
+    failure: object
+    if which == "stdout":
+        failure = output.attach(Recorded(tmp_path / "logs").keeping)
+    else:
+        # The stderr line may be copied before or after the start is
+        # answered; a request after the copy failed answers `client`.
+        attached = output.attach(Recorded(tmp_path / "logs").keeping)
+        [client] = made
+        client._readers[1].join(20)
+        failure = attached if isinstance(attached, Failure) else output.elements()
+    assert isinstance(failure, Failure) and failure.reason == "client", failure
+    assert f"the client's {which} could not be kept" in failure.detail
+    output.detach()

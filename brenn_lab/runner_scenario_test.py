@@ -18,13 +18,14 @@ import pytest
 from brenn_lab import marker, runner
 from brenn_lab.assess import report
 from brenn_lab.buildinfo import Revision
-from brenn_lab.data import ClockReading, Command, Event, Release, Reply, Request, now
+from brenn_lab.data import ROLE_ERROR, ClockReading, Command, Event, Release, Reply, Request, now
 from brenn_lab.place import Place
 from brenn_lab.playback import KIND, Clock, ClockRead, Play, output
 from brenn_lab.playback import role as playback_role
 from brenn_lab.playback.device import HeldControl, PlaybackDevice
 from brenn_lab.playback.messages import Ended, Started
-from brenn_lab.playback.output import ControlName
+from brenn_lab.playback.output import ControlName, WriteError
+from brenn_lab.playback.pulse import PulseStream
 from brenn_lab.playback.role import PlaybackRole
 from brenn_lab.runner import Script
 from brenn_lab.script import Lab, RoleFailure
@@ -32,6 +33,7 @@ from brenn_lab.testing import bench
 from brenn_lab.testing.fake_output import FakeControl, FakeOutput
 from brenn_lab.testing.lab_driver import MACHINE, lab_toml, speaker_toml, talker_toml
 from brenn_lab.testing.pulse_stand_in import StandInServer, sink
+from brenn_lab.testing.run_logs import check_logs, runner_log_text
 from brenn_lab.testing.sink_client import client_program
 
 STAND_IN = os.path.abspath(os.environ["STAND_IN"])
@@ -135,6 +137,17 @@ def lab(tmp_path: Path, folder: Path) -> Path:
     return path
 
 
+def client_logs(out: Path) -> list[tuple[int, str]]:
+    """The run's sink clients' logs, held by `check_logs`, as (pid, path) in
+    the order `logs` lists them.
+    """
+    return [
+        (e["pid"], e["file"]["path"])
+        for e in check_logs(out, sink_client=True)
+        if e["process"] == "pulse-client"
+    ]
+
+
 def frames_of(path: Path) -> bytes:
     with wave.open(str(path), "rb") as w:
         return w.readframes(w.getnframes())
@@ -196,6 +209,14 @@ def test_the_example_runs_both_plays_overlapping(
     manifest = json.loads((out / "manifest.json").read_text())
     results = json.loads((out / "results.json").read_text())
     assert results["outcome"] == "completed", results["failure"]
+    clients = client_logs(out)
+    # `talker`'s check and its play each started a client.
+    assert [path for _, path in clients] == [
+        "logs/talker/pulse-client-0001.stdout.jsonl",
+        "logs/talker/pulse-client-0001.stderr.log",
+        "logs/talker/pulse-client-0002.stdout.jsonl",
+        "logs/talker/pulse-client-0002.stderr.log",
+    ]
 
     roles = manifest["roles"]
     assert roles["talker"]["sample_clock"] is None
@@ -314,6 +335,43 @@ def journaled(out: Path, roles: tuple[str, ...] = ("speaker",)) -> list[Any]:
     ]
 
 
+def test_a_play_on_a_sink_whose_thread_raises_points_at_the_runner_log(
+    tmp_path: Path,
+    server: StandInServer,
+    speakers: list[FakeOutput],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = PulseStream.write
+    writes = [0]
+
+    def write(self: PulseStream, data: bytes) -> int | WriteError:
+        # The third write, once the play has started: a raise on the first
+        # reaches the script's `play` itself, as `role_raised`.
+        writes[0] += 1
+        if writes[0] == 3:
+            raise RuntimeError("the sink's write broke")
+        return real(self, data)
+
+    monkeypatch.setattr(PulseStream, "write", write)
+    path, _, _ = step_lab(tmp_path, "sink")
+    out = tmp_path / "run"
+    pointer = runner.run(
+        path, MACHINE, LEVEL_STEP, str(LEVEL_STEP), out, None, HARNESS, None, PINNED
+    )
+    assert isinstance(pointer, dict), pointer
+    results = json.loads((out / "results.json").read_text())
+    assert results["outcome"] == "failed"
+    runner_log_file = {"machine": MACHINE, "path": "logs/runner.log", "in_run": True}
+    assert (results["failure"]["reason"], results["failure"]["log"]) == (
+        ROLE_ERROR,
+        runner_log_file,
+    )
+    raised = [f for f in results["roles"]["speaker"]["failures"] if f["reason"] == ROLE_ERROR]
+    assert raised and all(f["log"] == runner_log_file for f in raised)
+    assert "RuntimeError: the sink's write broke" in runner_log_text(out)
+    check_logs(out, sink_client=True)
+
+
 @pytest.mark.parametrize("on", ["card", "sink"])
 def test_level_step_dry_runs_with_no_problem(
     tmp_path: Path, server: StandInServer, speakers: list[FakeOutput], on: str
@@ -346,6 +404,10 @@ def test_level_step_plays_the_primer_then_the_marked_source_at_the_cap(
     manifest = json.loads((out / "manifest.json").read_text())
     results = json.loads((out / "results.json").read_text())
     assert results["outcome"] == "completed", results["failure"]
+    logs = check_logs(out, sink_client=on == "sink")
+    if on == "sink":
+        # The check, the primer's play and the marked play each started a client.
+        assert len({e["pid"] for e in logs if e["process"] == "pulse-client"}) == 3
 
     commands = journaled(out)
     assert [c["command"] for c in commands] == ["check", "playback.play", "playback.play"]
@@ -426,7 +488,7 @@ class TwoMachines:
                 device,
                 fake,
                 self.events.append,
-                Place(tmp / "run" / name, tmp / "logs" / name, lambda _: None),
+                Place(tmp / "run" / name, tmp / "logs" / name),
                 clock=clock,
             )
 

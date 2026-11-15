@@ -1,4 +1,4 @@
-"""The run directory, layout 4.
+"""The run directory, layout 5.
 
 <run>/.gitignore          `*`: created first, so git ignores the whole run
 <run>/manifest.json       rewritten whole, by a temporary file and a rename
@@ -9,7 +9,11 @@
 <run>/notes/<file>
 <run>/<section>/<role>/   each role's data, under its kind's section
                           (`captures/<role>/`: what a capture role recorded)
-<run>/logs/runner.log     the runner's own log
+<run>/logs/runner.log     the runner's own log: one JSON object per line,
+                          `{"at": <the runner's clock>, "text": ...}`
+<run>/logs/lab.stdout.log what the `lab` process wrote to its descriptors 1
+<run>/logs/lab.stderr.log and 2 from before the script was loaded until the
+                          results were written
 <run>/logs/<role>/        the output of the programs each role calls
 <run>/alignment.json      written by `lab align`, by `lab assess` and by the
                           run's closing assessment, by a temporary file and a
@@ -26,10 +30,22 @@ import threading
 from pathlib import Path
 from typing import IO
 
-from brenn_lab.data import JsonObject, to_text
+from brenn_lab.data import JsonObject, encode_value, now, to_text
 
-LAYOUT = 4
+LAYOUT = 5
 GITIGNORE = "*\n"
+LOGS = "logs"
+RUNNER_LOG = f"{LOGS}/runner.log"
+
+
+def note(run: Path, machine: str, text: str) -> None:
+    """Append one entry to `<run>/logs/runner.log`: `text`, without its
+    trailing newlines, timed by `machine`'s clock now; flushed before this
+    returns.
+    """
+    entry = {"at": encode_value(now(machine)), "text": text.rstrip("\n")}
+    with (run / RUNNER_LOG).open("a") as f:
+        f.write(to_text(entry) + "\n")
 
 
 def replace_json(run: Path, name: str, value: JsonObject) -> str:
@@ -92,18 +108,24 @@ def resolve(run: Path, path: str) -> Path | None:
 class RunDir:
     """A run directory this process created, and the only place it writes."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, machine: str):
         self.path = path
+        self._machine = machine
         self._lock = threading.Lock()
         self._journal: IO[str] | None = None
-        self._log: IO[str] | None = None
 
     @classmethod
-    def create(cls, path: Path) -> RunDir:
-        """Create the directory, which must not exist, and its `.gitignore`."""
+    def create(cls, path: Path, machine: str) -> RunDir:
+        """Create the directory, which must not exist, its `.gitignore`, and
+        `logs/runner.log` with its first entry, `run started`. `machine` is
+        the runner's, whose clock times every entry of `runner.log`.
+        """
         path.mkdir()
         (path / ".gitignore").write_text(GITIGNORE)
-        return cls(path)
+        (path / LOGS).mkdir()
+        made = cls(path, machine)
+        made.note("run started")
+        return made
 
     def keep(self, section: str, name: str, data: bytes) -> str:
         """Write `data` as `<section>/<name>`; its path in the run."""
@@ -118,7 +140,7 @@ class RunDir:
         return self.path / section / role
 
     def logs(self, role: str) -> Path:
-        return self.path / "logs" / role
+        return self.path / LOGS / role
 
     def in_run(self, path: Path) -> str | None:
         """`path` relative to the run, if it lies inside it."""
@@ -150,18 +172,12 @@ class RunDir:
             self._journal.flush()
 
     def note(self, text: str) -> None:
-        """Append to `logs/runner.log`."""
+        """Append one entry to `logs/runner.log`, by `note`."""
         with self._lock:
-            if self._log is None:
-                (self.path / "logs").mkdir(exist_ok=True)
-                self._log = (self.path / "logs" / "runner.log").open("a", buffering=1)
-            self._log.write(text.rstrip("\n") + "\n")
-            self._log.flush()
+            note(self.path, self._machine, text)
 
     def close(self) -> None:
         with self._lock:
-            for f in (self._journal, self._log):
-                if f is not None:
-                    f.close()
+            if self._journal is not None:
+                self._journal.close()
             self._journal = None
-            self._log = None
