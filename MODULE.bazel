@@ -139,6 +139,13 @@ crate.from_specs(
     lockfile = "//tools/allthechanges:cargo-bazel-lock.json",
 )
 
+# TODO(brenn-bindings-revision-not-on-remote): brenn's Python binding will be
+# built from a brenn commit pinned here, which has to be on brenn's remote
+# first.
+# TODO(off-machine-bus-role-needs-write-deadline): the brenn commit this file
+# will pin must have the attach client's write deadline before any role is
+# driven over the bus to a server on another machine.
+
 # --- brenn-pod's programs -------------------------------------------------
 # The recorder, pod-capture, which the runner carries for a capture role whose
 # machine names `pod_capture = { pinned = true }`, and the reader, frame-log.
