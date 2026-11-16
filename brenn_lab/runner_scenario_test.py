@@ -17,7 +17,7 @@ import pytest
 
 from brenn_lab import marker, runner
 from brenn_lab.assess import report
-from brenn_lab.buildinfo import Revision
+from brenn_lab.buildinfo import Revision, Stamp
 from brenn_lab.data import ROLE_ERROR, ClockReading, Command, Event, Release, Reply, Request, now
 from brenn_lab.place import Place
 from brenn_lab.playback import KIND, Clock, ClockRead, Play, output
@@ -41,7 +41,8 @@ EXPORT_STAND_IN = os.path.abspath(os.environ["EXPORT_STAND_IN"])
 EXAMPLE = Path(os.path.abspath(os.environ["EXAMPLE"]))
 LEVEL_STEP = Path(os.path.abspath(os.environ["LEVEL_STEP"]))
 SPEECH = Path(os.path.abspath(os.environ["SPEECH"]))
-HARNESS = Revision(commit="0123456789abcdef0123456789abcdef01234567", dirty=False, source="git")
+HARNESS = Revision("brenn-lab", "0123456789abcdef0123456789abcdef01234567", False, "git")
+STAMP = Stamp(HARNESS, None)
 PINNED = {"pod_capture": "/nonexistent/pinned/pod-capture"}
 SINK = "alsa_output.usb-Desk-00.analog-stereo"
 TALKER_MEMBER = 3
@@ -203,7 +204,7 @@ def test_the_example_runs_both_plays_overlapping(
     folder, talker_marked, own_marked = sources(tmp_path)
     out = tmp_path / "run"
     pointer = runner.run(
-        lab(tmp_path, folder), MACHINE, EXAMPLE, str(EXAMPLE), out, None, HARNESS, None, PINNED
+        lab(tmp_path, folder), MACHINE, EXAMPLE, str(EXAMPLE), out, None, STAMP, None, PINNED
     )
     assert isinstance(pointer, dict), pointer
     manifest = json.loads((out / "manifest.json").read_text())
@@ -355,9 +356,7 @@ def test_a_play_on_a_sink_whose_thread_raises_points_at_the_runner_log(
     monkeypatch.setattr(PulseStream, "write", write)
     path, _, _ = step_lab(tmp_path, "sink")
     out = tmp_path / "run"
-    pointer = runner.run(
-        path, MACHINE, LEVEL_STEP, str(LEVEL_STEP), out, None, HARNESS, None, PINNED
-    )
+    pointer = runner.run(path, MACHINE, LEVEL_STEP, str(LEVEL_STEP), out, None, STAMP, None, PINNED)
     assert isinstance(pointer, dict), pointer
     results = json.loads((out / "results.json").read_text())
     assert results["outcome"] == "failed"
@@ -397,9 +396,7 @@ def test_level_step_plays_the_primer_then_the_marked_source_at_the_cap(
 ) -> None:
     path, folder, marked = step_lab(tmp_path, on)
     out = tmp_path / "run"
-    pointer = runner.run(
-        path, MACHINE, LEVEL_STEP, str(LEVEL_STEP), out, None, HARNESS, None, PINNED
-    )
+    pointer = runner.run(path, MACHINE, LEVEL_STEP, str(LEVEL_STEP), out, None, STAMP, None, PINNED)
     assert isinstance(pointer, dict), pointer
     manifest = json.loads((out / "manifest.json").read_text())
     results = json.loads((out / "results.json").read_text())

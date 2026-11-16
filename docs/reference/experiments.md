@@ -1603,6 +1603,70 @@ the role's next start, stop or play raises it, as a `RuntimeError` and not a
 `RoleFailure`, with the same result whether or not the script catches it.
 Such a capture's or play's record ends `failed` with `end_not_reported`.
 
+## Running the runner from another repository
+
+Experiments can live in a repository of their own that depends on this one as
+a Bazel module (`bazel_dep(name = "brenn_lab")`) and builds its own runner.
+
+**What the dependant's module declares.** `rules_python`, and a C toolchain
+registered by itself: brenn-lab registers its LLVM toolchain and sysroot as
+dev dependencies, which a dependant does not get, and the pinned programs
+and the sink client are compiled for the dependant's build. This module's
+gate tools (`//tools/scrub`, `//tools/allthechanges`) are declared as dev
+dependencies too and cannot be built from a dependant; it brings its own.
+
+**Its runner.** `@brenn_lab//brenn_lab:defs.bzl` exports one macro:
+
+```starlark
+load("@brenn_lab//brenn_lab:defs.bzl", "lab_binary")
+
+lab_binary(
+    name = "lab",
+    deps = ["//my_experiments"],
+)
+```
+
+`lab_binary(name, deps = [], **kwargs)` declares a `py_binary` in the
+caller's package that runs this repository's `cli.py`, carries the pinned
+recorder, the sink client, the pinned frame-log reader and the build stamp,
+and depends on brenn_lab's own libraries and the caller's `deps`. It is the
+same runner `//brenn_lab:lab` is, which is declared with the macro too: every
+command in this document works on it, `bazel run //:lab -- …` in place of
+`bazel run //brenn_lab:lab -- …`. A script it runs can import whatever `deps`
+carries, the dependant's own Python and its third-party packages, besides
+brenn_lab.
+
+**A package both repositories pin.** The runner's own dependencies come
+before the caller's on its path, so where both pin a package (numpy, for
+one), a script and the dependant's code imported from it get brenn-lab's
+copy. A dependant that pins such a package holds its version equal to
+brenn-lab's, so the copy loaded is the same version as its own.
+`@brenn_lab//:requirements.in` is exported so that a dependant's test can
+read brenn-lab's version.
+
+**The build stamp.** The dependant's workspace status command prints the
+stamp's keys (`run-directory.md`, *The harness's revision*):
+`STABLE_BRENN_LAB_COMMIT` and `STABLE_BRENN_LAB_DIRTY` for the brenn-lab tree
+it builds from, and `STABLE_BRENN_LAB_BUILDER_REPOSITORY`,
+`STABLE_BRENN_LAB_BUILDER_COMMIT` and `STABLE_BRENN_LAB_BUILDER_DIRTY` for
+its own. A run then names both in its manifest, as `harness` and `builder`.
+A dependant whose status command prints none of them builds a runner whose
+runs state `harness` as unknown and `builder` as `null`.
+
+**Where a run may be written.** A run directory inside the workspace `bazel
+run` was started from is refused (*Where a run may be written*): started from
+the dependant, that is the dependant's tree.
+
+**Tests in the dependant.** `@brenn_lab//brenn_lab/testing:scenes` builds a
+synthetic run directory, and `@brenn_lab//brenn_lab/testing:export_stand_in`
+is the reader that exports its captures; both are test-only. A dependant's
+test aligns such a run with `brenn_lab.align.report.align`, through the
+stand-in reader, and reads the run through this repository's own code rather
+than a copy of its formats. A scene's `Capture.delays` places the sound later
+on some channels than on others. The speech clip,
+`@brenn_lab//brenn_lab/testing:speech/arctic_a0001.wav`, is public, to be
+read as a source; a dependant redistributes nothing by reading it.
+
 ## The dry run
 
 A dry run records nothing and leaves nothing behind. In order, never stopping

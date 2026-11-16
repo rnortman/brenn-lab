@@ -1,5 +1,12 @@
-load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+load("@rules_python//python:defs.bzl", "py_library")
 load("//tools/pytest:defs.bzl", "py_pytest_test")
+load(":defs.bzl", "lab_binary")
+
+# cli.py is the main of every runner `lab_binary` declares, in any package.
+exports_files(
+    ["cli.py"],
+    visibility = ["//visibility:public"],
+)
 
 # Every source is listed by name, with no glob: a new file reaches a target
 # only through a tracked change to this file.
@@ -83,6 +90,7 @@ py_library(
     name = "cli",
     srcs = ["cli.py"],
     imports = [".."],
+    visibility = ["//visibility:public"],
     deps = [
         ":align",
         ":assess",
@@ -95,25 +103,11 @@ py_library(
 # It carries the pinned recorder, which a machine's
 # `pod_capture = { pinned = true }` names, the sink client, which
 # `pulse_client = { pinned = true }` names, and the pinned reader, which
-# `align`, `assess` and a run's closing assessment run.
-py_binary(
+# `align`, `assess` and a run's closing assessment run. Another repository
+# declares its own runner with the same macro.
+lab_binary(
     name = "lab",
-    srcs = ["cli.py"],
-    data = [
-        "//brenn_lab/playback/pulse_client:pulse-client",
-        "//tools/brenn_pod:frame-log",
-        "//tools/brenn_pod:pod-capture",
-        "//tools/buildinfo:build_info",
-    ],
-    main = "cli.py",
     visibility = ["//visibility:public"],
-    deps = [
-        ":align",
-        ":assess",
-        ":brenn_lab",
-        ":cli",
-        "@rules_python//python/runfiles",
-    ],
 )
 
 py_pytest_test(

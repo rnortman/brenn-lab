@@ -2,8 +2,8 @@
 
 A crate hub's binary lives in a spoke repository whose runfiles path holds the
 crate's version and Bazel's canonical repository name. This rule gives it a
-path in this package that names neither, so a dependant finds it in runfiles
-at `_main/<package>/<target name>`.
+path in this package that names neither, so a runfiles lookup finds it at
+`brenn_lab/<package>/<target name>` through the repository mapping.
 """
 
 def _fixed_name_executable_impl(ctx):

@@ -136,6 +136,15 @@ class Exported:
                 return run.first_frame + (position - run.wav_frame)
         raise ValueError(f"exported frame {position} is in no run")
 
+    def position(self, frame: int) -> int:
+        """The position in the exported file of capture frame `frame`; the
+        inverse of `capture_frame`. Raises when the frame is in no run.
+        """
+        for run in self.runs:
+            if run.first_frame <= frame < run.first_frame + run.frames:
+                return run.wav_frame + (frame - run.first_frame)
+        raise ValueError(f"capture frame {frame} is in no run")
+
     def touches_hole(self, first: int, frames: int) -> bool:
         """Whether `[first, first + frames)` in the exported file overlaps a
         hole's silence or straddles a hole that has none.

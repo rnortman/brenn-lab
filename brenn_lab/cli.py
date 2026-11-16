@@ -54,7 +54,7 @@ from brenn_lab import buildinfo, marker, pinned, rundir, runner
 from brenn_lab.data import Failure, JsonObject, encode_object, to_text
 from brenn_lab.runner import Problem, Refused
 
-BUILD_INFO = "_main/tools/buildinfo/build_info.json"
+BUILD_INFO = "brenn_lab/tools/buildinfo/build_info.json"
 
 
 class _Usage(Exception):
@@ -138,8 +138,8 @@ def _path(given: str) -> Path:
     return path
 
 
-def _harness(found: runfiles.Runfiles) -> buildinfo.Revision:
-    """The revision the runner's build stamp states."""
+def _stamp(found: runfiles.Runfiles) -> buildinfo.Stamp:
+    """The revisions the runner's build stamp states."""
     return buildinfo.parse(pinned.locate(found, BUILD_INFO).read_text())
 
 
@@ -167,7 +167,7 @@ def _experiment(args: argparse.Namespace) -> tuple[JsonObject, int]:
                 "arguments", "unreadable", f"--frame-log {given} is not an executable file"
             )
             return Refused([problem]).report(), 2
-    harness = _harness(found)
+    stamp = _stamp(found)
     result = runner.run(
         _path(args.lab),
         args.machine,
@@ -175,7 +175,7 @@ def _experiment(args: argparse.Namespace) -> tuple[JsonObject, int]:
         args.script,
         _path(args.out),
         None if args.notes is None else _path(args.notes),
-        harness,
+        stamp,
         Path(workspace) if workspace else None,
         programs,
     )
@@ -185,7 +185,7 @@ def _experiment(args: argparse.Namespace) -> tuple[JsonObject, int]:
     reader, is_pinned = _reader(found, args.frame_log)
 
     def assess_run() -> JsonObject:
-        return _assess_at_end(run, reader, is_pinned, harness.encode())
+        return _assess_at_end(run, reader, is_pinned, stamp.harness.encode())
 
     result["usability"] = closing_assessment(str(result["outcome"]), assess_run, run, args.machine)
     return result, 0 if result["completed"] is True else 1
@@ -280,7 +280,7 @@ def _align(args: argparse.Namespace) -> tuple[JsonObject, int]:
     found = pinned.runner_runfiles()
     reader, is_pinned = _reader(found, args.frame_log)
     run = _path(args.run)
-    done = report.align(run, reader, is_pinned, _harness(found).encode())
+    done = report.align(run, reader, is_pinned, _stamp(found).harness.encode())
     if isinstance(done, Failure):
         return Refused([Problem("run", done.reason, done.detail)]).report(), 2
     ok = report.ok(done.report)
@@ -304,7 +304,7 @@ def _assess(args: argparse.Namespace) -> tuple[JsonObject, int]:
     found = pinned.runner_runfiles()
     reader, is_pinned = _reader(found, args.frame_log)
     run = _path(args.run)
-    done = report.assess(run, reader, is_pinned, _harness(found).encode())
+    done = report.assess(run, reader, is_pinned, _stamp(found).harness.encode())
     if isinstance(done, Failure):
         return Refused([Problem("run", done.reason, done.detail)]).report(), 2
     written = done.report

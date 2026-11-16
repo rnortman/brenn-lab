@@ -2,9 +2,9 @@
 
 # --- Correctness posture ---
 build --spawn_strategy=sandboxed
-# The one exception: a test tagged no-sandbox runs locally. //:buildifier_test
-# and //:ruff_test are those tests; each walks the whole workspace, which no
-# sandbox can show it.
+# The one exception: a test tagged no-sandbox runs locally.
+# //tools/buildifier:buildifier_test and //:ruff_test are those tests; each
+# walks the whole workspace, which no sandbox can show it.
 test --strategy=TestRunner=sandboxed,local
 build --incompatible_strict_action_env
 # No network for build and test actions. A target that genuinely needs the

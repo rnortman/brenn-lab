@@ -1,0 +1,32 @@
+"""BUILD-file formatting and lint.
+
+The test scans the whole workspace rather than a `srcs` list because a glob in
+one package cannot see files in other packages; `no_sandbox` is what
+buildifier_prebuilt requires for that, and the wrapper tags the test no-cache
+so it always reruns. In its own package so the root package, which a
+dependant loads to read `//:requirements.in`, loads no dev dependency.
+"""
+
+load("@buildifier_prebuilt//:rules.bzl", "buildifier", "buildifier_test")
+
+BUILDIFIER_EXCLUDES = [
+    "./.git/*",
+    "./bazel-*/*",
+]
+
+buildifier(
+    name = "buildifier",
+    exclude_patterns = BUILDIFIER_EXCLUDES,
+    lint_mode = "fix",
+    mode = "fix",
+)
+
+buildifier_test(
+    name = "buildifier_test",
+    size = "small",
+    exclude_patterns = BUILDIFIER_EXCLUDES,
+    lint_mode = "warn",
+    mode = "diff",
+    no_sandbox = True,
+    workspace = "//:MODULE.bazel",
+)

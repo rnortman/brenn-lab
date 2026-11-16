@@ -12,13 +12,13 @@ from pathlib import Path
 from python.runfiles import runfiles
 
 PROGRAMS: dict[str, str] = {
-    "pod_capture": "_main/tools/brenn_pod/pod-capture",
-    "pulse_client": "_main/brenn_lab/playback/pulse_client/pulse-client",
+    "pod_capture": "brenn_lab/tools/brenn_pod/pod-capture",
+    "pulse_client": "brenn_lab/brenn_lab/playback/pulse_client/pulse-client",
 }
-"""Each pinned program's runfiles path."""
+"""Each pinned program's runfiles path, under this module's apparent name."""
 
 TOOLS: dict[str, str] = {
-    "frame_log": "_main/tools/brenn_pod/frame-log",
+    "frame_log": "brenn_lab/tools/brenn_pod/frame-log",
 }
 """Each pinned tool the runner's own commands run, by runfiles path. No role
 kind uses these, so a machine's configuration cannot name them.
@@ -34,8 +34,13 @@ def runner_runfiles() -> runfiles.Runfiles:
 
 
 def locate(found: runfiles.Runfiles, location: str) -> Path:
-    """The absolute path of `location` in `found`. Raises when it is not there."""
-    path = found.Rlocation(location)
+    """The absolute path of `location` in `found`. Raises when it is not there.
+
+    `location` starts with `brenn_lab`, this module's apparent name, which the
+    repository mapping turns into `_main` when this module is the root and into
+    its canonical name when another module depends on it.
+    """
+    path = found.Rlocation(location, source_repo=found.CurrentRepository())
     if path is None:
         raise RuntimeError(f"{location} is not in the runner's runfiles")
     return Path(path).absolute()

@@ -107,6 +107,24 @@ def test_a_48_khz_source_in_a_16_khz_capture_with_drift(tmp_path: Path) -> None:
     assert got["offset_frames"] == pytest.approx(3000.5, abs=0.2)
 
 
+def test_channels_of_one_capture_delayed_differently_are_located_apart(tmp_path: Path) -> None:
+    play = Play("speaker", 1, 2, at=4000.0)
+    layout = ("raw_mic_0", "raw_mic_1", "raw_mic_2")
+    delays = (0.0, 3.0, -1.5)
+    capture = Capture(layout=layout, delays=delays)
+    done = align(scenes.build(tmp_path / "run", [play], [capture]).run)
+    for name, delay in zip(layout, delays, strict=True):
+        got = channel(done, "speaker", 1, name)
+        assert got["start"]["outcome"] == "found" and got["end"]["outcome"] == "found", got
+        assert got["offset_frames"] == pytest.approx(play.at + delay, abs=0.1)
+
+
+def test_delays_not_one_per_channel_are_refused(tmp_path: Path) -> None:
+    capture = Capture(layout=("raw_mic_0", "raw_mic_1"), delays=(1.0,))
+    with pytest.raises(ValueError):
+        scenes.build(tmp_path / "run", [Play("speaker", 1, 2, at=4000.0)], [capture])
+
+
 TWO_ROLES = [
     Play("left", 1, 4, at=4000.0, content_frames=48000),
     Play("right", 1, 5, at=8000.0, level=0.316, drift_ppm=150.0, content_frames=48000),

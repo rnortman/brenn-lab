@@ -2,8 +2,9 @@
 
 `pulse-client` speaks the PulseAudio native protocol through the pinned
 `pulseaudio` crate, from `@pulse_client_crates`, a hub pinned by the two lock
-files here. In a dependant's runfiles it is
-`_main/brenn_lab/playback/pulse_client/pulse-client`.
+files here. A runfiles lookup names it
+`brenn_lab/brenn_lab/playback/pulse_client/pulse-client`, through the
+repository mapping.
 
 `pulse-stand-in` is a sound server for tests, built on the same crate.
 """
@@ -29,7 +30,7 @@ rust_binary(
         "src/wire.rs",
     ],
     rustc_env = {"PULSEAUDIO_CRATE_VERSION": PULSEAUDIO_VERSION},
-    visibility = ["//brenn_lab:__subpackages__"],
+    visibility = ["//visibility:public"],
     deps = [
         "@pulse_client_crates//:pulseaudio",
         "@pulse_client_crates//:serde",
@@ -49,9 +50,9 @@ rust_library(
     ],
 )
 
-# The stand-in sound server as a program, for the binding's tests. In a
-# dependant's runfiles it is
-# `_main/brenn_lab/playback/pulse_client/pulse-stand-in`.
+# The stand-in sound server as a program, for the binding's tests. A runfiles
+# lookup names it `brenn_lab/brenn_lab/playback/pulse_client/pulse-stand-in`,
+# through the repository mapping.
 rust_binary(
     name = "pulse-stand-in",
     testonly = True,

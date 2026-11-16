@@ -240,6 +240,13 @@ stream frames, motion scripts and bus messages are read and written by their
 owners' code, linked in or called as a tool. An owner's crate that cannot be
 used from outside is a finding for that owner's repository.
 
+This module can itself be depended on: another repository builds its own
+runner with `lab_binary` (`docs/reference/experiments.md`, *Running the
+runner from another repository*). So a runfiles lookup names a path under
+`brenn_lab/`, never `_main/`, the gate tools' crate hubs stay dev
+dependencies, and the root package loads no dev-dependency repository,
+because a dependant reads `//:requirements.in` from it.
+
 ## Data and licences
 
 - Recordings never enter the repository. Fixtures are synthetic or carry a

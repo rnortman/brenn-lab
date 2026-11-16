@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from brenn_lab import marker, runner
-from brenn_lab.buildinfo import Revision
+from brenn_lab.buildinfo import Revision, Stamp
 from brenn_lab.data import ROLE_ERROR, encode_object
 from brenn_lab.playback import output, role
 from brenn_lab.playback.output import ControlName
@@ -28,7 +28,7 @@ from brenn_lab.testing.run_logs import check_logs, runner_log
 STAND_IN = os.path.abspath(os.environ["STAND_IN"])
 EXAMPLE = Path(os.path.abspath(os.environ["EXAMPLE"]))
 MACHINE = "bench"
-HARNESS = Revision(commit="0123456789abcdef0123456789abcdef01234567", dirty=False, source="git")
+STAMP = Stamp(Revision("brenn-lab", "0123456789abcdef0123456789abcdef01234567", False, "git"), None)
 PINNED = {"pod_capture": "/nonexistent/pinned/pod-capture"}
 LEVEL = ControlName("PCM", 1)
 HELD = ControlName("PCM", 0)
@@ -104,7 +104,7 @@ def dry(lab_path: Path, script_path: Path) -> Any:
 def do_run(tmp_path: Path, lab_path: Path, script_path: Path) -> tuple[Path, Any, Any]:
     out = tmp_path / "run"
     pointer = runner.run(
-        lab_path, MACHINE, script_path, str(script_path), out, None, HARNESS, None, PINNED
+        lab_path, MACHINE, script_path, str(script_path), out, None, STAMP, None, PINNED
     )
     assert isinstance(pointer, dict), pointer
     manifest = json.loads((out / "manifest.json").read_text())

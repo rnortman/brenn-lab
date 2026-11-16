@@ -1,6 +1,11 @@
-# The harness's own revision, as a build stamp. `.bazelrc` names status.sh as
-# the workspace status command; this genrule, always stamped, copies its two
-# stable values into build_info.json, which //brenn_lab:lab carries as data.
+# The runner's build stamp. The workspace that builds the runner names its
+# workspace status command; this genrule, always stamped, copies its stable
+# values into build_info.json, which every runner carries as data:
+# STABLE_BRENN_LAB_COMMIT and STABLE_BRENN_LAB_DIRTY, the revision of this
+# repository's tree, and, when STABLE_BRENN_LAB_BUILDER_REPOSITORY is present,
+# a `builder` object of it, STABLE_BRENN_LAB_BUILDER_COMMIT and
+# STABLE_BRENN_LAB_BUILDER_DIRTY, the revision of another repository that built
+# the runner. This repository's own status.sh prints the first two only.
 # The values are copied as text; brenn_lab/buildinfo.py reads and checks them.
 # The command uses bash builtins only, so the action runs no other program.
 
@@ -10,14 +15,26 @@ genrule(
     cmd = """
 commit=
 dirty=
+builder=
+builder_set=
+builder_commit=
+builder_dirty=
 while read -r key value; do
     case "$$key" in
         STABLE_BRENN_LAB_COMMIT) commit=$$value ;;
         STABLE_BRENN_LAB_DIRTY) dirty=$$value ;;
+        STABLE_BRENN_LAB_BUILDER_REPOSITORY) builder=$$value; builder_set=1 ;;
+        STABLE_BRENN_LAB_BUILDER_COMMIT) builder_commit=$$value ;;
+        STABLE_BRENN_LAB_BUILDER_DIRTY) builder_dirty=$$value ;;
     esac
 done < bazel-out/stable-status.txt
-printf '{"commit": "%s", "dirty": "%s"}\\n' "$$commit" "$$dirty" > $@
+if [[ -n "$$builder_set" ]]; then
+    printf '{"commit": "%s", "dirty": "%s", "builder": {"repository": "%s", "commit": "%s", "dirty": "%s"}}\\n' \
+        "$$commit" "$$dirty" "$$builder" "$$builder_commit" "$$builder_dirty" > $@
+else
+    printf '{"commit": "%s", "dirty": "%s"}\\n' "$$commit" "$$dirty" > $@
+fi
 """,
     stamp = 1,
-    visibility = ["//brenn_lab:__pkg__"],
+    visibility = ["//visibility:public"],
 )

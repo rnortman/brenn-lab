@@ -166,6 +166,8 @@ class Capture:
     the recorder's record (None: the one the losses make, every measured or
     unmeasured hole a gap); `recorded` False leaves the capture without one.
     `device_state` is the manifest entry's statement of the device's state.
+    `delays`, one per channel in capture frames (none when empty), are added to
+    where every play's and every extra's sound lies on that channel.
     """
 
     role: str = "mic"
@@ -184,6 +186,7 @@ class Capture:
     recorded: bool = True
     in_run: bool = True
     device_state: JsonObject = field(default_factory=lambda: dict(READ_STATE))
+    delays: tuple[float, ...] = ()
 
     def capture_frame(self, x: float) -> float:
         """The capture frame of stream frame `x`: losses across which the
@@ -372,26 +375,16 @@ def _capture(
     if c.refuse is not None:
         log.write_text(json.dumps({"status": c.status, "stderr": c.refuse}))
         return entry, _account(c, c.account or Account("stopped", c.frames, 0, ()))
-    sound = np.zeros(c.frames)
-    for play in plays:
-        carried = built.carried[(play.role, play.play)]
-        if carried is None:
-            continue
-        r = ratio(play, c)
-        for code, span in (
-            (carried.start_code, carried.start),
-            (carried.end_code, carried.end),
-        ):
-            if play.sounds(span.frame + span.frames):
-                _sound(sound, code, play.at + r * span.frame, play.rate_hz * r, play.level)
-    for extra in extras:
-        start, end = marker.codes(extra.member)
-        code = start if extra.which == "start" else end
-        scale = c.rate_hz / extra.rate_hz
-        _sound(sound, code, extra.at, extra.rate_hz * scale, extra.level)
+    if c.delays and len(c.delays) != len(c.layout):
+        raise ValueError(f"{len(c.delays)} delays for {len(c.layout)} channels")
     gains = c.gains or (1.0,) * len(c.layout)
+    delays = c.delays or (0.0,) * len(c.layout)
+    sounds = {d: _scene_sound(c, plays, built, extras, d) for d in set(delays)}
     rng = np.random.default_rng(SEED)
-    channels = [g * sound + c.noise * rng.standard_normal(c.frames) for g in gains]
+    channels = [
+        g * sounds[d] + c.noise * rng.standard_normal(c.frames)
+        for g, d in zip(gains, delays, strict=True)
+    ]
     for index, content in enumerate(c.content):
         match content:
             case Silent():
@@ -450,6 +443,33 @@ def _account(c: Capture, account: Account) -> JsonObject:
         "loss_free": account.ended == "stopped" and not account.gaps and account.gaps_reported == 0,
         "failure": account.failure,
     }
+
+
+def _scene_sound(
+    c: Capture, plays: Sequence[Play], built: Built, extras: Sequence[Extra], delay: float
+) -> np.ndarray:
+    """The sound of every play and extra in capture `c`, `delay` frames later
+    than the scene places it.
+    """
+    sound = np.zeros(c.frames)
+    for play in plays:
+        carried = built.carried[(play.role, play.play)]
+        if carried is None:
+            continue
+        r = ratio(play, c)
+        for code, span in (
+            (carried.start_code, carried.start),
+            (carried.end_code, carried.end),
+        ):
+            if play.sounds(span.frame + span.frames):
+                first = play.at + r * span.frame + delay
+                _sound(sound, code, first, play.rate_hz * r, play.level)
+    for extra in extras:
+        start, end = marker.codes(extra.member)
+        code = start if extra.which == "start" else end
+        scale = c.rate_hz / extra.rate_hz
+        _sound(sound, code, extra.at + delay, extra.rate_hz * scale, extra.level)
+    return sound
 
 
 def _sound(sound: np.ndarray, code: int, first: float, frames_per_s: float, level: float) -> None:

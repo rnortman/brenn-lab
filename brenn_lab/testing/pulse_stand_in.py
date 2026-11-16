@@ -17,7 +17,7 @@ from typing import IO
 from brenn_lab import pinned
 from brenn_lab.data import JsonObject, JsonValue
 
-STAND_IN = "_main/brenn_lab/playback/pulse_client/pulse-stand-in"
+STAND_IN = "brenn_lab/brenn_lab/playback/pulse_client/pulse-stand-in"
 
 
 def sink(name: str, description: str | None = None, **fields: JsonValue) -> JsonObject:

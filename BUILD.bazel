@@ -1,38 +1,16 @@
-load("@buildifier_prebuilt//:rules.bzl", "buildifier", "buildifier_test")
+# A dependant loads this package to read `requirements.in`, so nothing in it
+# may load a dev-dependency repository: one that is absent when this module is
+# not the root fails the whole package. The gate's buildifier targets live in
+# //tools/buildifier for that reason.
 load("@rules_python//python/uv:lock.bzl", "lock")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 exports_files([
     "MODULE.bazel",
     "mypy.ini",
+    "requirements.in",
     "ruff.toml",
 ])
-
-# BUILD-file formatting and lint. The test scans the whole workspace rather
-# than a `srcs` list because a glob in the root package cannot see files in
-# other packages; `no_sandbox` is what buildifier_prebuilt requires for that,
-# and the wrapper tags the test no-cache so it always reruns.
-BUILDIFIER_EXCLUDES = [
-    "./.git/*",
-    "./bazel-*/*",
-]
-
-buildifier(
-    name = "buildifier",
-    exclude_patterns = BUILDIFIER_EXCLUDES,
-    lint_mode = "fix",
-    mode = "fix",
-)
-
-buildifier_test(
-    name = "buildifier_test",
-    size = "small",
-    exclude_patterns = BUILDIFIER_EXCLUDES,
-    lint_mode = "warn",
-    mode = "diff",
-    no_sandbox = True,
-    workspace = "//:MODULE.bazel",
-)
 
 # `bazel run //:requirements.update` rewrites requirements_lock.txt from
 # requirements.in, with the pinned uv and the hermetic interpreter. The lock
@@ -46,7 +24,8 @@ lock(
 )
 
 # Python format and lint over every Python file in the working tree, including
-# files no target owns. Unsandboxed for the same reason as //:buildifier_test.
+# files no target owns. Unsandboxed for the same reason as
+# //tools/buildifier:buildifier_test.
 sh_test(
     name = "ruff_test",
     size = "small",

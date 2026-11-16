@@ -1,8 +1,9 @@
 """brenn-pod's two programs, at the commit MODULE.bazel pins.
 
 `pod-capture` is the recorder the runner carries; `frame-log` is the reader of
-the log it writes. In a dependant's runfiles they are
-`_main/tools/brenn_pod/pod-capture` and `_main/tools/brenn_pod/frame-log`.
+the log it writes. A runfiles lookup names them
+`brenn_lab/tools/brenn_pod/pod-capture` and `brenn_lab/tools/brenn_pod/frame-log`,
+which the repository mapping resolves whether or not this module is the root.
 """
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")

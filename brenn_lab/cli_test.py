@@ -114,6 +114,8 @@ def test_a_dry_run_and_a_run(tmp_path: Path) -> None:
         # means the stamping is broken, not that the tree is not a checkout.
         assert harness["reason"] != "the build ran no workspace status command"
     assert manifest["repositories"][0] == {**harness, "from": "the harness's build stamp"}
+    # Built as the root module, the runner's stamp names no other builder.
+    assert manifest["builder"] is None
     assert manifest["script"]["given_as"] == str(script)
 
 

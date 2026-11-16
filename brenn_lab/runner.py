@@ -23,7 +23,7 @@ from typing import Any
 
 from brenn_lab import labconfig, streams
 from brenn_lab.account import Account
-from brenn_lab.buildinfo import Revision
+from brenn_lab.buildinfo import Stamp
 from brenn_lab.data import (
     COMMANDS,
     ROLE_ERROR,
@@ -742,13 +742,15 @@ def run(
     script_given_as: str,
     out: Path,
     notes_path: Path | None,
-    harness: Revision,
+    stamp: Stamp,
     workspace: Path | None,
     pinned: Mapping[str, str],
 ) -> JsonObject | Refused:
     """Run the script and return the pointer to its results, or refuse. A
     relative `out` is taken from the current directory. `pinned` maps each
-    program the build pins to the path this process carries it at.
+    program the build pins to the path this process carries it at. `stamp` is
+    the runner's build stamp, which the manifest's `harness` and `builder`
+    state.
 
     Must be called on the main thread: it takes SIGINT and SIGTERM for the
     length of the run.
@@ -769,7 +771,7 @@ def run(
             script_given_as,
             out,
             notes_path,
-            harness,
+            stamp,
             workspace,
             pinned,
             held,
@@ -819,7 +821,7 @@ def _held_run(
     script_given_as: str,
     out: Path,
     notes_path: Path | None,
-    harness: Revision,
+    stamp: Stamp,
     workspace: Path | None,
     pinned: Mapping[str, str],
     held: streams.Held,
@@ -871,7 +873,7 @@ def _held_run(
             (lab_path.name, lab_data),
             (script_path.name, script_data),
             notes,
-            harness,
+            stamp,
             unreachable,
             pinned,
         )
@@ -919,7 +921,7 @@ def _run(
     lab: tuple[str, bytes],
     source: tuple[str, bytes],
     notes: tuple[str, bytes] | None,
-    harness: Revision,
+    stamp: Stamp,
     unreachable: dict[str, Failure],
     pinned: Mapping[str, str],
 ) -> tuple[JsonObject, _ThreadRaises]:
@@ -945,7 +947,8 @@ def _run(
         "run_id": run_id,
         "created": encode_value(started),
         "runner": {"machine": machine},
-        "harness": harness.encode(),
+        "harness": stamp.harness.encode(),
+        "builder": None if stamp.builder is None else stamp.builder.encode(),
         "script": {
             "file": script_file,
             "sha256": hashlib.sha256(source[1]).hexdigest(),
@@ -954,7 +957,7 @@ def _run(
         },
         "lab": {"file": lab_file, "sha256": hashlib.sha256(lab[1]).hexdigest()},
         "notes": None if notes_file is None else {"file": notes_file},
-        "repositories": [{**harness.encode(), "from": "the harness's build stamp"}],
+        "repositories": [{**stamp.harness.encode(), "from": "the harness's build stamp"}],
         "roles": manifest_roles,
     }
     rundir.write_manifest(manifest)

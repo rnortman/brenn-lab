@@ -293,6 +293,7 @@ temporary file, then a rename) each time a capture or a play starts.
  "created": {…clock reading, runner's machine…},
  "runner": {"machine": "bench"},
  "harness": {"repository": "brenn-lab", "commit": "<40 hex>", "dirty": false, "source": "git"},
+ "builder": null,
  "script": {"file": "script/ten_seconds.py", "sha256": "…", "given_as": "examples/ten_seconds.py",
             "roles": {"mic": "capture"}},
  "lab": {"file": "lab/lab.toml", "sha256": "…"},
@@ -316,11 +317,22 @@ temporary file, then a rename) each time a capture or a play starts.
 - `harness`: the revision of brenn-lab the runner was built from, from its
   build stamp (see *The harness's revision*). When that is not known:
   `{"repository": "brenn-lab", "commit": null, "dirty": null, "source": "unknown", "reason": "…"}`.
+- `builder`: `null` when brenn-lab built the runner itself. When another
+  repository built it (*Running the runner from another repository* in
+  `experiments.md`), that repository's revision, from the same stamp, in the
+  `harness` block's form: `{"repository": "<name>", "commit": "<hex>", "dirty":
+  false, "source": "git"}`, or `commit` and `dirty` `null`, `source`
+  `unknown` and a `reason` when its tree was not a git checkout or git
+  failed. The script is kept byte for byte, but nothing it imports is; when
+  the script imports that repository's own Python, this is the revision that
+  says which. Added in layout 5 without a change of number (*The version
+  rule*); a reader of an older run takes its absence as `null`.
 - `script.given_as`: the `--script` argument as the caller typed it.
   `script.roles`: the script's `ROLES`.
 - `notes`: `null` when no notes file was given.
-- `repositories`: the revision of every repository involved, each entry saying
-  where it came from.
+- `repositories`: brenn-lab's revision and every repository a recorder
+  reported, each entry saying where it came from. The repository that built
+  the runner, when it is not brenn-lab, is in `builder` and never here.
   - The first is always brenn-lab: the `harness` block plus `from`.
   - A recorder's entry is the recorder's repository and its build as the
     recorder reported it at the start of a capture, plus `from`, which names
@@ -495,6 +507,25 @@ A runner built earlier and started directly reports the tree as it was at its
 build, not as it is now. `source` is `git` when the stamp holds a commit, and
 `unknown` with a `reason` when the workspace was not a git checkout or git
 failed.
+
+The stamp is copied from the stable keys of the workspace status command of
+the workspace that built the runner:
+
+- `STABLE_BRENN_LAB_COMMIT` and `STABLE_BRENN_LAB_DIRTY`: brenn-lab's commit
+  and whether a tracked file differed from it, or `unknown` for both. They
+  give `harness`. brenn-lab's own `tools/buildinfo/status.sh` prints them for
+  its own checkout. Another repository that builds the runner prints them for
+  the brenn-lab tree it builds from, since only it knows which that is; a
+  build whose status command prints neither states `harness` as `unknown`,
+  with the reason that no workspace status command ran.
+- `STABLE_BRENN_LAB_BUILDER_REPOSITORY`, `STABLE_BRENN_LAB_BUILDER_COMMIT` and
+  `STABLE_BRENN_LAB_BUILDER_DIRTY`: optional, printed only by another
+  repository that builds the runner. When the first is present the three give
+  `builder`. The repository's name matches `[A-Za-z0-9][A-Za-z0-9._-]*`; its
+  commit and dirty flag take the forms brenn-lab's do, `unknown` for both
+  included. A stamp whose builder keys are in any other form is refused, as a
+  malformed stamp always is: `run`, `align` and `assess` exit with status 3
+  before they write anything.
 
 ## `journal.jsonl`
 

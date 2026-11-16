@@ -156,6 +156,9 @@ impl Client {
             .ok_or_else(|| refuse("request", "no stream is open"))
     }
 
+    // TODO(sink-advertising-passthrough-formats-refused): a sink whose
+    // description lists compressed passthrough formats beside PCM fails here
+    // and below with "invalid format encoding".
     fn sinks(&mut self) -> Answer {
         let sinks: SinkInfoList = self
             .conn

@@ -57,9 +57,10 @@ py_library(
 )
 
 # A known speech clip, the talker the tests play; README.md holds its licence.
+# Public: experimenters, in this repository or another, take it as a source.
 exports_files(
     ["speech/arctic_a0001.wav"],
-    visibility = ["//brenn_lab:__subpackages__"],
+    visibility = ["//visibility:public"],
 )
 
 py_pytest_test(
@@ -111,11 +112,13 @@ py_library(
     visibility = ["//brenn_lab:__subpackages__"],
 )
 
+# Synthetic run directories, with `export_stand_in` as their reader. Public, so
+# that another repository's tests align a synthetic run through this code.
 py_library(
     name = "scenes",
     testonly = True,
     srcs = ["scenes.py"],
-    visibility = ["//brenn_lab:__subpackages__"],
+    visibility = ["//visibility:public"],
     deps = [
         "//brenn_lab",
         "@pypi_lab//numpy",
@@ -182,7 +185,7 @@ py_binary(
     name = "export_stand_in",
     testonly = True,
     srcs = ["export_stand_in.py"],
-    visibility = ["//brenn_lab:__subpackages__"],
+    visibility = ["//visibility:public"],
 )
 
 py_binary(

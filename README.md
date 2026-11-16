@@ -68,6 +68,10 @@ each failure names the log behind it.
 
 Roles on other machines cannot be reached.
 
+Experiments can live in another repository that depends on this one as a Bazel
+module and declares its own runner, as *Running the runner from another
+repository* in `docs/reference/experiments.md` describes.
+
 - `docs/reference/experiments.md`: the lab configuration, writing a script,
   the capture and playback roles, the dry run and the run, marking a source,
   aligning a run and assessing one.

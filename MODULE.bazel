@@ -103,18 +103,25 @@ register_toolchains("@rust_toolchains//:all")
 # required, not optional: a crate.spec without it applies to every hub in the
 # module. Pinned by the two files under tools/scrub; `make repin` re-renders
 # every hub (CARGO_BAZEL_REPIN applies to every hub this extension declares).
-crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
-crate.spec(
+# The two gate tools' hubs are declared through a dev-dependency proxy: they are
+# this repository's gate, a module that depends on this one has its own, and two
+# modules may not declare hubs of the same name.
+crate_dev = use_extension(
+    "@rules_rust//crate_universe:extensions.bzl",
+    "crate",
+    dev_dependency = True,
+)
+crate_dev.spec(
     package = "brenn-scrub",
     repositories = ["scrub_crates"],
     version = "=0.2.0",
 )
-crate.annotation(
+crate_dev.annotation(
     crate = "brenn-scrub",
     gen_binaries = ["brenn-scrub"],
     repositories = ["scrub_crates"],
 )
-crate.from_specs(
+crate_dev.from_specs(
     name = "scrub_crates",
     cargo_lockfile = "//tools/scrub:Cargo.lock",
     lockfile = "//tools/scrub:cargo-bazel-lock.json",
@@ -123,21 +130,22 @@ crate.from_specs(
 # allthechanges, the changelog and TODO fragment tool, from crates.io, in a hub
 # of its own for the same reason. Pinned by the two files under
 # tools/allthechanges.
-crate.spec(
+crate_dev.spec(
     package = "allthechanges",
     repositories = ["allthechanges_crates"],
     version = "=0.3.0",
 )
-crate.annotation(
+crate_dev.annotation(
     crate = "allthechanges",
     gen_binaries = ["allthechanges"],
     repositories = ["allthechanges_crates"],
 )
-crate.from_specs(
+crate_dev.from_specs(
     name = "allthechanges_crates",
     cargo_lockfile = "//tools/allthechanges:Cargo.lock",
     lockfile = "//tools/allthechanges:cargo-bazel-lock.json",
 )
+use_repo(crate_dev, "allthechanges_crates", "scrub_crates")
 
 # TODO(pin-brenn-python-binding): brenn's Python binding will be built from a
 # brenn commit pinned here.
@@ -160,6 +168,7 @@ BRENN_POD_COMMIT = "5a55610ba6e84fe484291ed83a442bccbfd853f2"
 
 BRENN_POD_REMOTE = "https://github.com/rnortman/brenn-pod.git"
 
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.spec(
     git = BRENN_POD_REMOTE,
     package = "pod-capture",
@@ -244,11 +253,9 @@ crate.from_specs(
 )
 use_repo(
     crate,
-    "allthechanges_crates",
     "frame_log_crates",
     "pod_capture_crates",
     "pulse_client_crates",
-    "scrub_crates",
 )
 
 # --- gitleaks -------------------------------------------------------------

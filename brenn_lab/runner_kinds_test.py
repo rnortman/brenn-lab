@@ -15,7 +15,7 @@ import pytest
 import brenn_lab
 from brenn_lab import roles, runner
 from brenn_lab.account import Account, Pointer
-from brenn_lab.buildinfo import Revision
+from brenn_lab.buildinfo import Revision, Stamp
 from brenn_lab.config_table import Table
 from brenn_lab.data import (
     Check,
@@ -36,7 +36,7 @@ from brenn_lab.place import Place
 from brenn_lab.roles import EventSink, Kind, Role
 
 MACHINE = "bench"
-HARNESS = Revision(commit="0123456789abcdef0123456789abcdef01234567", dirty=False, source="git")
+STAMP = Stamp(Revision("brenn-lab", "0123456789abcdef0123456789abcdef01234567", False, "git"), None)
 
 
 def _kind_packages() -> set[str]:
@@ -248,7 +248,7 @@ def _inputs(tmp_path: Path, breaks: bool, pings: int = 1) -> tuple[Path, Path]:
 
 def _run(tmp_path: Path, lab: Path, script: Path) -> tuple[Path, Any, Any]:
     out = tmp_path / "run"
-    pointer = runner.run(lab, MACHINE, script, str(script), out, None, HARNESS, None, {})
+    pointer = runner.run(lab, MACHINE, script, str(script), out, None, STAMP, None, {})
     assert isinstance(pointer, dict), pointer
     manifest = json.loads((out / "manifest.json").read_text())
     results = json.loads((out / "results.json").read_text())

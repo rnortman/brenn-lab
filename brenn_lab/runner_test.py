@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from brenn_lab import runner
-from brenn_lab.buildinfo import Revision
+from brenn_lab.buildinfo import Revision, Stamp
 from brenn_lab.data import JsonObject, JsonValue
 from brenn_lab.rundir import RunDir
 from brenn_lab.runner import Refused
@@ -30,7 +30,11 @@ from brenn_lab.testing.transcript_files import layout_of
 STAND_IN = os.path.abspath(os.environ["STAND_IN"])
 EXAMPLE = Path(os.path.abspath(os.environ["EXAMPLE"]))
 MACHINE = "bench"
-HARNESS = Revision(commit="0123456789abcdef0123456789abcdef01234567", dirty=False, source="git")
+HARNESS = Revision("brenn-lab", "0123456789abcdef0123456789abcdef01234567", False, "git")
+STAMP = Stamp(HARNESS, None)
+BUILT_BY = Revision(
+    "brenn-pod-experiments", "89abcdef0123456789abcdef0123456789abcdef", True, "git"
+)
 # Where the runner carries the pinned recorder: no executable, so a role that
 # took it in place of a configured path fails with recorder_missing.
 PINNED = {"pod_capture": "/nonexistent/pinned/pod-capture"}
@@ -114,13 +118,14 @@ def do_run(
     workspace: Path | None = None,
     pinned: Mapping[str, str] = PINNED,
     unlisted: frozenset[str] = frozenset(),
+    stamp: Stamp = STAMP,
 ) -> tuple[Path, Any, Any]:
     """Run, and hold the run's pointer, its results and its logs; `unlisted`
     is as for `check_logs`.
     """
     out = tmp_path / "run"
     pointer = runner.run(
-        lab_path, MACHINE, script_path, str(script_path), out, notes, HARNESS, workspace, pinned
+        lab_path, MACHINE, script_path, str(script_path), out, notes, stamp, workspace, pinned
     )
     assert isinstance(pointer, dict), pointer
     assert pointer["run"] == str(out)
@@ -185,6 +190,7 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
     assert manifest["layout"] == 5
     assert results["schema"] == 3
     assert manifest["harness"] == HARNESS.encode()
+    assert manifest["builder"] is None
     assert manifest["runner"] == {"machine": MACHINE}
     assert (out / manifest["script"]["file"]).read_bytes() == EXAMPLE.read_bytes()
     assert (out / manifest["lab"]["file"]).read_bytes() == lab_path.read_bytes()
@@ -275,6 +281,24 @@ def test_a_whole_experiment(tmp_path: Path) -> None:
         (stream, {"machine": MACHINE, "path": str(out / "logs" / "mic" / f"recorder-0001.{name}")})
         for stream, name in (("stdout", "stdout.jsonl"), ("stderr", "stderr.log"))
     ]
+
+
+def test_a_runner_built_by_another_repository_states_its_builder(tmp_path: Path) -> None:
+    lab_path = lab(tmp_path, {"mic": ("clean", MACHINE)})
+    script_path = script(tmp_path, START_WAIT_STOP)
+    _, manifest, _ = do_run(tmp_path, lab_path, script_path, stamp=Stamp(HARNESS, BUILT_BY))
+    assert manifest["builder"] == {
+        "repository": "brenn-pod-experiments",
+        "commit": "89abcdef0123456789abcdef0123456789abcdef",
+        "dirty": True,
+        "source": "git",
+    }
+    assert manifest["harness"] == HARNESS.encode()
+    # The list is what the same run has without a builder: the harness, then
+    # the recorder.
+    repositories = manifest["repositories"]
+    assert repositories[0] == {**HARNESS.encode(), "from": "the harness's build stamp"}
+    assert [r["repository"] for r in repositories] == ["brenn-lab", "brenn-pod"]
 
 
 @pytest.mark.parametrize("name", ["clean", "state_not_attempted", "state_unavailable"])
@@ -479,7 +503,7 @@ def test_a_relative_out_is_taken_from_the_current_directory(
     lab_path = lab(tmp_path, {"mic": ("clean", MACHINE)})
     monkeypatch.chdir(tmp_path)
     pointer = runner.run(
-        lab_path, MACHINE, EXAMPLE, str(EXAMPLE), Path("run"), None, HARNESS, None, PINNED
+        lab_path, MACHINE, EXAMPLE, str(EXAMPLE), Path("run"), None, STAMP, None, PINNED
     )
     assert isinstance(pointer, dict) and pointer["run"] == str(tmp_path / "run")
     results = json.loads((tmp_path / "run" / "results.json").read_text())
@@ -822,7 +846,7 @@ def test_a_release_does_not_wait_on_the_runners_files(
             "script.py",
             out,
             None,
-            HARNESS,
+            STAMP,
             None,
             PINNED,
         )
@@ -850,7 +874,7 @@ def test_a_release_does_not_wait_on_recording_the_scripts_end(
             "script.py",
             out,
             None,
-            HARNESS,
+            STAMP,
             None,
             PINNED,
         )
@@ -980,7 +1004,7 @@ def test_a_release_raise_whose_note_cannot_be_written_ends_the_run(
             "script.py",
             out,
             None,
-            HARNESS,
+            STAMP,
             None,
             PINNED,
         )
@@ -1015,7 +1039,7 @@ def test_a_run_whose_log_cannot_say_it_could_not_be_finished(
             "script.py",
             out,
             None,
-            HARNESS,
+            STAMP,
             None,
             PINNED,
         )
@@ -1172,7 +1196,7 @@ def refused(
 ) -> list[tuple[JsonValue, JsonValue]]:
     before = created(tmp_path)
     result = runner.run(
-        lab_path, MACHINE, script_path, str(script_path), out, None, HARNESS, workspace, PINNED
+        lab_path, MACHINE, script_path, str(script_path), out, None, STAMP, workspace, PINNED
     )
     assert isinstance(result, Refused), result
     assert created(tmp_path) == before
@@ -1204,7 +1228,7 @@ def test_what_a_run_refuses(tmp_path: Path) -> None:
     assert refused(tmp_path, lab_path, missing, tmp_path / "run") == [("arguments", "unreadable")]
     before = created(tmp_path)
     result = runner.run(
-        lab_path, MACHINE, EXAMPLE, str(EXAMPLE), tmp_path / "run", missing, HARNESS, None, PINNED
+        lab_path, MACHINE, EXAMPLE, str(EXAMPLE), tmp_path / "run", missing, STAMP, None, PINNED
     )
     assert isinstance(result, Refused)
     assert [(p.where, p.reason) for p in result.problems] == [("arguments", "unreadable")]
@@ -1213,7 +1237,7 @@ def test_what_a_run_refuses(tmp_path: Path) -> None:
     broken.write_text("schema = 1\nmachines = 3\n")
     assert refused(tmp_path, broken, EXAMPLE, tmp_path / "run")[0][0] == "lab"
     result = runner.run(
-        lab_path, "elsewhere", EXAMPLE, str(EXAMPLE), tmp_path / "run", None, HARNESS, None, PINNED
+        lab_path, "elsewhere", EXAMPLE, str(EXAMPLE), tmp_path / "run", None, STAMP, None, PINNED
     )
     assert isinstance(result, Refused)
     assert [p.reason for p in result.problems] == ["unknown_machine"]
@@ -1258,7 +1282,7 @@ DRIVER = """\
 import os, sys
 from pathlib import Path
 from brenn_lab import runner, rundir
-from brenn_lab.buildinfo import Revision
+from brenn_lab.buildinfo import Revision, Stamp
 
 die_after_create = sys.argv[5] == "die_after_create"
 if die_after_create:
@@ -1266,7 +1290,7 @@ if die_after_create:
         os._exit(9)
     rundir.RunDir.keep = keep
 runner.run(Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]), sys.argv[3], Path(sys.argv[4]),
-           None, Revision(None, None, "unknown", "test"), None, {})
+           None, Stamp(Revision("brenn-lab", None, None, "unknown", "test"), None), None, {})
 """
 
 

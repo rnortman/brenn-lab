@@ -178,6 +178,21 @@ def test_positions_map_through_runs_to_the_capture_index(tmp_path: Path) -> None
         exported.capture_frame(30.0)
 
 
+def test_capture_frames_map_back_through_runs_to_the_export(tmp_path: Path) -> None:
+    exported = holed(tmp_path)
+    assert exported.position(3) == 3
+    assert exported.position(15) == 15
+    assert exported.position(21) == 24
+    assert exported.position(26) == 29
+    for run in HOLED_RUNS:
+        for wav_frame in range(run["wav_frame"], run["wav_frame"] + run["frames"]):
+            assert exported.position(int(exported.capture_frame(wav_frame))) == wav_frame
+    # Capture frames 10-13 were lost and measured; 27 is past the last run.
+    for frame in (10, 13, 27, -1):
+        with pytest.raises(ValueError, match="in no run"):
+            exported.position(frame)
+
+
 def test_a_span_touches_a_hole_it_overlaps_or_straddles(tmp_path: Path) -> None:
     exported = holed(tmp_path)
     assert not exported.touches_hole(0, 10)

@@ -116,7 +116,7 @@ todo-gather:
 fix:
 	bazel run //tools/ruff:fix
 	bazel run @rules_rust//:rustfmt
-	bazel run //:buildifier
+	bazel run //tools/buildifier
 
 # Re-renders the five crate hubs with the pinned cargo: the two gate tools',
 # tools/scrub's and tools/allthechanges's, the two programs pinned from
