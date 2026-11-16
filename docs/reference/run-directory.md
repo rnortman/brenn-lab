@@ -1578,6 +1578,8 @@ offset is constant across a play with no underrun; correlation finds it once.
 `lab align` is that correlation for a marked source: it reports the offset
 and the drift between the markers in `alignment.json`, reading no clock.
 
+<!-- TODO(capture-timeline-steps-while-device-plays): on one run of a device playing and recording at once the offset stepped within single plays; the sentence above on a constant offset is this entry's. -->
+
 A play on a sound-server sink is no clock tie at all. The server resamples
 and remixes the role's frames on their way to the device, so no frame of the
 kept copy is a sample on the device's clock, a `pulse` role may state no
