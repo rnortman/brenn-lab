@@ -27,6 +27,7 @@ CHIPS = 1023
 CHIP_HZ = 2000
 """Chips per second, and the carrier's frequency."""
 DURATION_MS = 512
+# TODO(marker-level-fixed-at-half-scale): a caller cannot choose the level.
 AMPLITUDE = 0.5
 """The marker's peak, as a fraction of full scale."""
 MEMBERS = 511
