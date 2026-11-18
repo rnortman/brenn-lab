@@ -1377,6 +1377,8 @@ device the harness drives has a channel that is zero by design, such as a
 playback reference with nothing played; on such a channel `channel_silent`
 would fire, and no device can yet say that a channel may be silent.
 
+<!-- TODO(capture-channel-silent-by-design): a capture device cannot name the channels that may hold nothing but zeros. -->
+
 **The two witnesses of loss.** The recorder's witness is the capture's record
 in `results.json`: its `gaps`, `gaps_reported`, `frames` and `ended`. The
 reader's is its map: the holes, the runs and the tail. For a capture the
